@@ -74,6 +74,8 @@ def parser():
 def run(args):
     if args.command == 'context':
         return {'action':context_action(args.used, args.safe_boundary)}
+    args.config = str(Path(args.config).expanduser().resolve())
+    args.state = str(Path(args.state).expanduser().resolve())
     config = load(args.config)
     if args.command == 'doctor':
         return {'config':'valid', 'herdr_managed':os.environ.get('HERDR_ENV') == '1',
@@ -163,7 +165,7 @@ def run(args):
             except BaseException:
                 # Delivery may have occurred even when the CLI timed out.
                 current = store.get(args.task)
-                if current['state'] in ('launching','submitted','running'):
+                if current['state'] in ('launching','submitted'):
                     store.update(args.task, owner, 'uncertain', {'reason':'inspect runtime; do not resubmit'})
                 raise
             return store.get(args.task)
@@ -181,7 +183,9 @@ def run(args):
                 Herdr().prompt(task['runtime']['name'], Path(args.message_file).read_text()+
                                '\nAfter processing, park the leader through the task ledger.')
             except BaseException:
-                store.update(args.task, task['owner'], 'uncertain', {'reason':'tell outcome unknown'})
+                current = store.get(args.task)
+                if current['state'] == 'running':
+                    store.note(args.task, task['owner'], {'reason':'tell wait failed after known owner; inspect before further input'})
                 raise
             return store.get(args.task)
         if args.command == 'receipt':
@@ -199,7 +203,9 @@ def run(args):
             evidence.update(head=head, dirty=bool(git(task['root'],'status','--porcelain')) if task['basis_kind'] == 'git' else False,
                             worktree_fingerprint=task_fingerprint(task, config))
             return store.handoff(args.task, args.owner, evidence, args.writer_stopped)
-        return store.complete(args.task, args.owner, head, evidence['verification'])
+        if task['role'] == 'reviewer' and (task['basis_kind'] != 'git' or git(task['root'],'status','--porcelain')):
+            raise ValueError('review completion requires a clean pinned Git worktree')
+        return store.complete(args.task, args.owner, head, evidence['verification'], evidence.get('reviewed_head'))
     finally:
         store.close()
 

@@ -26,7 +26,7 @@ python3 teamkit_cli.py handoff TASK-1 --owner OWNER --writer-stopped --evidence-
 
 현재 HEAD·dirty 상태·worktree 지문을 추가해 보존합니다. 계정 변경 후에도 같은 작업 ID를 사용하며, 지문·HEAD가 달라졌으면 먼저 대조합니다. `--writer-stopped`는 운영자가 확인한 사실의 기록이지 실행 중 프로세스를 종료하는 명령이 아닙니다.
 
-검증을 끝낸 워커는 같은 파일 형식의 `verification` 근거로 `complete`를 호출합니다. 결과는 `awaiting_review`이며, 독립 검토가 남습니다. 기밀·원본 diff는 근거 파일이나 공개 PR에 복사하지 않습니다.
+검증을 끝낸 워커는 같은 파일 형식의 `verification` 근거로 `complete`를 호출합니다. 수신 확인된 running 상태에서만 완료할 수 있습니다. 결과는 `awaiting_review`이며, 독립 검토가 남습니다. 리뷰어는 추가로 `reviewed_head`에 기준 SHA를 기록하고, 현재 HEAD가 같고 작업 트리가 clean일 때만 완료할 수 있습니다. 기밀·원본 diff는 근거 파일이나 공개 PR에 복사하지 않습니다.
 
 ## 컨텍스트와 측정
 

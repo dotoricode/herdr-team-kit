@@ -124,6 +124,9 @@ class StoreTests(unittest.TestCase):
             self.db.complete('T1', 'wrong', 'b'*40, ['test passed'])
         with self.assertRaises(ValueError):
             self.db.complete('T1', 'o1', 'b'*40, [])
+        self.db.update('T1', 'o1', 'launching', {})
+        self.db.update('T1', 'o1', 'submitted', {})
+        self.db.update('T1', 'o1', 'running', {'identity_checked':True})
         self.db.complete('T1', 'o1', 'b'*40, ['python -m unittest: pass'])
         self.assertEqual(self.db.get('T1')['state'], 'awaiting_review')
 
@@ -170,9 +173,6 @@ class HerdrTests(unittest.TestCase):
                 launch_spec('codex', p, None)
 
 
-if __name__ == '__main__':
-    unittest.main()
-
 class LeaderTests(unittest.TestCase):
     def test_idle_leaders_do_not_consume_capacity(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -201,3 +201,45 @@ class LeaderTests(unittest.TestCase):
                 with self.assertRaises(ValueError): db.claim('B', 'o2', 'codex', 'team', 'm', 'medium')
             finally:
                 db.close()
+
+class ReviewStoreRegressionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.db=Store(Path(self.tmp.name)/'state.sqlite')
+
+    def tearDown(self):
+        self.db.close();self.tmp.cleanup()
+
+    def claimed(self,role='implementer'):
+        self.db.create('T', 'alpha', role, '/workspace', 'a'*40, 'work')
+        self.db.claim('T','owner','codex','team','m','medium')
+
+    def running(self,role='implementer'):
+        self.claimed(role)
+        self.db.update('T','owner','launching',{})
+        self.db.update('T','owner','submitted',{})
+        self.db.update('T','owner','running',{'identity_checked':True})
+
+    def test_completion_cannot_release_lock_before_receipt(self):
+        self.claimed()
+        with self.assertRaises(ValueError):self.db.complete('T','owner','b'*40,['test passed'])
+        self.assertEqual(self.db.get('T')['state'],'claimed')
+
+    def test_completion_cannot_release_uncertain_writer(self):
+        self.running()
+        self.db.update('T','owner','uncertain',{})
+        with self.assertRaises(ValueError):self.db.complete('T','owner','b'*40,['test passed'])
+        self.assertEqual(self.db.get('T')['state'],'uncertain')
+
+    def test_reviewer_completion_requires_unchanged_reviewed_sha(self):
+        self.running('reviewer')
+        with self.assertRaises(ValueError):self.db.complete('T','owner','b'*40,['reviewed A'])
+        self.assertEqual(self.db.get('T')['state'],'running')
+
+    def test_pinned_reviewer_completion_succeeds(self):
+        self.running('reviewer')
+        self.db.complete('T','owner','a'*40,['reviewed pinned tree'],reviewed_head='a'*40)
+        self.assertEqual(self.db.get('T')['head'],'a'*40)
+
+
+if __name__ == '__main__':
+    unittest.main()

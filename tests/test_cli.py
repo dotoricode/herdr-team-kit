@@ -16,7 +16,7 @@ from teamkit.runtime import RuntimeError
 from teamkit.store import Store
 
 
-class IntegrationTests(unittest.TestCase):
+class Fixture(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
@@ -42,6 +42,7 @@ class IntegrationTests(unittest.TestCase):
     def create(self):
         return self.call('create','T1','--team','alpha','--root',str(self.repo),'--goal-file',str(self.root/'goal.txt'))
 
+class IntegrationTests(Fixture):
     def test_cli_create_route_and_events(self):
         self.assertEqual(self.create()['state'], 'queued')
         self.assertEqual(self.call('route','--provider','codex')['action'], 'wait')
@@ -106,5 +107,37 @@ class StoreContext:
     def __enter__(self): return self.store
     def __exit__(self,*args): self.store.close()
 
+
+class ReviewRegressionTests(Fixture):
+    def seed_quota(self):
+        now = time.time()
+        with StoreContext(self.state) as db:
+            db.quota('codex/team', {'binding':binding(self.value['profiles']['codex']['team']), 'observed_at':now,
+                                  'five_hour':{'used':1,'resets_at':now+900},'weekly':{'used':1,'resets_at':now+900}})
+
+    def test_confirmed_receipt_survives_transport_timeout(self):
+        self.create(); self.seed_quota()
+        def received_then_timeout(*args):
+            with StoreContext(self.state) as db:
+                task = db.get('T1')
+                db.update('T1', task['owner'], 'running', {'identity_checked':True})
+            raise RuntimeError('wait timed out after receipt')
+        with patch.dict(os.environ, {'HERDR_ENV':'1'}), patch('teamkit.providers.identity'), patch('teamkit.__main__.Herdr') as h:
+            h.return_value.launch.return_value = {'name':'fixture','pane':'w1:p1'}
+            h.return_value.prompt.side_effect = received_then_timeout
+            with self.assertRaises(RuntimeError): self.call('dispatch','T1')
+        self.assertEqual(self.call('show','T1')['state'],'running')
+
+    def test_quoted_tilde_is_normalized_in_receipt_and_environment(self):
+        self.create(); self.seed_quota()
+        with patch.dict(os.environ, {'HERDR_ENV':'1', 'HOME':str(self.root)}), patch('teamkit.providers.identity'), patch('teamkit.__main__.Herdr') as h:
+            h.return_value.launch.return_value = {'name':'fixture','pane':'w1:p1'}
+            args = parser().parse_args(['--config','~/config.json','--state','~/state.sqlite','dispatch','T1'])
+            run(args)
+            env = h.return_value.launch.call_args.args[1]['env']
+            self.assertEqual(env['TEAMKIT_CONFIG'],str(self.config.resolve()))
+            self.assertEqual(env['TEAMKIT_STATE'],str(self.state.resolve()))
+            prompt = h.return_value.prompt.call_args.args[1]
+            self.assertNotIn('/~/',prompt)
 
 if __name__ == '__main__': unittest.main()

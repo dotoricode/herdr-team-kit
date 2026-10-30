@@ -137,13 +137,15 @@ class Store:
             value.update(state='handed_off', owner=None, checkpoint=checkpoint)
             return self._save(value, 'handed_off', checkpoint)
 
-    def complete(self, task, owner, head, evidence):
+    def complete(self, task, owner, head, evidence, reviewed_head=None):
         if not sha(head) or not isinstance(evidence, list) or not evidence or not all(isinstance(x,str) and x.strip() for x in evidence):
             raise ValueError('completion requires full SHA and verification evidence')
         with self.transaction():
             value = self.get(task)
-            if value.get('owner') != owner or value['state'] not in ACTIVE:
-                raise ValueError('completion owner/state mismatch')
+            if value.get('owner') != owner or value['state'] != 'running' or not value.get('runtime', {}).get('identity_checked'):
+                raise ValueError('completion requires a running receipted owner')
+            if value['role'] == 'reviewer' and (reviewed_head != value['base'] or head != reviewed_head):
+                raise ValueError('reviewed SHA must match pinned base and current HEAD')
             value.update(state='awaiting_review', head=head, verification=evidence)
             return self._save(value, 'awaiting_review')
 
