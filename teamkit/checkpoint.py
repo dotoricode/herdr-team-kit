@@ -24,3 +24,48 @@ def fingerprint(root):
                 for chunk in iter(lambda: stream.read(65536), b''):
                     digest.update(chunk)
     return digest.hexdigest()
+
+
+from contextlib import contextmanager
+import os
+
+
+@contextmanager
+def revision_guard(root):
+    """Hold Git's index, HEAD and current branch locks while recording a review."""
+    root = Path(root).resolve()
+    acquired = []
+
+    def lock(git_path):
+        raw = git_bytes(root, 'rev-parse', '--git-path', git_path).decode().strip()
+        path = Path(raw)
+        if not path.is_absolute():
+            path = root/path
+        path = Path(str(path)+'.lock')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError as error:
+            raise ValueError('Git operation already in progress; retry review completion after it settles') from error
+        try:
+            acquired.append((path, os.fstat(fd).st_ino))
+        finally:
+            os.close(fd)
+
+    try:
+        lock('index')
+        lock('HEAD')
+        ref = subprocess.run(['git','-C',str(root),'symbolic-ref','-q','HEAD'], capture_output=True, text=True)
+        if ref.returncode == 0:
+            lock(ref.stdout.strip())
+        elif ref.returncode != 1:
+            raise ValueError('cannot determine reviewed HEAD')
+        yield
+    finally:
+        for path, inode in reversed(acquired):
+            try:
+                if path.stat().st_ino == inode:
+                    path.unlink()
+            except FileNotFoundError:
+                pass
+

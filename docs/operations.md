@@ -14,7 +14,7 @@
 
 진행 작업은 안전한 경계까지 유지합니다. 팀계정 복구는 새 작업부터 적용합니다. 같은 계정·같은 작업의 resume은 native CLI로 수행하고 기존 소유권을 유지합니다. 현재 dispatch는 교차 계정 인계 후 새 세션을 시작합니다. 인증 파일이나 세션 저장소를 공유하지 않습니다.
 
-시간 초과·전송 불명은 자동 재시도하지 않습니다. `show`와 `events`, Herdr 출력으로 실제 프로세스와 소유권을 확인합니다. 기존 작성 주체가 멈춘 것을 확인한 뒤 다음 형식의 로컬 파일로 인계합니다.
+시간 초과·전송 불명은 자동 재시도하지 않습니다. 같은 소유자의 늦은 receipt는 실제 프로필·계정 확인 후 running으로 복구할 수 있습니다. `show`와 `events`, Herdr 출력으로 실제 프로세스와 소유권을 확인합니다. 기존 작성 주체가 멈춘 것을 확인한 뒤 다음 형식의 로컬 파일로 인계합니다.
 
 ```json
 {"verification": ["command, result, and evidence location"], "next": "next bounded action"}
@@ -26,7 +26,7 @@ python3 teamkit_cli.py handoff TASK-1 --owner OWNER --writer-stopped --evidence-
 
 현재 HEAD·dirty 상태·worktree 지문을 추가해 보존합니다. 계정 변경 후에도 같은 작업 ID를 사용하며, 지문·HEAD가 달라졌으면 먼저 대조합니다. `--writer-stopped`는 운영자가 확인한 사실의 기록이지 실행 중 프로세스를 종료하는 명령이 아닙니다.
 
-검증을 끝낸 워커는 같은 파일 형식의 `verification` 근거로 `complete`를 호출합니다. 수신 확인된 running 상태에서만 완료할 수 있습니다. 결과는 `awaiting_review`이며, 독립 검토가 남습니다. 리뷰어는 추가로 `reviewed_head`에 기준 SHA를 기록하고, 현재 HEAD가 같고 작업 트리가 clean일 때만 완료할 수 있습니다. 기밀·원본 diff는 근거 파일이나 공개 PR에 복사하지 않습니다.
+검증을 끝낸 워커는 같은 파일 형식의 `verification` 근거로 `complete`를 호출합니다. 수신 확인된 running 상태에서만 완료할 수 있습니다. 결과는 `awaiting_review`이며, 독립 검토가 남습니다. 리뷰어는 추가로 `reviewed_head`에 기준 SHA를 기록하고, Git의 index·HEAD·현재 branch lock을 보유한 상태에서 현재 HEAD와 clean 여부를 확인해 완료합니다. 다른 Git 작업의 lock은 제거하지 않습니다. 프로세스 강제 종료로 자체 lock이 남으면 소유 프로세스 종료를 확인한 뒤 별도로 복구합니다. 기밀·원본 diff는 근거 파일이나 공개 PR에 복사하지 않습니다.
 
 ## 컨텍스트와 측정
 

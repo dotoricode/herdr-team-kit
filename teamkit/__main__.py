@@ -9,7 +9,7 @@ import uuid
 
 from . import providers
 from .config import load, profile, binding, cached_quota
-from .checkpoint import fingerprint
+from .checkpoint import fingerprint, revision_guard
 from .policy import choose_account, context_action, normalize_quota
 from .runtime import Herdr, RuntimeError as KitError, launch_spec
 from .store import Store
@@ -164,9 +164,7 @@ def run(args):
                 runtime.prompt(name, prompt)
             except BaseException:
                 # Delivery may have occurred even when the CLI timed out.
-                current = store.get(args.task)
-                if current['state'] in ('launching','submitted'):
-                    store.update(args.task, owner, 'uncertain', {'reason':'inspect runtime; do not resubmit'})
+                store.delivery_failed(args.task, owner)
                 raise
             return store.get(args.task)
         if args.command == 'park':
@@ -189,23 +187,29 @@ def run(args):
                 raise
             return store.get(args.task)
         if args.command == 'receipt':
-            if task.get('owner') != args.owner or task['state'] != 'submitted':
+            if task.get('owner') != args.owner or task['state'] not in ('submitted','uncertain'):
                 raise ValueError('receipt does not match submitted owner')
             pr = profile(config, task['provider'], task['account'])
             key = 'CODEX_HOME' if task['provider'] == 'codex' else 'CLAUDE_CONFIG_DIR'
             if os.environ.get(key) != pr['home']:
                 raise ValueError('running process profile does not match dispatch')
             providers.identity(task['provider'], pr)
-            return store.update(args.task, args.owner, 'running', {'identity_checked':True})
+            return store.receipt(args.task, args.owner)
         evidence = json.loads(Path(args.evidence_file).read_text())
         head = task_head(task, config)
         if args.command == 'handoff':
             evidence.update(head=head, dirty=bool(git(task['root'],'status','--porcelain')) if task['basis_kind'] == 'git' else False,
                             worktree_fingerprint=task_fingerprint(task, config))
             return store.handoff(args.task, args.owner, evidence, args.writer_stopped)
-        if task['role'] == 'reviewer' and (task['basis_kind'] != 'git' or git(task['root'],'status','--porcelain')):
-            raise ValueError('review completion requires a clean pinned Git worktree')
-        return store.complete(args.task, args.owner, head, evidence['verification'], evidence.get('reviewed_head'))
+        if task['role'] == 'reviewer':
+            if task['basis_kind'] != 'git':
+                raise ValueError('review completion requires a pinned Git worktree')
+            with revision_guard(task['root']):
+                head = task_head(task, config)
+                if git(task['root'],'status','--porcelain'):
+                    raise ValueError('review completion requires a clean pinned Git worktree')
+                return store.complete(args.task, args.owner, head, evidence['verification'], evidence.get('reviewed_head'))
+        return store.complete(args.task, args.owner, head, evidence['verification'])
     finally:
         store.close()
 

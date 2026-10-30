@@ -1,0 +1,68 @@
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+from teamkit.store import Store
+
+
+class DeliveryOrderTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.db=Store(Path(self.tmp.name)/'state.sqlite')
+        self.db.create('T','alpha','leader','/workspace','a'*40,'coordinate')
+        self.db.claim('T','owner','codex','team','m','medium')
+        self.db.update('T','owner','launching',{})
+        self.db.update('T','owner','submitted',{})
+
+    def tearDown(self):
+        self.db.close();self.tmp.cleanup()
+
+    def test_receipt_before_failure_keeps_running(self):
+        self.db.update('T','owner','running',{'identity_checked':True})
+        self.db.delivery_failed('T','owner')
+        self.assertEqual(self.db.get('T')['state'],'running')
+
+    def test_late_verified_receipt_recovers_uncertain_without_new_owner(self):
+        self.db.delivery_failed('T','owner')
+        self.db.receipt('T','owner')
+        self.assertEqual(self.db.get('T')['state'],'running')
+        self.assertEqual(self.db.get('T')['owner'],'owner')
+        self.assertTrue(self.db.get('T')['runtime']['identity_checked'])
+
+
+class RevisionGuardTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name)
+        self.git('init','-q')
+        self.git('-c','user.name=Fixture','-c','user.email=test@example.invalid','commit','-qm','seed','--allow-empty')
+
+    def tearDown(self): self.tmp.cleanup()
+
+    def git(self,*args,check=True):
+        return subprocess.run(['git','-C',str(self.root),*args],capture_output=True,text=True,check=check)
+
+    def test_git_cannot_change_reviewed_head_during_completion(self):
+        from teamkit.checkpoint import revision_guard
+        original=self.git('rev-parse','HEAD').stdout.strip()
+        # commit-tree needs an identity too; create an unattached commit explicitly.
+        env=os.environ.copy()
+        env.update(GIT_AUTHOR_NAME='Fixture',GIT_AUTHOR_EMAIL='test@example.invalid',GIT_COMMITTER_NAME='Fixture',GIT_COMMITTER_EMAIL='test@example.invalid')
+        new=subprocess.run(['git','-C',str(self.root),'commit-tree','HEAD^{tree}','-p','HEAD','-m','candidate'],env=env,capture_output=True,text=True,check=True).stdout.strip()
+        with revision_guard(self.root):
+            update=self.git('update-ref','HEAD',new,check=False)
+            self.assertNotEqual(update.returncode,0)
+            self.assertEqual(self.git('rev-parse','HEAD').stdout.strip(),original)
+        self.git('update-ref','HEAD',new)
+        self.assertEqual(self.git('rev-parse','HEAD').stdout.strip(),new)
+
+    def test_existing_git_lock_is_never_removed(self):
+        from teamkit.checkpoint import revision_guard
+        lock=self.root/'.git/index.lock';lock.write_text('owned by another process')
+        with self.assertRaises(ValueError):
+            with revision_guard(self.root): pass
+        self.assertEqual(lock.read_text(),'owned by another process')
+
+
+if __name__ == '__main__':unittest.main()

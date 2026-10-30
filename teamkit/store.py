@@ -100,6 +100,24 @@ class Store:
             value.setdefault('runtime', {}).update(detail)
             return self._save(value, state, detail)
 
+    def delivery_failed(self, task, owner):
+        with self.transaction():
+            value = self.get(task)
+            if value.get('owner') != owner:
+                raise ValueError('delivery owner mismatch')
+            if value['state'] in ('launching','submitted'):
+                value['state'] = 'uncertain'
+            return self._save(value, 'delivery_failed', {'reason':'inspect before further input'})
+
+    def receipt(self, task, owner):
+        with self.transaction():
+            value = self.get(task)
+            if value.get('owner') != owner or value['state'] not in ('submitted','uncertain'):
+                raise ValueError('receipt owner/state mismatch')
+            value['state'] = 'running'
+            value.setdefault('runtime', {})['identity_checked'] = True
+            return self._save(value, 'receipted')
+
     def note(self, task, owner, detail):
         with self.transaction():
             value = self.get(task)
