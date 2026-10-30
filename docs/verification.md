@@ -12,8 +12,10 @@
 | 매뉴얼 실제 수정·빌드·화면 | 미실행 | 실제 문서 작업에서 검증 |
 | 장기 성능·토큰 절감 | 미측정 | 유형별 비교 자료 필요 |
 
-현재 로컬 검사 41개가 통과했습니다. 검사 명령은 `python3 -m unittest discover -s tests -v`입니다. PR 리뷰 후에는 receipt·완료 상태·경로·리뷰 SHA·동시성 회귀 검사를 추가했습니다. policy의 주요 판단은 stub에서 동작 assertion 실패를 확인한 뒤 구현했습니다. 나머지 검사는 구현 후 추가한 회귀 검사이며, 모두 수정 전 실패를 증명한 것으로 보고하지 않습니다.
+현재 로컬 검사 47개가 통과했습니다. 검사 명령은 `python3 -m unittest discover -s tests -v`입니다. PR 리뷰 후에는 receipt·완료 상태·경로·리뷰 SHA·동시성 회귀 검사를 추가했습니다. policy의 주요 판단은 stub에서 동작 assertion 실패를 확인한 뒤 구현했습니다. 나머지 검사는 구현 후 추가한 회귀 검사이며, 모두 수정 전 실패를 증명한 것으로 보고하지 않습니다.
 
 생산 경로는 CLI → 설정·계정 확인 → SQLite claim → Herdr workspace/start/prompt → 에이전트 receipt → 검증 기록입니다. 테스트에서는 실제 Git·SQLite·임시 파일을 사용하고 모델·Herdr·계정 경계는 대역으로 바꿉니다. 이 통과는 실제 모델·계정·Herdr 통합 성공을 증명하지 않습니다.
 
 참고한 공식 계약: [Codex App Server](https://learn.chatgpt.com/docs/app-server), [Codex 인증](https://learn.chatgpt.com/docs/auth), [Claude statusline](https://code.claude.com/docs/en/statusline), [Claude 환경변수](https://code.claude.com/docs/en/env-vars). Herdr 제어 문법은 설치된 `herdr --help`, 관련 하위 명령 도움말과 `herdr --skill`을 확인합니다. 공식 계약과 설치 버전의 차이는 실제 연동 전 다시 확인합니다.
+
+기본 Claude 홈의 인증 namespace 차이는 설치된 CLI의 모델 없는 auth status로 대조했고, 수정 후 기대 계정 대조도 확인했습니다. Codex --no-daemon은 설치 CLI 도움말과 생성 인자로 확인했으며 실제 Herdr 환경 전달 성공을 아직 증명하지는 않습니다.

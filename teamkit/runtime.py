@@ -14,6 +14,21 @@ AUTH_ENV = ('OPENAI_API_KEY', 'OPENAI_BASE_URL', 'CODEX_ACCESS_TOKEN', 'ANTHROPI
             'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY')
 
 
+def home_key(provider):
+    return 'CODEX_HOME' if provider == 'codex' else 'CLAUDE_CONFIG_DIR'
+
+
+def home_value(provider, home):
+    # Claude's default keychain namespace differs from an explicit default path.
+    if provider == 'claude' and home == str(Path.home()/'.claude'):
+        return ''
+    return home
+
+
+def current_profile_home(provider):
+    return os.environ.get(home_key(provider)) or str(Path.home()/('.codex' if provider == 'codex' else '.claude'))
+
+
 def launch_spec(provider, profile, session):
     home = profile.get('home', '')
     if provider not in ('codex','claude') or not Path(home).is_absolute() or not profile.get('model') or not profile.get('identity', {}).get('email'):
@@ -24,9 +39,9 @@ def launch_spec(provider, profile, session):
         env['CODEX_HOME'] = home
         args = ['resume', session] if session else []
         args += ['--model', profile['model'], '-c', 'model_reasoning_effort='+json.dumps(effort),
-                 '-c', 'cli_auth_credentials_store="file"', '--approve-for-me', '--no-alt-screen']
+                 '-c', 'cli_auth_credentials_store="file"', '--approve-for-me', '--no-alt-screen', '--no-daemon']
     else:
-        env['CLAUDE_CONFIG_DIR'] = home
+        env['CLAUDE_CONFIG_DIR'] = home_value(provider, home)
         args = ['--resume', session] if session else []
         args += ['--model', profile['model'], '--effort', effort, '--permission-mode', 'auto']
     return {'kind':provider, 'env':env, 'args':args}

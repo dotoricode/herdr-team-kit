@@ -11,7 +11,7 @@ from . import providers
 from .config import load, profile, binding, cached_quota
 from .checkpoint import fingerprint, revision_guard
 from .policy import choose_account, context_action, normalize_quota
-from .runtime import Herdr, RuntimeError as KitError, launch_spec
+from .runtime import Herdr, RuntimeError as KitError, launch_spec, current_profile_home
 from .store import Store
 
 
@@ -92,8 +92,7 @@ def run(args):
                     raise ValueError('Claude quota requires a statusline capture; no private endpoint is used')
                 raw = providers.codex_quota(pr)
             else:
-                key = 'CODEX_HOME' if args.provider == 'codex' else 'CLAUDE_CONFIG_DIR'
-                if os.environ.get(key) != pr['home']:
+                if current_profile_home(args.provider) != pr['home']:
                     raise ValueError('capture must run inside the configured profile environment')
                 providers.identity(args.provider, pr)
                 raw = json.load(sys.stdin)
@@ -190,8 +189,7 @@ def run(args):
             if task.get('owner') != args.owner or task['state'] not in ('submitted','uncertain'):
                 raise ValueError('receipt does not match submitted owner')
             pr = profile(config, task['provider'], task['account'])
-            key = 'CODEX_HOME' if task['provider'] == 'codex' else 'CLAUDE_CONFIG_DIR'
-            if os.environ.get(key) != pr['home']:
+            if current_profile_home(task['provider']) != pr['home']:
                 raise ValueError('running process profile does not match dispatch')
             providers.identity(task['provider'], pr)
             return store.receipt(args.task, args.owner)
