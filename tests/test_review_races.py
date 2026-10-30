@@ -64,5 +64,19 @@ class RevisionGuardTests(unittest.TestCase):
             with revision_guard(self.root): pass
         self.assertEqual(lock.read_text(),'owned by another process')
 
+    def test_reftable_is_rejected_before_creating_file_locks(self):
+        from teamkit.checkpoint import revision_guard
+        repo = self.root/'reftable'
+        result = subprocess.run(['git','init','--ref-format=reftable',str(repo)], capture_output=True, text=True)
+        if result.returncode:
+            self.skipTest('installed Git cannot create reftable fixtures')
+        subprocess.run(['git','-C',str(repo),'-c','user.name=Fixture','-c','user.email=test@example.invalid',
+                        'commit','-qm','seed','--allow-empty'],check=True,capture_output=True)
+        subprocess.run(['git','-C',str(repo),'checkout','--detach'],check=True,capture_output=True)
+        with self.assertRaises(ValueError):
+            with revision_guard(repo):
+                pass
+        self.assertFalse((repo/'.git/index.lock').exists())
+
 
 if __name__ == '__main__':unittest.main()

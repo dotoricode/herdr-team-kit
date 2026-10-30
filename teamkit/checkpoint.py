@@ -34,6 +34,12 @@ import os
 def revision_guard(root):
     """Hold Git's index, HEAD and current branch locks while recording a review."""
     root = Path(root).resolve()
+    storage = subprocess.run(['git','-C',str(root),'config','--get','extensions.refStorage'],
+                             capture_output=True, text=True)
+    if storage.returncode not in (0, 1):
+        raise ValueError('cannot determine Git ref storage')
+    if storage.returncode == 0 and storage.stdout.strip().lower() != 'files':
+        raise ValueError('review completion supports files ref storage only; use a separate files-format review repository')
     acquired = []
 
     def lock(git_path):
