@@ -73,3 +73,34 @@ class DefaultReceiptTests(Fixture):
             result=self.call('capture','--provider','claude','--account','personal')
         self.assertEqual(result['quota']['five_hour']['used'],7)
         self.assertEqual(self.call('route','--provider','claude')['account'],'personal')
+
+    def default_claude_fixture(self):
+        default=str(Path.home()/'.claude')
+        self.value['profiles']['claude']=self.value['profiles'].pop('codex')
+        self.value['profiles']['claude']['personal']['home']=default
+        self.value['teams']['alpha']['roles']['implementer']['provider']='claude'
+        self.config.write_text(json.dumps(self.value))
+        return default
+
+    def test_receipt_rejects_explicit_default_namespace(self):
+        default=self.default_claude_fixture()
+        self.create()
+        from teamkit.store import Store
+        db=Store(self.state)
+        try:
+            db.claim('T1','owner','claude','personal','fixture','medium')
+            db.update('T1','owner','launching',{})
+            db.update('T1','owner','submitted',{})
+        finally:db.close()
+        with patch.dict(os.environ,{'CLAUDE_CONFIG_DIR':default}),patch('teamkit.providers.identity'):
+            with self.assertRaises(ValueError):self.call('receipt','T1','--owner','owner')
+        self.assertEqual(self.call('show','T1')['state'],'submitted')
+
+    def test_capture_rejects_explicit_default_namespace(self):
+        import io,time
+        default=self.default_claude_fixture()
+        data={'rate_limits':{'five_hour':{'used_percentage':1,'resets_at':time.time()+900},
+                             'seven_day':{'used_percentage':2,'resets_at':time.time()+900}}}
+        with patch.dict(os.environ,{'CLAUDE_CONFIG_DIR':default}),patch('teamkit.providers.identity'),patch('sys.stdin',io.StringIO(json.dumps(data))):
+            with self.assertRaises(ValueError):self.call('capture','--provider','claude','--account','personal')
+        self.assertEqual(self.call('route','--provider','claude')['action'],'wait')

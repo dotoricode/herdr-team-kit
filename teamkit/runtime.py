@@ -25,8 +25,13 @@ def home_value(provider, home):
     return home
 
 
-def current_profile_home(provider):
-    return os.environ.get(home_key(provider)) or str(Path.home()/('.codex' if provider == 'codex' else '.claude'))
+def profile_home_matches(provider, home):
+    observed = os.environ.get(home_key(provider))
+    expected = home_value(provider, home)
+    if provider == 'claude' and expected == '':
+        return not observed
+    effective = observed or str(Path.home()/('.codex' if provider == 'codex' else '.claude'))
+    return effective == expected
 
 
 def launch_spec(provider, profile, session):
