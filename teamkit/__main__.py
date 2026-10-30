@@ -19,6 +19,19 @@ def git(root, *args):
     return subprocess.run(['git','-C',str(root),*args], check=True, text=True, capture_output=True).stdout.strip()
 
 
+def paths_overlap(first, second):
+    if first.is_relative_to(second) or second.is_relative_to(first):
+        return True
+    for path, other in ((first, second), (second, first)):
+        for ancestor in (path, *path.parents):
+            try:
+                if ancestor.samefile(other):
+                    return True
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+    return False
+
+
 def instructions_basis(team):
     import hashlib
     digest = hashlib.sha256(json.dumps(team, sort_keys=True).encode())
@@ -87,7 +100,7 @@ def run(args):
         for accounts in config['profiles'].values():
             for configured_profile in accounts.values():
                 auth_home = Path(configured_profile['home']).resolve()
-                if ledger_root.is_relative_to(auth_home) or auth_home.is_relative_to(ledger_root):
+                if paths_overlap(ledger_root, auth_home):
                     raise ValueError('ledger write directory overlaps authentication home')
     store = Store(args.state)
     try:

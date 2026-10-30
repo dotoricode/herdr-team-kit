@@ -64,3 +64,28 @@ class BootstrapTests(Fixture):
                     runtime.assert_not_called()
                 self.assertEqual(self.call('show', task)['state'], 'queued')
                 self.assertEqual(self.call('events', task), before)
+
+    def test_dispatch_rejects_native_case_insensitive_auth_alias(self):
+        home = self.root/'team'
+        home.mkdir(exist_ok=True)
+        alias = self.root/'TEAM'
+        if not alias.exists():
+            self.skipTest('native case-insensitive filesystem required')
+        self.assertTrue(home.samefile(alias))
+        self.state = alias/'ledger'/'state.sqlite'
+        self.call('create', 'CASE-ALIAS', '--team', 'alpha', '--root', str(self.repo),
+                  '--goal-file', str(self.root/'goal.txt'))
+        now = time.time()
+        with StoreContext(self.state) as db:
+            db.quota('codex/team', {'binding':binding(self.value['profiles']['codex']['team']),
+                'observed_at':now, 'five_hour':{'used':1,'resets_at':now+900},
+                'weekly':{'used':1,'resets_at':now+900}})
+        before = self.call('events', 'CASE-ALIAS')
+        with patch.dict(os.environ, {'HERDR_ENV':'1'}), patch('teamkit.providers.identity') as identity, patch('teamkit.__main__.Herdr') as runtime:
+            runtime.return_value.launch.return_value = {'name':'fixture','pane':'w1:p2'}
+            with self.assertRaisesRegex(ValueError, 'ledger.*authentication'):
+                self.call('dispatch', 'CASE-ALIAS')
+            identity.assert_not_called()
+            runtime.assert_not_called()
+        self.assertEqual(self.call('show', 'CASE-ALIAS')['state'], 'queued')
+        self.assertEqual(self.call('events', 'CASE-ALIAS'), before)
