@@ -82,6 +82,13 @@ def run(args):
                 'teams':list(config['teams']), 'providers':list(config['profiles']),
                 'quota_ttl_seconds':config['quota_ttl_seconds'],
                 'live_verified':False}
+    if args.command == 'dispatch':
+        ledger_root = Path(args.state).parent
+        for accounts in config['profiles'].values():
+            for configured_profile in accounts.values():
+                auth_home = Path(configured_profile['home']).resolve()
+                if ledger_root.is_relative_to(auth_home) or auth_home.is_relative_to(ledger_root):
+                    raise ValueError('ledger write directory overlaps authentication home')
     store = Store(args.state)
     try:
         now = time.time()
