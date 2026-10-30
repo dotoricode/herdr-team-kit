@@ -68,4 +68,3 @@ def revision_guard(root):
                     path.unlink()
             except FileNotFoundError:
                 pass
-
