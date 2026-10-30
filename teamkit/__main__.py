@@ -173,7 +173,7 @@ def run(args):
                 raise KitError('tell must run inside Herdr')
             status = Herdr().call('agent','get',task['runtime']['name'])
             agent = status.get('agent', status)
-            if agent.get('status') not in ('idle','done'):
+            if agent.get('agent_status') not in ('idle','done'):
                 raise KitError('leader is not idle; inspect before sending')
             store.wake(args.task, task['owner'])
             try:
