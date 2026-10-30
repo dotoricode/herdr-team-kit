@@ -3,6 +3,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from teamkit.store import Store
 
@@ -76,6 +77,54 @@ class RevisionGuardTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             with revision_guard(repo):
                 pass
+        self.assertFalse((repo/'.git/index.lock').exists())
+
+    def test_worktree_config_cannot_disguise_reftable_backend(self):
+        from teamkit.checkpoint import revision_guard
+        repo = self.root/'disguised'
+        result = subprocess.run(['git','init','--ref-format=reftable',str(repo)], capture_output=True, text=True)
+        if result.returncode:
+            self.skipTest('installed Git cannot create reftable fixtures')
+        def git(*args):
+            return subprocess.run(['git','-C',str(repo),*args],check=True,capture_output=True,text=True).stdout.strip()
+        git('-c','user.name=Fixture','-c','user.email=test@example.invalid','commit','-qm','seed','--allow-empty')
+        git('checkout','--detach')
+        git('config','extensions.worktreeConfig','true')
+        git('config','--worktree','extensions.refStorage','files')
+        self.assertEqual(git('config','--get','extensions.refStorage'),'files')
+        self.assertEqual(git('rev-parse','--show-ref-format'),'reftable')
+        with self.assertRaises(ValueError):
+            with revision_guard(repo): pass
+        self.assertFalse((repo/'.git/index.lock').exists())
+
+    def test_older_git_files_backend_uses_common_config(self):
+        from teamkit.checkpoint import revision_guard
+        real_run = subprocess.run
+        def old_git(command, *args, **kwargs):
+            if command[-2:] == ['rev-parse','--show-ref-format']:
+                return subprocess.CompletedProcess(command, 0, '--show-ref-format\n', '')
+            return real_run(command, *args, **kwargs)
+        with patch('teamkit.checkpoint.subprocess.run', side_effect=old_git):
+            with revision_guard(self.root):
+                self.assertTrue((self.root/'.git/index.lock').exists())
+        self.assertFalse((self.root/'.git/index.lock').exists())
+
+    def test_older_git_common_config_ignores_worktree_override(self):
+        from teamkit.checkpoint import revision_guard
+        repo = self.root/'older-reftable'
+        result = subprocess.run(['git','init','--ref-format=reftable',str(repo)], capture_output=True, text=True)
+        if result.returncode:
+            self.skipTest('installed Git cannot create reftable fixtures')
+        for args in (['config','extensions.worktreeConfig','true'], ['config','--worktree','extensions.refStorage','files']):
+            subprocess.run(['git','-C',str(repo),*args],check=True,capture_output=True)
+        real_run = subprocess.run
+        def old_git(command, *args, **kwargs):
+            if command[-2:] == ['rev-parse','--show-ref-format']:
+                return subprocess.CompletedProcess(command, 0, '--show-ref-format\n', '')
+            return real_run(command, *args, **kwargs)
+        with patch('teamkit.checkpoint.subprocess.run', side_effect=old_git):
+            with self.assertRaises(ValueError):
+                with revision_guard(repo): pass
         self.assertFalse((repo/'.git/index.lock').exists())
 
 

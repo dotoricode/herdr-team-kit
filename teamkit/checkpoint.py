@@ -34,11 +34,19 @@ import os
 def revision_guard(root):
     """Hold Git's index, HEAD and current branch locks while recording a review."""
     root = Path(root).resolve()
-    storage = subprocess.run(['git','-C',str(root),'config','--get','extensions.refStorage'],
+    storage = subprocess.run(['git','-C',str(root),'rev-parse','--show-ref-format'],
                              capture_output=True, text=True)
-    if storage.returncode not in (0, 1):
-        raise ValueError('cannot determine Git ref storage')
-    if storage.returncode == 0 and storage.stdout.strip().lower() != 'files':
+    if storage.returncode:
+        raise ValueError('cannot determine actual Git ref storage')
+    backend = storage.stdout.strip()
+    if backend == '--show-ref-format':
+        # Older Git echoes an unknown rev-parse option. Read common config only.
+        storage = subprocess.run(['git','-C',str(root),'config','--local','--get','extensions.refStorage'],
+                                 capture_output=True, text=True)
+        if storage.returncode not in (0, 1):
+            raise ValueError('cannot determine common Git ref storage')
+        backend = storage.stdout.strip().lower() if storage.returncode == 0 else 'files'
+    if backend != 'files':
         raise ValueError('review completion supports files ref storage only; use a separate files-format review repository')
     acquired = []
 
