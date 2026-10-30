@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "quota_ttl_seconds": 120,
+  "profiles": {
+    "codex": {
+      "team": {
+        "home": "/srv/example/profiles/codex-team",
+        "identity": {
+          "email": "team@example.invalid"
+        },
+        "model": "replace-with-supported-model",
+        "effort": "medium"
+      },
+      "personal": {
+        "home": "/srv/example/profiles/codex-personal",
+        "identity": {
+          "email": "personal@example.invalid"
+        },
+        "model": "replace-with-supported-model",
+        "effort": "medium"
+      }
+    },
+    "claude": {
+      "team": {
+        "home": "/srv/example/profiles/claude-team",
+        "identity": {
+          "email": "team@example.invalid"
+        },
+        "model": "replace-with-supported-model",
+        "effort": "medium"
+      },
+      "personal": {
+        "home": "/srv/example/profiles/claude-personal",
+        "identity": {
+          "email": "personal@example.invalid"
+        },
+        "model": "replace-with-supported-model",
+        "effort": "medium"
+      }
+    }
+  },
+  "teams": {
+    "alpha": {
+      "root": "/srv/example/team-alpha",
+      "references": [],
+      "roles": {
+        "leader": {
+          "provider": "codex",
+          "model": "replace-with-supported-model",
+          "effort": "medium"
+        },
+        "implementer": {
+          "provider": "claude",
+          "model": "replace-with-supported-model",
+          "effort": "medium"
+        },
+        "reviewer": {
+          "provider": "codex",
+          "model": "replace-with-supported-model",
+          "effort": "high"
+        }
+      }
+    }
+  }
+}

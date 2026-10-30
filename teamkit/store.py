@@ -1,0 +1,158 @@
+"""Private local task ledger. Transactions serialize ownership, not model work."""
+from contextlib import contextmanager
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+import time
+
+ACTIVE = {'claimed', 'launching', 'submitted', 'running', 'uncertain'}
+
+
+def sha(value):
+    return isinstance(value, str) and re.fullmatch(r'[a-fA-F0-9]{40}|[a-fA-F0-9]{64}', value)
+
+
+class Store:
+    def __init__(self, path):
+        self.path = Path(path).expanduser()
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Create privately before SQLite opens the file; never chmod existing parent dirs.
+        try:
+            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            pass
+        else:
+            os.close(fd)
+        os.chmod(self.path, 0o600)
+        self.db = sqlite3.connect(self.path, timeout=10, isolation_level=None)
+        self.db.execute('CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, body TEXT NOT NULL)')
+        self.db.execute('CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, task TEXT, event TEXT, at REAL, body TEXT)')
+        self.db.execute('CREATE TABLE IF NOT EXISTS quotas (profile TEXT PRIMARY KEY, body TEXT NOT NULL)')
+
+    def close(self):
+        self.db.close()
+
+    @contextmanager
+    def transaction(self):
+        self.db.execute('BEGIN IMMEDIATE')
+        try:
+            yield
+            self.db.execute('COMMIT')
+        except BaseException:
+            self.db.execute('ROLLBACK')
+            raise
+
+    def get(self, task):
+        row = self.db.execute('SELECT body FROM tasks WHERE id=?', (task,)).fetchone()
+        if not row:
+            raise ValueError('unknown task')
+        return json.loads(row[0])
+
+    def list(self):
+        return [json.loads(row[0]) for row in self.db.execute('SELECT body FROM tasks ORDER BY id')]
+
+    def _save(self, value, event, detail=None):
+        self.db.execute('INSERT OR REPLACE INTO tasks VALUES (?,?)', (value['id'], json.dumps(value)))
+        self.db.execute('INSERT INTO events(task,event,at,body) VALUES (?,?,?,?)',
+                        (value['id'], event, time.time(), json.dumps(detail or {})))
+        return value
+
+    def create(self, task, team, role, root, base, goal, basis_kind="git"):
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', task):
+            raise ValueError('invalid task ID')
+        if role not in ('leader', 'implementer', 'reviewer') or not sha(base) or not Path(root).is_absolute() or not goal.strip():
+            raise ValueError('invalid task contract')
+        value = dict(id=task, team=team, role=role, root=root, base=base, goal=goal, basis_kind=basis_kind, state='queued', owner=None)
+        with self.transaction():
+            old = self.db.execute('SELECT body FROM tasks WHERE id=?', (task,)).fetchone()
+            if old:
+                existing = json.loads(old[0])
+                if any(existing[k] != value[k] for k in ('team','role','root','base','goal','basis_kind')):
+                    raise ValueError('task ID already has another contract')
+                return existing
+            return self._save(value, 'created')
+
+    def claim(self, task, owner, provider, account, model, effort):
+        if not owner or provider not in ('codex','claude') or account not in ('team','personal') or not model:
+            raise ValueError('invalid execution identity')
+        with self.transaction():
+            value = self.get(task)
+            if value['state'] not in ('queued', 'handed_off'):
+                raise ValueError('task already claimed or terminal; inspect before retry')
+            active = [t for t in self.list() if t['state'] in ACTIVE]
+            if len(active) >= 3:
+                raise ValueError('global model limit reached')
+            if value['role'] == 'implementer' and any(t['role'] == 'implementer' and (t['team'] == value['team'] or t['root'] == value['root']) for t in active):
+                raise ValueError('team already has an implementation owner')
+            value.update(state='claimed', owner=owner, provider=provider, account=account, model=model, effort=effort)
+            return self._save(value, 'claimed')
+
+    def update(self, task, owner, state, detail):
+        transitions = {'claimed': {'launching','uncertain'}, 'launching': {'submitted','uncertain'},
+                       'submitted': {'running','uncertain'}, 'running': {'uncertain'}, 'uncertain': set()}
+        with self.transaction():
+            value = self.get(task)
+            if value['owner'] != owner or state not in transitions.get(value['state'], set()):
+                raise ValueError('owner or state transition mismatch')
+            value['state'] = state
+            value.setdefault('runtime', {}).update(detail)
+            return self._save(value, state, detail)
+
+    def note(self, task, owner, detail):
+        with self.transaction():
+            value = self.get(task)
+            if value.get('owner') != owner or value['state'] not in ACTIVE:
+                raise ValueError('runtime note owner/state mismatch')
+            value.setdefault('runtime', {}).update(detail)
+            return self._save(value, 'runtime', detail)
+
+    def park(self, task, owner):
+        with self.transaction():
+            value = self.get(task)
+            if value.get('owner') != owner or value['role'] != 'leader' or value['state'] != 'running':
+                raise ValueError('only a running leader can park')
+            value['state'] = 'ready'
+            return self._save(value, 'ready')
+
+    def wake(self, task, owner):
+        with self.transaction():
+            value = self.get(task)
+            if value.get('owner') != owner or value['role'] != 'leader' or value['state'] != 'ready':
+                raise ValueError('leader is not ready')
+            if sum(t['state'] in ACTIVE for t in self.list()) >= 3:
+                raise ValueError('global model limit reached')
+            value['state'] = 'running'
+            return self._save(value, 'woken')
+
+    def handoff(self, task, owner, checkpoint, stopped):
+        required = {'head','dirty','verification','next'}
+        if not stopped or not required.issubset(checkpoint) or not sha(checkpoint.get('head')) or not checkpoint['next']:
+            raise ValueError('handoff requires stopped writer and complete checkpoint')
+        with self.transaction():
+            value = self.get(task)
+            if value.get('owner') != owner or value['state'] not in ACTIVE | {'ready'}:
+                raise ValueError('handoff owner/state mismatch')
+            value.update(state='handed_off', owner=None, checkpoint=checkpoint)
+            return self._save(value, 'handed_off', checkpoint)
+
+    def complete(self, task, owner, head, evidence):
+        if not sha(head) or not isinstance(evidence, list) or not evidence or not all(isinstance(x,str) and x.strip() for x in evidence):
+            raise ValueError('completion requires full SHA and verification evidence')
+        with self.transaction():
+            value = self.get(task)
+            if value.get('owner') != owner or value['state'] not in ACTIVE:
+                raise ValueError('completion owner/state mismatch')
+            value.update(state='awaiting_review', head=head, verification=evidence)
+            return self._save(value, 'awaiting_review')
+
+    def events(self, task):
+        return [dict(seq=r[0], event=r[1], at=r[2], detail=json.loads(r[3])) for r in
+                self.db.execute('SELECT seq,event,at,body FROM events WHERE task=? ORDER BY seq', (task,))]
+
+    def quota(self, profile, value=None):
+        if value is not None:
+            self.db.execute('INSERT OR REPLACE INTO quotas VALUES (?,?)', (profile, json.dumps(value)))
+        row = self.db.execute('SELECT body FROM quotas WHERE profile=?', (profile,)).fetchone()
+        return json.loads(row[0]) if row else None
