@@ -5,7 +5,7 @@ import selectors
 import subprocess
 import time
 
-from .runtime import AUTH_ENV, RuntimeError
+from .runtime import AUTH_ENV, RuntimeError, home_key, home_value
 
 
 def profile_env(provider, profile):
@@ -14,7 +14,9 @@ def profile_env(provider, profile):
         env.pop(key, None)
     env.pop('CODEX_HOME', None)
     env.pop('CLAUDE_CONFIG_DIR', None)
-    env['CODEX_HOME' if provider == 'codex' else 'CLAUDE_CONFIG_DIR'] = profile['home']
+    value = home_value(provider, profile['home'])
+    if value:
+        env[home_key(provider)] = value
     return env
 
 
