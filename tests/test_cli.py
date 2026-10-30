@@ -25,7 +25,7 @@ class Fixture(unittest.TestCase):
         for args in (['init','-q'], ['-c','user.name=Fixture','-c','user.email=test@example.invalid','commit','-qm','seed','--allow-empty']):
             subprocess.run(['git','-C',str(self.repo),*args], check=True)
         self.config = self.root/'config.json'
-        self.state = self.root/'state.sqlite'
+        self.state = self.root/'ledger'/'state.sqlite'
         self.value = {'version':1,'profiles':{'codex':{}},'teams':{'alpha':{'root':str(self.repo),'roles':{
             'implementer':{'provider':'codex','model':'model-fixture','effort':'medium'}}}}}
         for account in ('team','personal'):
@@ -132,7 +132,7 @@ class ReviewRegressionTests(Fixture):
         self.create(); self.seed_quota()
         with patch.dict(os.environ, {'HERDR_ENV':'1', 'HOME':str(self.root)}), patch('teamkit.providers.identity'), patch('teamkit.__main__.Herdr') as h:
             h.return_value.launch.return_value = {'name':'fixture','pane':'w1:p1'}
-            args = parser().parse_args(['--config','~/config.json','--state','~/state.sqlite','dispatch','T1'])
+            args = parser().parse_args(['--config','~/config.json','--state','~/ledger/state.sqlite','dispatch','T1'])
             run(args)
             env = h.return_value.launch.call_args.args[1]['env']
             self.assertEqual(env['TEAMKIT_CONFIG'],str(self.config.resolve()))
