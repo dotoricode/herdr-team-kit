@@ -89,3 +89,14 @@ class BootstrapTests(Fixture):
             runtime.assert_not_called()
         self.assertEqual(self.call('show', 'CASE-ALIAS')['state'], 'queued')
         self.assertEqual(self.call('events', 'CASE-ALIAS'), before)
+
+    def test_dispatch_never_creates_a_missing_ledger(self):
+        for dirname in ('unused-ledger', 'TEAM'):
+            with self.subTest(dirname=dirname):
+                self.state = self.root/dirname/'missing.sqlite'
+                with patch.dict(os.environ, {'HERDR_ENV':'1'}), patch('teamkit.providers.identity') as identity, patch('teamkit.__main__.Herdr') as runtime:
+                    with self.assertRaisesRegex(ValueError, 'existing task ledger'):
+                        self.call('dispatch', 'MISSING')
+                    identity.assert_not_called()
+                    runtime.assert_not_called()
+                self.assertFalse(self.state.parent.exists())

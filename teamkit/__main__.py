@@ -96,6 +96,8 @@ def run(args):
                 'quota_ttl_seconds':config['quota_ttl_seconds'],
                 'live_verified':False}
     if args.command == 'dispatch':
+        if not Path(args.state).is_file():
+            raise ValueError('dispatch requires an existing task ledger')
         ledger_root = Path(args.state).parent
         for accounts in config['profiles'].values():
             for configured_profile in accounts.values():
