@@ -61,5 +61,8 @@
         }
       }
     }
-  }
+  },
+  "shared_roots": [
+    "/srv/example/shared-manual"
+  ]
 }

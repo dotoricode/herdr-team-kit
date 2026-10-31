@@ -25,6 +25,9 @@ def load(path):
         for role, policy in team['roles'].items():
             if role not in ('leader','implementer','reviewer') or policy.get('provider') not in value['profiles'] or not policy.get('model'):
                 raise ValueError('role requires configured provider and explicit model')
+    shared = value.get('shared_roots', [])
+    if not isinstance(shared, list) or any(not isinstance(root, str) or not Path(root).is_absolute() for root in shared):
+        raise ValueError('shared_roots requires a list of absolute paths')
     ttl = value.get('quota_ttl_seconds', 120)
     if type(ttl) is not int or not 1 <= ttl <= 300:
         raise ValueError('quota TTL must be 1..300 seconds')
