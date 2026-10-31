@@ -192,7 +192,7 @@ class VisibilityTests(Fixture):
         with patch('subprocess.run',side_effect=route) as opened:
             open_review(self.state,self.value,'W1')
             commands=[c.args[0] for c in opened.call_args_list if c.args[0][0] in ('open','xdg-open')]
-            self.assertEqual(commands[0][1],str(self.root/'private-plans/W1/r1/plan.md'))
+            self.assertEqual(commands[0][1],str((self.root/'private-plans/W1/r1/plan.md').resolve()))
             (self.root/'private-plans/W1/r1/plan.md').write_text('changed after submission')
             with self.assertRaises(ValueError):open_review(self.state,self.value,'W1')
             self.assertEqual(len([c for c in opened.call_args_list if c.args[0][0] in ('open','xdg-open')]),1)
