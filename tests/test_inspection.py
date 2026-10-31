@@ -103,3 +103,19 @@ class InspectionTests(Fixture):
         self.state=self.root/'ledger ?#%'/'state ?#%.sqlite'
         self.create()
         self.assertEqual(self.call('show','T1')['id'],'T1')
+
+    def test_wal_is_rejected_before_creating_or_touching_side_files(self):
+        self.seed_work()
+        for keep_writer in (False,True):
+            with self.subTest(keep_writer=keep_writer):
+                writer=sqlite3.connect(self.state,isolation_level=None)
+                self.assertEqual(writer.execute('PRAGMA journal_mode=WAL').fetchone()[0],'wal')
+                if not keep_writer:writer.close()
+                before=self.fingerprint()
+                try:
+                    for args in (('show','T1'),('list',),('events','T1'),('work','show','W1')):
+                        with self.assertRaisesRegex(ValueError,'WAL'):
+                            self.call(*args)
+                        self.assertEqual(self.fingerprint(),before)
+                finally:
+                    if keep_writer:writer.close()

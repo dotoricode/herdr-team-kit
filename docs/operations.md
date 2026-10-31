@@ -80,3 +80,5 @@ python3 teamkit_cli.py retire TASK-1 --owner OWNER --writer-stopped --evidence-f
 ## 읽기 전용 장부 조회
 
 `show`, `list`, `events`, `work show`는 기존 SQLite 장부를 `mode=ro`로 읽습니다. 쓰기용 Store 초기화·chmod·스키마 생성·승인 트랜잭션을 실행하지 않으며, 조회 때문에 디렉토리나 장부를 만들지 않습니다. 미존재 장부는 명시적인 오류이고, 이전 장부에 work_items가 없으면 unknown product work로 반환합니다. 손상된 DB/레코드와 읽기 잠금 오류도 JSON 오류로 보고합니다. 배타적 잠금의 SQLite 대기 설정은 1초이며 이후 오류로 반환하고, 일반 쓰기 예약 잠금 아래서는 커밋된 내용을 읽습니다. 쓰기·배정·수신·승인 경로는 기존 정책을 유지합니다.
+
+읽기 전용 조회는 기본 rollback 장부를 지원합니다. WAL은 `mode=ro`에서도 보조 파일을 생성·갱신할 수 있어 SQLite 연결 전에 명시적으로 거절합니다. journal mode를 자동 변경하거나 WAL 내용을 무시하는 immutable 조회를 하지 않습니다. 외부 writer가 조회 도중 journal mode를 변경하는 경우는 지원 범위 밖입니다.

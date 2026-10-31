@@ -22,6 +22,14 @@ def read(args):
         raise ValueError('invalid product work ID')
     if not path.is_file():
         raise ValueError('task ledger does not exist')
+    # mode=ro may still create/update WAL shared-memory files. The default
+    # rollback ledger is the supported boundary; never silently use immutable
+    # mode, which could hide committed WAL records. Journal-mode changes by
+    # an external writer during inspection are outside this adapter's contract.
+    with path.open('rb') as source:
+        header=source.read(20)
+    if header[:16]==b'SQLite format 3\x00' and (2 in header[18:20] or Path(str(path)+'-wal').exists() or Path(str(path)+'-shm').exists()):
+        raise ValueError('WAL ledger inspection is unsupported without side-file writes')
     try:
         with closing(sqlite3.connect(path.as_uri()+'?mode=ro', uri=True, timeout=1)) as db:
             db.execute('BEGIN')
