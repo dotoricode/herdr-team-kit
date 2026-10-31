@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import signal
 import subprocess
 import sys
 import threading
@@ -184,6 +185,18 @@ class StatuslineTests(Fixture):
         self.assertEqual(result.returncode, 7)
         self.assertEqual(result.stdout, b'\x1b[32m'+payload)
         self.assertNotIn(b'original stdin', result.stderr)
+        self.assertFalse(self.state.exists())
+
+    def test_real_cli_preserves_renderer_signal_termination(self):
+        cli = str(Path(__file__).resolve().parents[1]/'teamkit_cli.py')
+        for sig in (signal.SIGTERM, signal.SIGPIPE, signal.SIGKILL):
+            with self.subTest(signal=sig):
+                result = subprocess.run([sys.executable, cli,
+                    '--config', str(self.root/'missing.json'),
+                    '--state', str(self.state), 'statusline', '--account', 'team',
+                    '--display-command', f'kill -{sig.value} $$'],
+                    input=b'{}', capture_output=True)
+                self.assertEqual(result.returncode, -sig.value)
         self.assertFalse(self.state.exists())
 
     def test_legacy_unanchored_cache_cannot_authorize_dispatch(self):

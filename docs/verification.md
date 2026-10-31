@@ -12,7 +12,7 @@
 | 매뉴얼 실제 수정·빌드·화면 | 미실행 | 실제 문서 작업에서 검증 |
 | 장기 성능·토큰 절감 | 미측정 | 유형별 비교 자료 필요 |
 
-현재 로컬 검사 67개가 통과했습니다. 검사 명령은 `python3 -m unittest discover -s tests -v`입니다. PR 리뷰 후에는 receipt·완료 상태·경로·리뷰 SHA·동시성 회귀 검사를 추가했습니다. policy의 주요 판단은 stub에서 동작 assertion 실패를 확인한 뒤 구현했습니다. 나머지 검사는 구현 후 추가한 회귀 검사이며, 모두 수정 전 실패를 증명한 것으로 보고하지 않습니다.
+현재 로컬 검사 68개가 통과했습니다. 검사 명령은 `python3 -m unittest discover -s tests -v`입니다. PR 리뷰 후에는 receipt·완료 상태·경로·리뷰 SHA·동시성 회귀 검사를 추가했습니다. policy의 주요 판단은 stub에서 동작 assertion 실패를 확인한 뒤 구현했습니다. 나머지 검사는 구현 후 추가한 회귀 검사이며, 모두 수정 전 실패를 증명한 것으로 보고하지 않습니다.
 
 생산 경로는 CLI → 설정·계정 확인 → SQLite claim → Herdr workspace/start/prompt → 에이전트 receipt → 검증 기록입니다. 테스트에서는 실제 Git·SQLite·임시 파일을 사용하고 모델·Herdr·계정 경계는 대역으로 바꿉니다. 이 통과는 실제 모델·계정·Herdr 통합 성공을 증명하지 않습니다.
 

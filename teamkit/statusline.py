@@ -6,6 +6,7 @@ import os
 import stat
 from pathlib import Path
 import re
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -186,4 +187,9 @@ def render(args):
         print('Team Kit quota unavailable', file=sys.stderr)
     if args.display_command is None:
         print('Team Kit quota: '+status)
+    if code < 0:
+        sig = -code
+        if sig not in (signal.SIGKILL, signal.SIGSTOP):
+            signal.signal(sig, signal.SIG_DFL)
+        os.kill(os.getpid(), sig)
     return code
