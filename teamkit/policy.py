@@ -1,6 +1,8 @@
 """Pure routing rules. Missing or expired quota never means zero usage."""
 import math
 
+CLAUDE_QUOTA_SOURCE = 'claude-statusline-response'
+
 
 def number(value):
     return type(value) in (int, float) and math.isfinite(value)

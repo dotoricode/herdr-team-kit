@@ -93,7 +93,7 @@ def match_identity(profile, identity):
     return {'email':email, **{k:identity[k] for k in ('planType','organizationId') if k in identity}}
 
 
-def identity(provider, profile):
+def identity(provider, profile, claude_timeout=15):
     if provider == 'codex':
         with CodexRPC(profile) as rpc:
             account = rpc.request('account/read', {'refreshToken':False}).get('account') or {}
@@ -101,7 +101,7 @@ def identity(provider, profile):
                 raise RuntimeError('subscription account required; API fallback disabled')
             return match_identity(profile, account)
     result = subprocess.run(['claude','auth','status','--json'], capture_output=True, text=True,
-                            env=profile_env('claude', profile), timeout=15)
+                            env=profile_env('claude', profile), timeout=claude_timeout)
     if result.returncode:
         raise RuntimeError('Claude subscription identity unavailable')
     value = json.loads(result.stdout)

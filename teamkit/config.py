@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from .runtime import launch_spec
+from .policy import CLAUDE_QUOTA_SOURCE
 
 
 def load(path):
@@ -46,4 +47,6 @@ def binding(profile):
 
 def cached_quota(config, store, provider, account):
     value = store.quota(provider+'/'+account)
+    if provider == 'claude' and value and value.get('source') != CLAUDE_QUOTA_SOURCE:
+        return None
     return value if value and value.get('binding') == binding(profile(config, provider, account)) else None
