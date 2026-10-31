@@ -348,7 +348,7 @@ class WorkflowTests(Fixture):
         self.call('work','record','W1','--step','behavior','--evidence-file',str(evidence))
         (self.repo/'feature.txt').write_text('changed after verification')
         subprocess.run(['git','-C',str(self.repo),'add','feature.txt'],check=True)
-        subprocess.run(['git','-C',str(self.repo),'commit','-qm','change'],check=True)
+        subprocess.run(['git','-C',str(self.repo),'-c','user.name=Fixture','-c','user.email=test@example.invalid','commit','-qm','change'],check=True)
         self.task('R1','reviewer')
         with StoreContext(self.state) as db:
             db.claim('R1','reviewer','codex','team','fixture','high',approval_config=self.value)
