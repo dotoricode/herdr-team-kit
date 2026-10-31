@@ -80,7 +80,8 @@ def render(view,color=False,now=None):
         bar='?'*20 if row['percent'] is None else '#'*filled+'-'*(20-filled)
         seconds=max(0,int(now-row['updated_at']))
         actor='—' if row['model_requested'] is None else clean(row['model_requested'])+'/'+clean(row['effort_requested'])
-        lines.append(f"{clean(row['id'])}  {label}  [{bar}] {percent}  {actor}  {seconds}초 전")
+        lines.append(f"{clean(row['id'])}  {label}  {actor}  {seconds}초 전")
+        lines.append(f'  {percent} [{bar}]')
         lines.append('  '+clean(row['title'])+f"  [설계 v{row['revision']}, 구현·검증 단계 {row['steps_done']}/{row['steps_total']}]")
         if row['phase']!='complete':
             pending=' / '.join(clean(title) for title in row.get('remaining_steps',[]))
