@@ -164,3 +164,14 @@ class RoutingTests(Fixture):
         task['failures'].append({'cause':'new','kind':'reasoning','effort':'medium'})
         plan=execution_policy(self.value,task)
         self.assertEqual((plan['model'],plan['effort']),('user-selected-fixture','high'))
+
+    def test_fresh_user_decision_can_replace_a_failed_medium_retry(self):
+        task=self.make()
+        with StoreContext(self.state) as db:
+            for owner,effort in [('first','high'),('second','medium')]:
+                db.claim('T1',owner,'codex','team','fixture',effort)
+                db.handoff('T1',owner,{'head':task['base'],'dirty':False,'verification':['unresolved'],
+                    'next':'operator decision','failure':{'cause':'same','kind':'reasoning'}},True)
+            decision={'failure_count':2,'approval_reference':'new-user-answer','provider':'codex','model':'new-choice','effort':'medium'}
+            db.authorize('T1',decision,True)
+        self.assertEqual(self.call('plan','T1')['model'],'new-choice')

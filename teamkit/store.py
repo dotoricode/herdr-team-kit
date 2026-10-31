@@ -175,7 +175,7 @@ class Store:
             value = self.get(task)
             failures = value.get('failures', [])
             meaningful = [f for f in failures if f['kind'] in ('reasoning','insufficient_evidence')]
-            if value['state'] != 'handed_off' or value.get('owner') is not None or not meaningful or meaningful[-1]['effort'] not in ('high','xhigh','max') or decision['failure_count'] != len(failures):
+            if value['state'] != 'handed_off' or value.get('owner') is not None or not any(f['effort'] in ('high','xhigh','max') for f in meaningful) or decision['failure_count'] != len(failures):
                 raise ValueError('decision does not match the stopped high-effort failure')
             value['user_decision'] = dict(decision)
             return self._save(value, 'user_authorized', decision)
