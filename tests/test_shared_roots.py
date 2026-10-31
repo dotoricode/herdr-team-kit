@@ -86,3 +86,15 @@ class SharedRootsTests(Fixture):
             with patch('teamkit.store.subprocess.run',return_value=subprocess.CompletedProcess([],128,stdout='',stderr='fixture failure')):
                 with self.assertRaises(ValueError):db.claim('M2','owner2','codex','team','fixture','medium')
             self.assertEqual(db.get('M2')['state'],'queued')
+
+    def test_distinct_worktrees_with_trailing_space_keep_distinct_identity(self):
+        from test_cli import StoreContext
+        root=self.shared();other=self.root/'manual '
+        subprocess.run(['git','-C',str(root),'worktree','add','-q','--detach',str(other),'HEAD'],check=True)
+        self.value['shared_roots']=[str(root),str(other)]
+        self.value['teams']['beta']=dict(self.value['teams']['alpha']);self.config.write_text(json.dumps(self.value))
+        for task,team,target in [('M1','alpha',root),('M2','beta',other)]:
+            self.call('create',task,'--team',team,'--root',str(target),'--goal-file',str(self.root/'goal.txt'))
+        with StoreContext(self.state) as db:
+            db.claim('M1','owner1','codex','team','fixture','medium')
+            self.assertEqual(db.claim('M2','owner2','codex','team','fixture','medium')['state'],'claimed')
