@@ -59,26 +59,32 @@ class Store:
                         (value['id'], event, time.time(), json.dumps(detail or {})))
         return value
 
-    def create(self, task, team, role, root, base, goal, basis_kind="git"):
+    def create(self, task, team, role, root, base, goal, basis_kind="git", classification=None):
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', task):
             raise ValueError('invalid task ID')
         if role not in ('leader', 'implementer', 'reviewer') or not sha(base) or not Path(root).is_absolute() or not goal.strip():
             raise ValueError('invalid task contract')
         value = dict(id=task, team=team, role=role, root=root, base=base, goal=goal, basis_kind=basis_kind, state='queued', owner=None)
+        if classification is not None:
+            value['classification'] = classification
         with self.transaction():
             old = self.db.execute('SELECT body FROM tasks WHERE id=?', (task,)).fetchone()
             if old:
                 existing = json.loads(old[0])
                 if any(existing[k] != value[k] for k in ('team','role','root','base','goal','basis_kind')):
                     raise ValueError('task ID already has another contract')
+                if existing.get('classification', {'kind':'general','risks':[]}) != value.get('classification', {'kind':'general','risks':[]}):
+                    raise ValueError('task ID already has another classification')
                 return existing
             return self._save(value, 'created')
 
-    def claim(self, task, owner, provider, account, model, effort):
+    def claim(self, task, owner, provider, account, model, effort, expected_task=None):
         if not owner or provider not in ('codex','claude') or account not in ('team','personal') or not model:
             raise ValueError('invalid execution identity')
         with self.transaction():
             value = self.get(task)
+            if expected_task is not None and value != expected_task:
+                raise ValueError('task changed during preflight; plan again')
             if value['state'] not in ('queued', 'handed_off'):
                 raise ValueError('task already claimed or terminal; inspect before retry')
             active = [t for t in self.list() if t['state'] in ACTIVE]
@@ -152,8 +158,27 @@ class Store:
             value = self.get(task)
             if value.get('owner') != owner or value['state'] not in ACTIVE | {'ready'}:
                 raise ValueError('handoff owner/state mismatch')
+            failure = checkpoint.get('failure')
+            if failure is not None:
+                from .routing import FAILURES
+                if not isinstance(failure, dict) or set(failure) != {'cause','kind'} or failure['kind'] not in FAILURES or not isinstance(failure['cause'], str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}', failure['cause']) or not isinstance(checkpoint['verification'], list) or not checkpoint['verification'] or not all(isinstance(v,str) and v.strip() for v in checkpoint['verification']):
+                    raise ValueError('failure requires cause, kind and verification evidence')
+                value.setdefault('failures', []).append({**failure, 'effort':value['effort']})
             value.update(state='handed_off', owner=None, checkpoint=checkpoint)
             return self._save(value, 'handed_off', checkpoint)
+
+    def authorize(self, task, decision, approved):
+        fields = {'failure_count','approval_reference','provider','model','effort'}
+        if not approved or not isinstance(decision, dict) or set(decision) != fields or type(decision['failure_count']) is not int or not isinstance(decision['approval_reference'], str) or not decision['approval_reference'].strip() or decision['provider'] not in ('codex','claude') or not isinstance(decision['model'], str) or not decision['model'].strip() or decision['effort'] not in ('low','medium','high','xhigh','max'):
+            raise ValueError('explicit user approval and complete model decision required')
+        with self.transaction():
+            value = self.get(task)
+            failures = value.get('failures', [])
+            meaningful = [f for f in failures if f['kind'] in ('reasoning','insufficient_evidence')]
+            if value['state'] != 'handed_off' or value.get('owner') is not None or not any(f['effort'] in ('high','xhigh','max') for f in meaningful) or decision['failure_count'] != len(failures):
+                raise ValueError('decision does not match the stopped high-effort failure')
+            value['user_decision'] = dict(decision)
+            return self._save(value, 'user_authorized', decision)
 
     def complete(self, task, owner, head, evidence, reviewed_head=None):
         if not sha(head) or not isinstance(evidence, list) or not evidence or not all(isinstance(x,str) and x.strip() for x in evidence):

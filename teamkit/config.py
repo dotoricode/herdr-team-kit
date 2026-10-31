@@ -25,6 +25,13 @@ def load(path):
         for role, policy in team['roles'].items():
             if role not in ('leader','implementer','reviewer') or policy.get('provider') not in value['profiles'] or not policy.get('model'):
                 raise ValueError('role requires configured provider and explicit model')
+    routes = value.get('routing', {})
+    from .routing import KINDS
+    if not isinstance(routes, dict) or any(kind not in KINDS for kind in routes):
+        raise ValueError('invalid routing kinds')
+    for route in routes.values():
+        if not isinstance(route, dict) or set(route) != {'provider','model','effort'} or route.get('provider') not in value['profiles'] or not isinstance(route.get('model'), str) or not route['model'] or route.get('effort') not in ('low','medium','high'):
+            raise ValueError('routing requires provider, model and supported effort')
     ttl = value.get('quota_ttl_seconds', 120)
     if type(ttl) is not int or not 1 <= ttl <= 300:
         raise ValueError('quota TTL must be 1..300 seconds')
