@@ -251,7 +251,8 @@ def run(args):
             runtime = Herdr()
             name = 'tk-'+owner[:20]
             try:
-                store.update(args.task, owner, 'launching', {})
+                store.update(args.task, owner, 'launching',
+                             {'receipt_protocol':'host-fresh-v1','profile_binding':binding(pr)} if provider=='codex' else {})
                 launched = runtime.launch(launch_task, spec, name, lambda detail: store.note(args.task, owner, detail))
                 store.update(args.task, owner, 'submitted', launched)
                 receipt = [sys.executable,str(Path(__file__).resolve().parent.parent/'teamkit_cli.py'),'--config',str(Path(args.config).resolve()),
@@ -266,7 +267,11 @@ def run(args):
                            '\nRead only the relevant approved contract sections. Keep changes inside approved paths and preserve result, failure, ownership and lifetime contracts. Add files/classes only for a concrete responsibility boundary. Report semantic changes for user approval; never approve your own design. Report milestones through work record with real evidence. Avoid status-only model requests, full-history copies and repeated unchanged reads.' if work else '')+
                           ('\nPLANNING ONLY: product source is read-only. Write design artifacts only in the private working directory. Compare alternatives and failure conditions; ask the user for consequential contract choices. Never implement or approve the product design.' if designing else '')+
                           ('\nAfter processing, park this leader with the same CLI: park '+args.task+' --owner '+owner if task['role'] == 'leader' else ''))
-                runtime.prompt(name, prompt)
+                if provider=='codex':
+                    from .receipt import prompt as host_receipt_prompt
+                    host_receipt_prompt(runtime,store,args.config,store.get(args.task),owner,prompt)
+                else:
+                    runtime.prompt(name, prompt)
             except BaseException:
                 # Delivery may have occurred even when the CLI timed out.
                 store.delivery_failed(args.task, owner)
@@ -299,6 +304,9 @@ def run(args):
             pr = profile(config, task['provider'], task['account'])
             if not profile_home_matches(task['provider'], pr['home']):
                 raise ValueError('running process profile does not match dispatch')
+            if task['provider']=='codex' and task.get('runtime',{}).get('receipt_protocol')=='host-fresh-v1':
+                from .receipt import wait_for_confirmation
+                return wait_for_confirmation(store,args.task,args.owner,binding(pr))
             providers.identity(task['provider'], pr)
             return store.receipt(args.task, args.owner)
         evidence = json.loads(Path(args.evidence_file).read_text())

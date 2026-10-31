@@ -14,6 +14,10 @@
 
 진행 작업은 안전한 경계까지 유지합니다. 팀계정 복구는 새 작업부터 적용합니다. 같은 계정·같은 작업의 resume은 native CLI로 수행하고 기존 소유권을 유지합니다. 현재 dispatch는 교차 계정 인계 후 새 세션을 시작합니다. Codex 새 실행과 resume에는 `--no-daemon`을 넣어 관리 pane의 실행 환경을 공유 background server에 맡기지 않습니다. 실제 Herdr 환경 전달은 별도 통합 검증 대상입니다. 인증 파일이나 세션 저장소를 공유하지 않습니다. 기존 로그인 홈을 재사용할 때도 실제 계정 일치를 먼저 확인합니다. Claude의 정확한 기본 홈은 기본 keychain namespace로 실행하고, 별도 홈은 `CLAUDE_CONFIG_DIR`로 분리합니다. 기본 경로를 명시하는 것과 환경변수를 비우는 것이 같은 인증 namespace라고 가정하지 않습니다. 기본 프로필의 receipt·capture는 환경변수가 unset 또는 빈 값일 때만 허용하며, 명시적 기본 경로는 인증 조회 전에 거절합니다.
 
+새 Codex 배정의 receipt는 host 중계를 사용합니다. worker는 지정된 profile 환경을 확인하고 owner·attempt·nonce·profile binding·만료 시각에 묶인 요청을 남깁니다. 배정 host가 요청 이후 실제 provider identity를 조회하고, 요청과 현재 설정·소유권·기한을 다시 대조한 뒤 수신을 확정합니다. worker sandbox에 인증 홈 쓰기 권한을 추가하거나 인증 파일을 복사하지 않습니다. 기존 preflight만 재사용하지 않으며 `identity_source=host-fresh-provider`로 출처를 구분합니다. 이는 로컬 장부의 attestation이며 native 세션 인증을 암호학적으로 증명하지 않습니다.
+
+host 확인은 배정의 prompt 대기 동안만 동작합니다. 요청 기한 만료·배정 종료·실패·소유권 변경은 자동 재배정하지 않습니다. dispatcher가 끝난 뒤 늦게 생긴 요청은 확인되지 않으며, 기존 owner와 실행 상태를 조사해 명시적으로 인계한 뒤 새 배정을 결정합니다. 기존 parked leader 및 Claude receipt는 이 중계로 자동 전환하지 않습니다.
+
 시간 초과·전송 불명은 자동 재시도하지 않습니다. 같은 소유자의 늦은 receipt는 실제 프로필·계정 확인 후 running으로 복구할 수 있습니다. `show`와 `events`, Herdr 출력으로 실제 프로세스와 소유권을 확인합니다. 기존 작성 주체가 멈춘 것을 확인한 뒤 다음 형식의 로컬 파일로 인계합니다.
 
 ```json
