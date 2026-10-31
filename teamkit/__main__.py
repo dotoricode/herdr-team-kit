@@ -176,7 +176,7 @@ def run(args):
             if checkpoint and checkpoint.get('worktree_fingerprint') != task_fingerprint(task, config):
                 raise ValueError('checkpoint worktree changed; reconcile before dispatch')
             owner = uuid.uuid4().hex
-            store.claim(args.task, owner, provider, account, pr['model'], pr.get('effort','medium'))
+            store.claim(args.task, owner, provider, account, pr['model'], pr.get('effort','medium'), expected_task=task)
             runtime = Herdr()
             try:
                 store.update(args.task, owner, 'launching', {})

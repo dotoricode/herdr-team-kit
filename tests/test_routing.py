@@ -111,3 +111,20 @@ class RoutingTests(Fixture):
     def test_work_kind_must_match_role(self):
         for kind in ('design','wording'):
             with self.assertRaises(ValueError):self.make('--work-kind',kind)
+
+    def test_stale_dispatch_cannot_bypass_new_high_failure(self):
+        task=self.make()
+        now=time.time()
+        with StoreContext(self.state) as db:
+            db.quota('codex/team',{'binding':binding(self.value['profiles']['codex']['team']),
+                'observed_at':now,'five_hour':{'used':1,'resets_at':now+900},'weekly':{'used':1,'resets_at':now+900}})
+        def concurrent_attempt(*args):
+            with StoreContext(self.state) as db:
+                db.claim('T1','new-owner','codex','team','general-fixture','high')
+                db.handoff('T1','new-owner',{'head':task['base'],'dirty':False,'verification':['unresolved'],
+                    'next':'ask user','failure':{'cause':'same','kind':'reasoning'}},True)
+        with patch.dict(os.environ,{'HERDR_ENV':'1'}),patch('teamkit.providers.identity',side_effect=concurrent_attempt),patch('teamkit.__main__.Herdr') as h:
+            h.return_value.launch.return_value={'name':'fixture','pane':'w1:p1'}
+            with self.assertRaises(ValueError):self.call('dispatch','T1')
+            h.assert_not_called()
+        self.assertEqual(self.call('plan','T1')['action'],'ask_user')

@@ -78,11 +78,13 @@ class Store:
                 return existing
             return self._save(value, 'created')
 
-    def claim(self, task, owner, provider, account, model, effort):
+    def claim(self, task, owner, provider, account, model, effort, expected_task=None):
         if not owner or provider not in ('codex','claude') or account not in ('team','personal') or not model:
             raise ValueError('invalid execution identity')
         with self.transaction():
             value = self.get(task)
+            if expected_task is not None and value != expected_task:
+                raise ValueError('task changed during preflight; plan again')
             if value['state'] not in ('queued', 'handed_off'):
                 raise ValueError('task already claimed or terminal; inspect before retry')
             active = [t for t in self.list() if t['state'] in ACTIVE]
