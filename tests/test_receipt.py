@@ -126,3 +126,45 @@ class ReceiptTests(Fixture):
                 prompt(MagicMock(),db,self.config,db.get('T1'),'owner','fixture')
                 identity.assert_not_called()
             self.assertEqual(db.get('T1')['state'],'submitted')
+
+    def test_cancelled_worker_request_cannot_be_confirmed_later(self):
+        self.submitted()
+        with patch.dict(os.environ,{'CODEX_HOME':str(self.root/'team')}),patch('teamkit.receipt.time.sleep',side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):self.call('receipt','T1','--owner','owner')
+        with StoreContext(self.state) as db,patch('teamkit.providers.identity') as identity:
+            verify_pending(db,self.config,'T1','owner')
+            identity.assert_not_called()
+            self.assertEqual(db.get('T1')['state'],'uncertain')
+
+    def test_config_rechecked_after_acquiring_transaction(self):
+        from contextlib import contextmanager
+        self.submitted()
+        with StoreContext(self.state) as db:
+            self.request(db);original=db.transaction
+            @contextmanager
+            def changed_after_begin():
+                with original():
+                    self.value['profiles']['codex']['team']['identity']['email']='after-lock@example.invalid'
+                    self.config.write_text(json.dumps(self.value))
+                    yield
+            with patch('teamkit.providers.identity'),patch.object(db,'transaction',changed_after_begin):
+                verify_pending(db,self.config,'T1','owner')
+            self.assertEqual(db.get('T1')['state'],'uncertain')
+            self.assertNotIn('identity_checked',db.get('T1')['runtime'])
+
+    def test_prompt_ending_during_identity_cannot_confirm(self):
+        from threading import Event
+        from types import SimpleNamespace
+        from teamkit.receipt import prompt
+        self.submitted();started=Event()
+        def ended(*args):
+            started.wait(2)
+            raise RuntimeError('transport ended')
+        def checking(*args):
+            started.set();time.sleep(0.1)
+        with StoreContext(self.state) as db:
+            self.request(db)
+            with patch('teamkit.providers.identity',side_effect=checking):
+                with self.assertRaises(RuntimeError):prompt(SimpleNamespace(prompt=ended),db,self.config,db.get('T1'),'owner','fixture')
+            self.assertEqual(db.get('T1')['state'],'uncertain')
+            self.assertNotIn('identity_checked',db.get('T1')['runtime'])
