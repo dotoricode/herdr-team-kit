@@ -83,7 +83,7 @@ class Store:
                         (value['id'], event, time.time(), json.dumps(detail or {})))
         return value
 
-    def create(self, task, team, role, root, base, goal, basis_kind="git", classification=None):
+    def create(self, task, team, role, root, base, goal, basis_kind="git", classification=None, work_id=None, design_digest=None):
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', task):
             raise ValueError('invalid task ID')
         if role not in ('leader', 'implementer', 'reviewer') or not sha(base) or not Path(root).is_absolute() or not goal.strip():
@@ -91,6 +91,8 @@ class Store:
         value = dict(id=task, team=team, role=role, root=root, base=base, goal=goal, basis_kind=basis_kind, state='queued', owner=None)
         if classification is not None:
             value['classification'] = classification
+        if work_id:
+            value.update(work_id=work_id,design_digest=design_digest)
         with self.transaction():
             old = self.db.execute('SELECT body FROM tasks WHERE id=?', (task,)).fetchone()
             if old:
@@ -99,10 +101,12 @@ class Store:
                     raise ValueError('task ID already has another contract')
                 if existing.get('classification', {'kind':'general','risks':[]}) != value.get('classification', {'kind':'general','risks':[]}):
                     raise ValueError('task ID already has another classification')
+                if existing.get('work_id')!=work_id or existing.get('design_digest')!=design_digest:
+                    raise ValueError('task ID already references another design')
                 return existing
             return self._save(value, 'created')
 
-    def claim(self, task, owner, provider, account, model, effort, expected_task=None):
+    def claim(self, task, owner, provider, account, model, effort, expected_task=None, approval_config=None):
         if not owner or provider not in ('codex','claude') or account not in ('team','personal') or not model:
             raise ValueError('invalid execution identity')
         with self.transaction():
@@ -111,12 +115,24 @@ class Store:
                 raise ValueError('task changed during preflight; plan again')
             if value['state'] not in ('queued', 'handed_off'):
                 raise ValueError('task already claimed or terminal; inspect before retry')
+            work=None
+            if value.get('work_id') and approval_config is None:
+                raise ValueError('linked work claim requires approval validation')
+            if approval_config is not None:
+                from .workflow import check_task
+                work=check_task(approval_config,self,value)
             active = [t for t in self.list() if t['state'] in ACTIVE]
             if len(active) >= 3:
                 raise ValueError('global model limit reached')
             if value['role'] == 'implementer' and any(t['role'] == 'implementer' and (t['team'] == value['team'] or writes_overlap(t['root'], value['root'])) for t in active):
                 raise ValueError('team already has an implementation owner')
             value.update(state='claimed', owner=owner, provider=provider, account=account, model=model, effort=effort)
+            if work and value['role']=='implementer':
+                from .workflow import save
+                work.pop('checkpoint',None)
+                work.pop('hold',None)
+                work['phase']='in_progress'
+                save(self,work,'implementation_claimed')
             return self._save(value, 'claimed')
 
     def update(self, task, owner, state, detail):
@@ -204,7 +220,7 @@ class Store:
             value['user_decision'] = dict(decision)
             return self._save(value, 'user_authorized', decision)
 
-    def complete(self, task, owner, head, evidence, reviewed_head=None):
+    def complete(self, task, owner, head, evidence, reviewed_head=None, review_verdict=None):
         if not sha(head) or not isinstance(evidence, list) or not evidence or not all(isinstance(x,str) and x.strip() for x in evidence):
             raise ValueError('completion requires full SHA and verification evidence')
         with self.transaction():
@@ -213,6 +229,10 @@ class Store:
                 raise ValueError('completion requires a running receipted owner')
             if value['role'] == 'reviewer' and (reviewed_head != value['base'] or head != reviewed_head):
                 raise ValueError('reviewed SHA must match pinned base and current HEAD')
+            if value['role']=='reviewer' and value.get('work_id'):
+                if review_verdict not in ('pass','findings','blocked'):
+                    raise ValueError('linked independent review requires an explicit verdict')
+                value['review_verdict']=review_verdict
             value.update(state='awaiting_review', head=head, verification=evidence)
             return self._save(value, 'awaiting_review')
 

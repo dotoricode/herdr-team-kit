@@ -39,6 +39,15 @@ def load(path):
     if type(ttl) is not int or not 1 <= ttl <= 300:
         raise ValueError('quota TTL must be 1..300 seconds')
     value['quota_ttl_seconds'] = ttl
+    if type(value.get('require_design_approval',False)) is not bool:
+        raise ValueError('require_design_approval must be boolean')
+    private=value.get('private_plan_root')
+    if private is not None and (not isinstance(private,str) or not Path(private).expanduser().is_absolute()):
+        raise ValueError('private_plan_root must be absolute')
+    if not isinstance(value.get('dashboard_workspaces',{}),dict) or any(k not in value['teams'] or not isinstance(v,dict) or set(v)!={'id','label'} or not all(isinstance(s,str) and s for s in v.values()) for k,v in value.get('dashboard_workspaces',{}).items()):
+        raise ValueError('dashboard_workspaces must map configured teams to explicit workspace IDs')
+    if value.get('herdr_session') is not None and (not isinstance(value['herdr_session'],str) or not value['herdr_session']):
+        raise ValueError('herdr_session must be a session name')
     return value
 
 
