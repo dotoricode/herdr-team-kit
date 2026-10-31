@@ -50,6 +50,7 @@ def model(data,config):
             if work['phase']=='complete':percent=100
         rows.append({'id':work['id'],'team':work['team'],'title':work['title'],'phase':phase,
                      'percent':percent,'steps_done':len(work['milestones']),'steps_total':len(work.get('steps',[])),
+                     'remaining_steps':[step['title'] for step in work.get('steps',[]) if step['id'] not in work['milestones']],
                      'revision':work['revision'],'approved':approved,'updated_at':work['updated_at'],
                      'model_requested':task.get('model') if task else None,'effort_requested':task.get('effort') if task else None,
                      'execution_state':task['state'] if task else None,'attempts':sum(t.get('attempt_count',0) for t in tasks),
@@ -68,15 +69,22 @@ def render(view,color=False,now=None):
         total=sum(counts.values());done=counts.get('complete',0);waiting=counts.get('awaiting_approval',0)
         blocked=sum(counts.get(x,0) for x in ('inspect','quota','environment'))
         lines.append(f"{clean(view['team_labels'].get(team,team))}  작업 {total}건  완료 {done}  승인 대기 {waiting}  차단·대기 {blocked}")
+    remaining=sum(row['phase']!='complete' for row in view['rows'])
+    lines.append(f'남은 작업 {remaining}건')
     lines+=['','작업 / 단계 / 진행률 / 요청 모델·effort / 기록 갱신 경과','─'*66]
     for row in view['rows']:
         label=LABELS.get(row['phase'],row['phase'])
         if color:label='\x1b['+COLORS.get(row['phase'],'37')+'m'+label+'\x1b[0m'
         percent='미정' if row['percent'] is None else str(row['percent'])+'%'
+        filled=0 if row['percent'] is None else row['percent']//5
+        bar='?'*20 if row['percent'] is None else '#'*filled+'-'*(20-filled)
         seconds=max(0,int(now-row['updated_at']))
         actor='—' if row['model_requested'] is None else clean(row['model_requested'])+'/'+clean(row['effort_requested'])
-        lines.append(f"{clean(row['id'])}  {label}  {percent}  {actor}  {seconds}초 전")
+        lines.append(f"{clean(row['id'])}  {label}  [{bar}] {percent}  {actor}  {seconds}초 전")
         lines.append('  '+clean(row['title'])+f"  [설계 v{row['revision']}, 구현·검증 단계 {row['steps_done']}/{row['steps_total']}]")
+        if row['phase']!='complete':
+            pending=' / '.join(clean(title) for title in row.get('remaining_steps',[]))
+            lines.append('  남은 단계: '+(pending or '최종 검증·독립 리뷰·완료 확인'))
         if row['execution_state']:
             execution={'claimed':'배정 확정','launching':'시작 준비','submitted':'수신 확인 대기','running':'수신 확인됨','uncertain':'실행 결과 확인 필요','awaiting_review':'완료 근거 기록됨','handed_off':'인계됨','queued':'미배정','ready':'대기'}.get(row['execution_state'],row['execution_state'])
             lines.append('  실행 기록: '+clean(execution)+f" · 배정 시도 {row['attempts']}회")
