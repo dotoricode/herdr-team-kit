@@ -172,14 +172,15 @@ def run(args):
                 if args.role != 'leader':
                     raise ValueError('implementation/review tasks require a Git worktree')
                 base, kind = instructions_basis(team), 'instructions'
-            digest=None
+            digest=None;revision=None
             if args.work:
                 from .workflow import get,document
                 work=get(store,args.work)
                 if work['team']!=args.team or Path(work['root'])!=root:
                     raise ValueError('execution scope differs from product work')
                 digest=document(config,work)[2]
-            return store.create(args.task, args.team, args.role, str(root), base, Path(args.goal_file).read_text(), kind, classification(args.role, args.work_kind, args.risk),args.work,digest)
+                revision=work['revision']
+            return store.create(args.task, args.team, args.role, str(root), base, Path(args.goal_file).read_text(), kind, classification(args.role, args.work_kind, args.risk),args.work,digest,revision)
         if args.command == 'list':
             return store.list()
         if args.command in ('show','events'):

@@ -83,7 +83,7 @@ class Store:
                         (value['id'], event, time.time(), json.dumps(detail or {})))
         return value
 
-    def create(self, task, team, role, root, base, goal, basis_kind="git", classification=None, work_id=None, design_digest=None):
+    def create(self, task, team, role, root, base, goal, basis_kind="git", classification=None, work_id=None, design_digest=None, design_revision=None):
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', task):
             raise ValueError('invalid task ID')
         if role not in ('leader', 'implementer', 'reviewer') or not sha(base) or not Path(root).is_absolute() or not goal.strip():
@@ -92,7 +92,7 @@ class Store:
         if classification is not None:
             value['classification'] = classification
         if work_id:
-            value.update(work_id=work_id,design_digest=design_digest)
+            value.update(work_id=work_id,design_digest=design_digest,design_revision=design_revision)
         with self.transaction():
             old = self.db.execute('SELECT body FROM tasks WHERE id=?', (task,)).fetchone()
             if old:
@@ -101,9 +101,13 @@ class Store:
                     raise ValueError('task ID already has another contract')
                 if existing.get('classification', {'kind':'general','risks':[]}) != value.get('classification', {'kind':'general','risks':[]}):
                     raise ValueError('task ID already has another classification')
-                if existing.get('work_id')!=work_id or existing.get('design_digest')!=design_digest:
+                if existing.get('work_id')!=work_id or existing.get('design_digest')!=design_digest or existing.get('design_revision')!=design_revision:
                     raise ValueError('task ID already references another design')
                 return existing
+            if work_id:
+                from .workflow import get
+                work=get(self,work_id)
+                if work['phase']=='complete':raise ValueError('completed work requires an explicit new revision')
             return self._save(value, 'created')
 
     def claim(self, task, owner, provider, account, model, effort, expected_task=None, approval_config=None):
@@ -127,13 +131,15 @@ class Store:
             if value['role'] == 'implementer' and any(t['role'] == 'implementer' and (t['team'] == value['team'] or writes_overlap(t['root'], value['root'])) for t in active):
                 raise ValueError('team already has an implementation owner')
             value.update(state='claimed', owner=owner, provider=provider, account=account, model=model, effort=effort)
+            value['attempt_count']=value.get('attempt_count',0)+1
+            value['runtime']={}
             if work and value['role']=='implementer':
                 from .workflow import save
                 work.pop('checkpoint',None)
                 work.pop('hold',None)
                 work['phase']='in_progress'
                 save(self,work,'implementation_claimed')
-            return self._save(value, 'claimed')
+            return self._save(value, 'claimed',{'owner':owner,'provider':provider,'account':account,'model':model,'effort':effort})
 
     def update(self, task, owner, state, detail):
         transitions = {'claimed': {'launching','uncertain'}, 'launching': {'submitted','uncertain'},

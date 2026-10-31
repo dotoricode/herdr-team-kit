@@ -5,7 +5,6 @@ import fcntl
 import json
 import os
 from pathlib import Path
-import shutil
 import sys
 import time
 import unicodedata
@@ -37,6 +36,11 @@ def model(data,config):
         active=[t for t in tasks if t['state'] in ACTIVE]
         task=active[-1] if active else tasks[-1] if tasks else None
         phase='inspect' if any(t['state']=='uncertain' for t in active) else work.get('hold',{}).get('kind',work['phase'])
+        reason=work.get('hold',{}).get('reason','')
+        if task and task['state']=='handed_off':
+            failure=task.get('checkpoint',{}).get('failure',{})
+            if failure.get('kind')=='environment':
+                phase='environment';reason='환경 실패: '+failure.get('cause','unknown')
         approved=bool(work.get('approval'))
         percent=None
         if approved:
@@ -46,8 +50,8 @@ def model(data,config):
                      'percent':percent,'steps_done':len(work['milestones']),'steps_total':len(work.get('steps',[])),
                      'revision':work['revision'],'approved':approved,'updated_at':work['updated_at'],
                      'model_requested':task.get('model') if task else None,'effort_requested':task.get('effort') if task else None,
-                     'execution_state':task['state'] if task else None,'attempts':len(tasks),
-                     'reason':work.get('hold',{}).get('reason',''),
+                     'execution_state':task['state'] if task else None,'attempts':sum(t.get('attempt_count',0) for t in tasks),
+                     'reason':reason,
                      'next':work.get('checkpoint',{}).get('next',''),
                      'active_model_attempts':len(active)})
     teams={team:dict(Counter(row['phase'] for row in rows if row['team']==team)) for team in config['teams']}
@@ -70,7 +74,10 @@ def render(view,color=False,now=None):
         seconds=max(0,int(now-row['updated_at']))
         actor='—' if row['model_requested'] is None else clean(row['model_requested'])+'/'+clean(row['effort_requested'])
         lines.append(f"{clean(row['id'])}  {label}  {percent}  {actor}  {seconds}초 전")
-        lines.append('  '+clean(row['title'])+f"  [설계 v{row['revision']}, 단계 {row['steps_done']}/{row['steps_total']}]")
+        lines.append('  '+clean(row['title'])+f"  [설계 v{row['revision']}, 구현·검증 단계 {row['steps_done']}/{row['steps_total']}]")
+        if row['execution_state']:
+            execution={'claimed':'배정 확정','launching':'시작 준비','submitted':'수신 확인 대기','running':'수신 확인됨','uncertain':'실행 결과 확인 필요','awaiting_review':'완료 근거 기록됨','handed_off':'인계됨','queued':'미배정','ready':'대기'}.get(row['execution_state'],row['execution_state'])
+            lines.append('  실행 기록: '+clean(execution)+f" · 배정 시도 {row['attempts']}회")
         if row['reason']:lines.append('  주의: '+clean(row['reason']))
         if row['next']:lines.append('  다음: '+clean(row['next']))
     if not view['rows']:lines.append('등록된 제품 작업 없음 · 팀장 대기 세션은 작업 건수에서 제외')

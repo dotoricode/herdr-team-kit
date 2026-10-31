@@ -141,7 +141,19 @@ class WorkflowTests(Fixture):
             db.update('R2','review-owner-2','launching',{'name':'reviewer-2','pane':'w3:p1'})
             db.update('R2','review-owner-2','submitted',{});db.receipt('R2','review-owner-2')
             db.complete('R2','review-owner-2',head,['independent fixture review'],head,'pass')
-        result=self.call('work','finish','W1','--review-task','R2')
+        self.task('R3','reviewer')
+        with self.assertRaises(ValueError):self.call('work','finish','W1','--review-task','R2')
+        for name,verdict in (('R3','findings'),('R4','pass')):
+            if name=='R4':self.task(name,'reviewer')
+            with StoreContext(self.state) as db:
+                owner=name+'-owner'
+                db.claim(name,owner,'codex','team','fixture','high',approval_config=self.value)
+                db.update(name,owner,'launching',{'name':name,'pane':'w4:p1'})
+                db.update(name,owner,'submitted',{});db.receipt(name,owner)
+                db.complete(name,owner,head,['latest independent review'],head,verdict)
+            if name=='R3':
+                with self.assertRaises(ValueError):self.call('work','finish','W1','--review-task','R2')
+        result=self.call('work','finish','W1','--review-task','R4')
         self.assertEqual(result['phase'],'complete')
         self.assertEqual(model(snapshot(self.state),self.value)['rows'][0]['percent'],100)
 
@@ -157,6 +169,15 @@ class WorkflowTests(Fixture):
         from teamkit.workflow import check_task
         with StoreContext(self.state) as db:
             with self.assertRaises(ValueError):check_task(self.value,db,db.get('T1'))
+
+    def test_nested_revision_git_is_rejected_before_dispatch_or_revision_copy(self):
+        self.setup_work();self.approve();self.task()
+        subprocess.run(['git','init','-q',str(self.root/'private-plans/W1/r1')],check=True)
+        from teamkit.workflow import check_task
+        with StoreContext(self.state) as db:
+            with self.assertRaises(ValueError):check_task(self.value,db,db.get('T1'))
+        with self.assertRaises(ValueError):self.call('work','revise','W1')
+        self.assertFalse((self.root/'private-plans/W1/r2').exists())
 
     def test_readonly_dashboard_never_calls_provider_or_creates_missing_state(self):
         from teamkit.dashboard import model,render
@@ -174,6 +195,15 @@ class WorkflowTests(Fixture):
         self.setup_work();self.approve();self.task('T1');self.task('T2')
         view=model(snapshot(self.state),self.value)
         self.assertEqual(sum(view['teams']['alpha'].values()),1)
+        self.assertEqual(view['rows'][0]['attempts'],0)
+        with StoreContext(self.state) as db:
+            db.claim('T1','first-owner','codex','team','fixture','medium',approval_config=self.value)
+            db.note('T1','first-owner',{'name':'old-attempt','identity_checked':True})
+            task=db.get('T1')
+            db.handoff('T1','first-owner',{'head':task['base'],'dirty':False,'verification':['fake writer stopped'],'next':'continue'},True)
+            current=db.claim('T1','next-owner','codex','team','fixture','medium',approval_config=self.value)
+            self.assertEqual(current['runtime'],{})
+        view=model(snapshot(self.state),self.value)
         self.assertEqual(view['rows'][0]['attempts'],2)
 
     def test_progress_text_cannot_inject_terminal_commands(self):
@@ -221,3 +251,43 @@ class WorkflowTests(Fixture):
                 prefix=rows[y].split(label,1)[0]
                 expected=sum(2 if '\uac00'<=char<='\ud7a3' else 1 for char in prefix)
                 self.assertEqual(x,expected,'color overlay must not overwrite Korean text or counts')
+
+    def test_preexisting_private_work_symlink_cannot_receive_revision_files(self):
+        from pathlib import Path
+        self.setup_work()
+        for ident,target in (('W2',self.repo),('W3',self.root/'team')):
+            target.mkdir(exist_ok=True)
+            (self.root/'private-plans'/ident).symlink_to(target,target_is_directory=True)
+            with self.assertRaises(OSError):self.call('work','create',ident,'--team','alpha','--root',str(self.repo),
+                '--plan-file',str(self.plan),'--contract-file',str(self.contract))
+            self.assertFalse((target/'r1').exists())
+
+    def test_rename_cannot_hide_deletion_outside_approved_paths(self):
+        path=self.repo/'unrelated.txt';path.write_text('keep tracked source')
+        subprocess.run(['git','-C',str(self.repo),'add','unrelated.txt'],check=True)
+        subprocess.run(['git','-C',str(self.repo),'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','baseline'],check=True)
+        self.setup_work();self.approve();self.task()
+        subprocess.run(['git','-C',str(self.repo),'mv','unrelated.txt','feature.txt'],check=True)
+        from teamkit.workflow import check_task
+        with StoreContext(self.state) as db:
+            with self.assertRaises(ValueError):check_task(self.value,db,db.get('T1'))
+        self.assertEqual((self.repo/'feature.txt').read_text(),'keep tracked source')
+
+    def test_old_planning_execution_cannot_adopt_new_revision(self):
+        self.setup_work()
+        self.value['teams']['alpha']['roles']['leader']={'provider':'codex','model':'fixture','effort':'low'}
+        self.value['routing']={'design':{'provider':'codex','model':'fixture','effort':'high'}}
+        self.config.write_text(json.dumps(self.value))
+        self.call('create','DESIGN1','--team','alpha','--role','leader','--work-kind','design',
+            '--root',str(self.repo),'--work','W1','--goal-file',str(self.root/'goal.txt'))
+        self.call('work','revise','W1')
+        with patch.dict(os.environ,{'HERDR_ENV':'1'}),patch('teamkit.providers.identity') as identity:
+            with self.assertRaises(ValueError):self.call('dispatch','DESIGN1')
+            identity.assert_not_called()
+
+    def test_empty_native_metadata_ack_is_not_a_lifecycle_ack(self):
+        from types import SimpleNamespace
+        from teamkit.runtime import Herdr,RuntimeError
+        with patch.dict(os.environ,{'HERDR_ENV':'1'}),patch('teamkit.runtime.subprocess.run',return_value=SimpleNamespace(returncode=0,stdout='',stderr='')):
+            self.assertTrue(Herdr().call('--session','fixture','workspace','report-metadata','w1','--source','test','--token','x=1')['metadata_accepted'])
+            with self.assertRaises(RuntimeError):Herdr().call('agent','start','worker','--kind','codex','--pane','w1:p1')

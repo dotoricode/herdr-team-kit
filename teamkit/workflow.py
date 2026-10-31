@@ -9,7 +9,7 @@ import subprocess
 import time
 
 from .checkpoint import fingerprint, revision_guard
-from .store import ACTIVE, sha
+from .store import ACTIVE
 
 
 def git(root, *args):
@@ -94,6 +94,7 @@ def document(config, work):
     path=private_root(config)/work['id']/('r'+str(work['revision']))
     if path.is_symlink() or path.resolve()!=path or (path/'plan.md').is_symlink() or (path/'contract.json').is_symlink():
         raise ValueError('private revision path changed')
+    outside_git(path)
     plan=(path/'plan.md').read_bytes()
     contract=json.loads((path/'contract.json').read_text())
     validate_contract(contract)
@@ -123,7 +124,7 @@ def check_task(config,store,task):
         raise ValueError('execution does not match product work scope')
     _,contract,digest=document(config,work)
     if task['role']=='leader':
-        if task.get('classification',{}).get('kind')!='design' or work['phase']!='planning':
+        if task.get('classification',{}).get('kind')!='design' or work['phase']!='planning' or task.get('design_revision')!=work['revision']:
             raise ValueError('linked leader work must be classified as design')
         return work
     approval=work.get('approval')
@@ -140,8 +141,8 @@ def check_task(config,store,task):
 
 
 def scope_check(work,contract):
-    changed=git(work['root'],'diff','--name-only','-z',work['approval']['base']).split(b'\0')
-    changed+=git(work['root'],'diff','--cached','--name-only','-z',work['approval']['base']).split(b'\0')
+    changed=git(work['root'],'diff','--no-renames','--name-only','-z',work['approval']['base']).split(b'\0')
+    changed+=git(work['root'],'diff','--cached','--no-renames','--name-only','-z',work['approval']['base']).split(b'\0')
     changed+=git(work['root'],'ls-files','--others','--exclude-standard','-z').split(b'\0')
     for value in filter(None,changed):
         name=value.decode('utf-8','surrogateescape')
@@ -169,8 +170,12 @@ def run(args,config,store):
         with store.transaction():
             if store.db.execute('SELECT 1 FROM work_items WHERE id=?',(args.work,)).fetchone():
                 raise ValueError('work already exists; inspect instead of recreating')
-            path=private/args.work/'r1';path.mkdir(parents=True,mode=0o700)
-            os.chmod(path.parent,0o700)
+            work_dir=private/args.work
+            # A pre-existing directory or symlink is an uncertain prior attempt.
+            # Never follow it while creating private revision files.
+            work_dir.mkdir(mode=0o700)
+            path=work_dir/'r1';path.mkdir(mode=0o700)
+            outside_git(path)
             for filename,data in (('plan.md',plan),('contract.json',json.dumps(contract,ensure_ascii=False,indent=2).encode())):
                 fd=os.open(path/filename,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
                 with os.fdopen(fd,'wb') as out:out.write(data);out.flush();os.fsync(out.fileno())
@@ -182,8 +187,9 @@ def run(args,config,store):
         if args.action=='submit':
             idle(store,work)
             if work['phase'] not in ('planning','awaiting_approval'):raise ValueError('create a new revision before changing approved design')
-            path,_,digest=document(config,work)
-            work.update(phase='awaiting_approval',submitted_digest=digest)
+            path,contract,digest=document(config,work)
+            work.update(phase='awaiting_approval',submitted_digest=digest,title=contract['title'],steps=contract['steps'])
+            work.pop('hold',None)
             return save(store,work,'design_submitted')
         if args.action=='approve':
             idle(store,work)
@@ -195,6 +201,7 @@ def run(args,config,store):
                 work.update(phase='approved',approval={'digest':digest,'reference':args.approval_reference,'at':time.time(),
                             'base':git(work['root'],'rev-parse','HEAD').decode().strip(),'revision':work['revision']})
                 work.update(steps=contract['steps'],title=contract['title'])
+                work.pop('hold',None)
             return save(store,work,'design_approved')
         if args.action=='revise':
             idle(store,work)
@@ -204,7 +211,7 @@ def run(args,config,store):
                 fd=os.open(new/filename,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
                 with os.fdopen(fd,'wb') as out:out.write((old/filename).read_bytes());out.flush();os.fsync(out.fileno())
             work.update(revision=work['revision']+1,phase='planning',milestones={})
-            for key in ('approval','submitted_digest','checkpoint','review_task'):work.pop(key,None)
+            for key in ('approval','submitted_digest','checkpoint','review_task','hold'):work.pop(key,None)
             return save(store,work,'design_revision_created')
         if args.action=='checkpoint':
             idle(store,work)
@@ -244,6 +251,12 @@ def run(args,config,store):
                 head=git(work['root'],'rev-parse','HEAD').decode().strip()
                 if git(work['root'],'status','--porcelain=v1').strip() or reviewer['head']!=head or reviewer['base']!=head:
                     raise ValueError('review is stale or worktree changed')
+                reviews=[t for t in linked_tasks(store,work) if t['role']=='reviewer' and t.get('design_digest')==digest and t['base']==head]
+                if any(t['state']!='awaiting_review' for t in reviews):
+                    raise ValueError('an applicable review is pending or unresolved')
+                completed=[(max(e['seq'] for e in store.events(t['id']) if e['event']=='awaiting_review'),t['id']) for t in reviews]
+                if not completed or max(completed)[1]!=reviewer['id']:
+                    raise ValueError('a newer applicable review must be resolved first')
                 scope_check(work,contract)
                 work.update(phase='complete',review_task=reviewer['id'],completed_head=head)
             return save(store,work,'work_verified')
