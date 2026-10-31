@@ -63,11 +63,11 @@ class SharedRootsTests(Fixture):
 
     def test_native_case_alias_of_shared_worktree_cannot_get_second_owner(self):
         from test_cli import StoreContext
-        root=self.shared();alias=root.parent/root.name.upper()
-        if not alias.exists() or not alias.samefile(root):self.skipTest('requires case-insensitive filesystem')
+        root=self.shared();sub=root/'docs';sub.mkdir();alias=root/'DOCS'
+        if not alias.exists() or not alias.samefile(sub):self.skipTest('requires case-insensitive filesystem')
         self.value['shared_roots']=[str(root)]
         self.value['teams']['beta']=dict(self.value['teams']['alpha']);self.config.write_text(json.dumps(self.value))
-        for task,team,target in [('M1','alpha',root),('M2','beta',alias)]:
+        for task,team,target in [('M1','alpha',sub),('M2','beta',alias)]:
             self.call('create',task,'--team',team,'--root',str(target),'--goal-file',str(self.root/'goal.txt'))
         with StoreContext(self.state) as db:
             db.claim('M1','owner1','codex','team','fixture','medium')
