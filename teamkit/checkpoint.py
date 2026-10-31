@@ -82,3 +82,16 @@ def revision_guard(root):
                     path.unlink()
             except FileNotFoundError:
                 pass
+
+
+def paths_overlap(first, second):
+    if first.is_relative_to(second) or second.is_relative_to(first):
+        return True
+    for path, other in ((first, second), (second, first)):
+        for ancestor in (path, *path.parents):
+            try:
+                if ancestor.samefile(other):
+                    return True
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+    return False

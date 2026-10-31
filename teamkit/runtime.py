@@ -71,6 +71,18 @@ class Herdr:
             raise RuntimeError('Herdr rejected command')
         return body.get('result', body)
 
+    def read(self, name):
+        if os.environ.get('HERDR_ENV') != '1':
+            raise RuntimeError('Herdr read requires a managed pane')
+        try:
+            result = subprocess.run(['herdr','agent','read',name,'--source','detection','--lines','12'],
+                                    capture_output=True, text=True, timeout=15)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise RuntimeError('context observation unavailable; inspect') from error
+        if result.returncode:
+            raise RuntimeError('context observation unavailable; inspect')
+        return result.stdout
+
     def launch(self, task, spec, name, on_created=None):
         args = ['workspace','create','--cwd',task['root'],'--label',name,'--no-focus']
         for key, value in spec['env'].items():
