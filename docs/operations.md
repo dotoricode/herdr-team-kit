@@ -76,3 +76,7 @@ python3 teamkit_cli.py retire TASK-1 --owner OWNER --writer-stopped --evidence-f
 ```
 
 근거에는 비어 있지 않은 `verification` 목록을 넣습니다. 이 명령은 호스트의 정지 확인을 요구하며 자동 janitor가 아닙니다. 새 실행기가 만든 임시 workspace만 허용하고, 기존 owner·workspace label/layout·native foreground PID와 상태를 대조합니다. 상시 팀장·현재 workspace는 보호하며 결과·설계·Git/worktree 파일은 삭제하지 않습니다. 닫기 결과가 불명이면 intent를 보존하여 재시도 대신 inspect하게 합니다. 이미 닫은 실행에 tell을 보내지 않으며 후속 실행은 근거를 보존해 handoff한 뒤 배정합니다.
+
+## 읽기 전용 장부 조회
+
+`show`, `list`, `events`, `work show`는 기존 SQLite 장부를 `mode=ro`로 읽습니다. 쓰기용 Store 초기화·chmod·스키마 생성·승인 트랜잭션을 실행하지 않으며, 조회 때문에 디렉토리나 장부를 만들지 않습니다. 미존재 장부는 명시적인 오류이고, 이전 장부에 work_items가 없으면 unknown product work로 반환합니다. 손상된 DB/레코드와 읽기 잠금 오류도 JSON 오류로 보고합니다. 배타적 잠금의 SQLite 대기 설정은 1초이며 이후 오류로 반환하고, 일반 쓰기 예약 잠금 아래서는 커밋된 내용을 읽습니다. 쓰기·배정·수신·승인 경로는 기존 정책을 유지합니다.

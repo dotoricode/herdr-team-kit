@@ -132,6 +132,9 @@ def run(args):
                 'teams':list(config['teams']), 'providers':list(config['profiles']),
                 'quota_ttl_seconds':config['quota_ttl_seconds'],
                 'live_verified':False}
+    if args.command in ('show', 'list', 'events') or args.command == 'work' and args.action == 'show':
+        from .inspection import read
+        return read(args)
     if args.command == 'capture' and args.provider == 'claude':
         from .statusline import collect
         return collect(config, args.state, args.account, json.load(sys.stdin))
@@ -189,10 +192,6 @@ def run(args):
                 digest=document(config,work)[2]
                 revision=work['revision']
             return store.create(args.task, args.team, args.role, str(root), base, Path(args.goal_file).read_text(), kind, classification(args.role, args.work_kind, args.risk),args.work,digest,revision)
-        if args.command == 'list':
-            return store.list()
-        if args.command in ('show','events'):
-            return getattr(store, 'get' if args.command == 'show' else 'events')(args.task)
         task = store.get(args.task)
         if args.command == 'plan':
             return execution_policy(config, task)
