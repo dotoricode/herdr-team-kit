@@ -61,5 +61,27 @@
         }
       }
     }
+  },
+  "routing": {
+    "general": {
+      "provider": "claude",
+      "model": "replace-with-supported-model",
+      "effort": "medium"
+    },
+    "small": {
+      "provider": "claude",
+      "model": "replace-with-supported-model",
+      "effort": "low"
+    },
+    "design": {
+      "provider": "codex",
+      "model": "replace-with-supported-model",
+      "effort": "medium"
+    },
+    "wording": {
+      "provider": "codex",
+      "model": "replace-with-supported-model",
+      "effort": "medium"
+    }
   }
 }

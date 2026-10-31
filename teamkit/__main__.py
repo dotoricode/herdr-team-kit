@@ -13,6 +13,7 @@ from .checkpoint import fingerprint, revision_guard
 from .policy import choose_account, context_action, normalize_quota
 from .runtime import Herdr, RuntimeError as KitError, launch_spec, profile_home_matches
 from .store import Store
+from .routing import KINDS, RISKS, classification, execution_policy
 
 
 def git(root, *args):
@@ -68,10 +69,12 @@ def parser():
     x = commands.add_parser('create')
     x.add_argument('task'); x.add_argument('--team', required=True)
     x.add_argument('--role', choices=['leader','implementer','reviewer'], default='implementer')
+    x.add_argument('--work-kind', choices=KINDS, default='general')
+    x.add_argument('--risk', choices=RISKS, action='append', default=[])
     x.add_argument('--root', required=True); x.add_argument('--goal-file', required=True)
     x = commands.add_parser('dispatch')
     x.add_argument('task')
-    for cmd in ('show', 'events'):
+    for cmd in ('show', 'events', 'plan'):
         x = commands.add_parser(cmd); x.add_argument('task')
     commands.add_parser('list')
     for cmd in ('receipt', 'park'):
@@ -142,17 +145,21 @@ def run(args):
                 if args.role != 'leader':
                     raise ValueError('implementation/review tasks require a Git worktree')
                 base, kind = instructions_basis(team), 'instructions'
-            return store.create(args.task, args.team, args.role, str(root), base, Path(args.goal_file).read_text(), kind)
+            return store.create(args.task, args.team, args.role, str(root), base, Path(args.goal_file).read_text(), kind, classification(args.role, args.work_kind, args.risk))
         if args.command == 'list':
             return store.list()
         if args.command in ('show','events'):
             return getattr(store, 'get' if args.command == 'show' else 'events')(args.task)
         task = store.get(args.task)
+        if args.command == 'plan':
+            return execution_policy(config, task)
         if args.command == 'dispatch':
             # Refuse before claiming: outside Herdr is a known no-op, not an uncertain launch.
             if os.environ.get('HERDR_ENV') != '1':
                 raise KitError('dispatch must run inside Herdr')
-            role = config['teams'][task['team']]['roles'][task['role']]
+            role = execution_policy(config, task)
+            if role['action'] != 'dispatch':
+                return role
             provider = role['provider']
             account = choose_account(cached_quota(config, store, provider, 'team'), cached_quota(config, store, provider, 'personal'), now, config['quota_ttl_seconds'])
             if not account:

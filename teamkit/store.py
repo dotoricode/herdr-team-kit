@@ -59,18 +59,22 @@ class Store:
                         (value['id'], event, time.time(), json.dumps(detail or {})))
         return value
 
-    def create(self, task, team, role, root, base, goal, basis_kind="git"):
+    def create(self, task, team, role, root, base, goal, basis_kind="git", classification=None):
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', task):
             raise ValueError('invalid task ID')
         if role not in ('leader', 'implementer', 'reviewer') or not sha(base) or not Path(root).is_absolute() or not goal.strip():
             raise ValueError('invalid task contract')
         value = dict(id=task, team=team, role=role, root=root, base=base, goal=goal, basis_kind=basis_kind, state='queued', owner=None)
+        if classification is not None:
+            value['classification'] = classification
         with self.transaction():
             old = self.db.execute('SELECT body FROM tasks WHERE id=?', (task,)).fetchone()
             if old:
                 existing = json.loads(old[0])
                 if any(existing[k] != value[k] for k in ('team','role','root','base','goal','basis_kind')):
                     raise ValueError('task ID already has another contract')
+                if existing.get('classification', {'kind':'general','risks':[]}) != value.get('classification', {'kind':'general','risks':[]}):
+                    raise ValueError('task ID already has another classification')
                 return existing
             return self._save(value, 'created')
 
@@ -152,6 +156,12 @@ class Store:
             value = self.get(task)
             if value.get('owner') != owner or value['state'] not in ACTIVE | {'ready'}:
                 raise ValueError('handoff owner/state mismatch')
+            failure = checkpoint.get('failure')
+            if failure is not None:
+                from .routing import FAILURES
+                if not isinstance(failure, dict) or set(failure) != {'cause','kind'} or failure['kind'] not in FAILURES or not isinstance(failure['cause'], str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}', failure['cause']) or not isinstance(checkpoint['verification'], list) or not checkpoint['verification'] or not all(isinstance(v,str) and v.strip() for v in checkpoint['verification']):
+                    raise ValueError('failure requires cause, kind and verification evidence')
+                value.setdefault('failures', []).append({**failure, 'effort':value['effort']})
             value.update(state='handed_off', owner=None, checkpoint=checkpoint)
             return self._save(value, 'handed_off', checkpoint)
 
