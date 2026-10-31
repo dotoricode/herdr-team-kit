@@ -4,6 +4,7 @@ import os
 import selectors
 import subprocess
 import time
+import tempfile
 
 from .runtime import AUTH_ENV, RuntimeError, home_key, home_value
 
@@ -26,11 +27,17 @@ class CodexRPC:
         self.proc = None
         self.buffer = b''
         self.serial = 0
+        self.stderr = None
 
     def __enter__(self):
-        self.proc = subprocess.Popen(['codex','-c','cli_auth_credentials_store="file"','app-server'],
-                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                     env=profile_env('codex', self.profile))
+        self.stderr = tempfile.TemporaryFile()
+        try:
+            self.proc = subprocess.Popen(['codex','-c','cli_auth_credentials_store="file"','app-server'],
+                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr,
+                                         env=profile_env('codex', self.profile))
+        except BaseException:
+            self.stderr.close()
+            raise
         try:
             self.request('initialize', {'clientInfo':{'name':'herdr_team_kit','version':'0.1.0'}})
             self._write({'method':'initialized'})
@@ -56,7 +63,9 @@ class CodexRPC:
                         break
                     chunk = os.read(self.proc.stdout.fileno(), 65536)
                     if not chunk:
-                        break
+                        try: code=self.proc.wait(timeout=0.1)
+                        except subprocess.TimeoutExpired: code='unknown'
+                        raise RuntimeError('provider process closed stdout before response (exit '+str(code)+')')
                     self.buffer += chunk
                     if len(self.buffer) > 2**20:
                         raise RuntimeError('provider response too large')
@@ -80,6 +89,8 @@ class CodexRPC:
                 self.proc.wait()
             self.proc.stdin.close()
             self.proc.stdout.close()
+        if self.stderr:
+            self.stderr.close()
 
 
 def match_identity(profile, identity):
