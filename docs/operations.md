@@ -51,3 +51,5 @@ python3 teamkit_cli.py handoff TASK-1 --owner OWNER --writer-stopped --evidence-
 GitHub 변경은 PR 생성 → Codex 독립 리뷰 → 지적 검증·수정 → 최신 SHA 재리뷰 → 필수 검사 → merge 순서입니다. 자동 수정·재리뷰는 3회 후 총괄에 보고합니다. 미해결 지적·실패·시간 초과·오래된 SHA의 리뷰는 머지 근거가 아닙니다. 현재 CLI는 GitHub 머지나 리뷰 판정을 자동 실행하지 않습니다.
 
 내부 Git의 push·PR 게시·merge는 각각 사용자 승인을 받습니다. 내부 PR 내 리뷰 절차는 적용하지 않되 구현과 독립 검증은 구분합니다. 읽기용 브라우저 접근과 게시 승인은 별개입니다. GitHub 승인 범위를 내부 Git으로 확대하지 않습니다.
+
+Receipt waiters record SIGINT/SIGTERM cancellation before exiting. SIGKILL or host/process failure can prevent cleanup; inspect and hand off the stopped owner before retrying. A ledger receipt is not process-liveness proof.

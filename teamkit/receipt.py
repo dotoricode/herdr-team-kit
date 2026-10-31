@@ -4,6 +4,8 @@ The ledger remains a local attestation, not a cryptographic authentication servi
 No credentials are copied and no worker write permissions are expanded.
 """
 from concurrent.futures import ThreadPoolExecutor
+import signal
+import threading
 import time
 import uuid
 
@@ -35,8 +37,6 @@ def finish(store, expected, request, error=None, config_path=None, active=None):
         value = store.get(expected['id'])
         if value != expected or value.get('owner') != request['owner'] or value['attempt_count'] != request['attempt'] or value['state'] not in ('submitted', 'uncertain') or value.get('runtime', {}).get('receipt_request') != request:
             raise ValueError('receipt changed during host verification; inspect')
-        if time.time() >= request['expires_at']:
-            error = 'receipt verification deadline expired'
         if error is None and config_path is not None:
             try:
                 current = load(config_path)
@@ -46,6 +46,9 @@ def finish(store, expected, request, error=None, config_path=None, active=None):
                 error = 'receipt profile configuration unavailable'
         if error is None and active is not None and not active():
             error = 'host prompt ended before receipt confirmation; inspect'
+        # Configuration reads can block; check the deadline after all checks.
+        if time.time() >= request['expires_at']:
+            error = 'receipt verification deadline expired'
         runtime = value['runtime']
         if error:
             runtime['receipt_error'] = error
@@ -82,8 +85,15 @@ def verify_pending(store, config_path, task, owner, active=None):
 
 
 def wait_for_confirmation(store, task, owner, profile_binding):
-    request = requested(store, task, owner, profile_binding)
+    request = None
+    previous = None
+    if threading.current_thread() is threading.main_thread():
+        previous = signal.getsignal(signal.SIGTERM)
+        def terminate(signum, frame):
+            raise SystemExit(128 + signum)
+        signal.signal(signal.SIGTERM, terminate)
     try:
+        request = requested(store, task, owner, profile_binding)
         while True:
             value = store.get(task)
             runtime = value.get('runtime', {})
@@ -98,12 +108,17 @@ def wait_for_confirmation(store, task, owner, profile_binding):
                 raise ValueError('receipt verification deadline expired; inspect before retry')
             time.sleep(0.1)
     except BaseException:
+        if request is None:
+            raise
         value = store.get(task)
         runtime = value.get('runtime', {})
         if value.get('owner') == owner and value.get('attempt_count') == request['attempt'] and value['state'] in ('submitted','uncertain') and runtime.get('receipt_request') == request and not runtime.get('receipt_error'):
             try:finish(store, value, request, 'worker receipt cancelled; inspect before retry')
             except ValueError:pass  # A concurrent owner/state change takes precedence.
         raise
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
 
 
 def prompt(runtime, store, config_path, task, owner, text):

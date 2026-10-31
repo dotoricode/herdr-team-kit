@@ -168,3 +168,41 @@ class ReceiptTests(Fixture):
                 with self.assertRaises(RuntimeError):prompt(SimpleNamespace(prompt=ended),db,self.config,db.get('T1'),'owner','fixture')
             self.assertEqual(db.get('T1')['state'],'uncertain')
             self.assertNotIn('identity_checked',db.get('T1')['runtime'])
+
+    def test_terminated_worker_request_cannot_be_confirmed_later(self):
+        import subprocess
+        import sys
+        from pathlib import Path
+        self.submitted()
+        env=dict(os.environ,CODEX_HOME=str(self.root/'team'))
+        worker=subprocess.Popen([sys.executable,str(Path(__file__).resolve().parents[1]/'teamkit_cli.py'),
+            '--config',str(self.config),'--state',str(self.state),'receipt','T1','--owner','owner'],
+            env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        try:
+            deadline=time.monotonic()+5
+            while time.monotonic()<deadline:
+                with StoreContext(self.state) as db:
+                    if db.get('T1')['runtime'].get('receipt_request'):break
+                time.sleep(0.01)
+            else:self.fail('worker did not request receipt')
+            worker.terminate();self.assertNotEqual(worker.wait(timeout=5),0)
+            with StoreContext(self.state) as db,patch('teamkit.providers.identity') as identity:
+                verify_pending(db,self.config,'T1','owner')
+                identity.assert_not_called()
+                self.assertEqual(db.get('T1')['state'],'uncertain')
+        finally:
+            if worker.poll() is None:worker.kill();worker.wait()
+
+    def test_deadline_rechecked_after_final_config_read(self):
+        from teamkit.config import load
+        self.submitted();clock=[100];reads=[0]
+        def delayed(path):
+            value=load(path);reads[0]+=1
+            if reads[0]==3:clock[0]=131
+            return value
+        with StoreContext(self.state) as db,patch('teamkit.receipt.time.time',side_effect=lambda:clock[0]):
+            self.request(db)
+            with patch('teamkit.providers.identity'),patch('teamkit.receipt.load',side_effect=delayed):
+                verify_pending(db,self.config,'T1','owner')
+            self.assertEqual(db.get('T1')['state'],'uncertain')
+            self.assertNotIn('identity_checked',db.get('T1')['runtime'])
