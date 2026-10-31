@@ -130,6 +130,12 @@ def _step(config,state,task_id,owner,apply):
         rotate = context_action(used,True) == 'handoff' or (used is None and proof['rotate_if_unknown']) or proof.get('failure') is not None
         if not apply:
             return {'action':'handoff_ready' if rotate else 'continue_ready','used':used}
+        if agent.get('interactive_ready') is not True:
+            return {'action':'inspect','reason':'native agent not interactive'}
+        info = runtime.call('pane','process-info','--pane',task['runtime']['pane'])['process_info']
+        foreground = info.get('foreground_processes',[])
+        if info.get('pane_id') != task['runtime']['pane'] or type(info.get('foreground_process_group_id')) is not int or info['foreground_process_group_id'] <= 1 or not foreground or not any(p.get('name') == task['provider'] for p in foreground):
+            return {'action':'inspect','reason':'writer is not in the foreground'}
         if not rotate:
             store.supervise_transition(task_id,owner,task)
             try:
@@ -138,12 +144,6 @@ def _step(config,state,task_id,owner,apply):
                 store.note(task_id,owner,{'supervision_uncertain':True})
                 raise
             return {'action':'continued','used':used}
-        if agent.get('interactive_ready') is not True:
-            return {'action':'inspect','reason':'native agent not interactive'}
-        info = runtime.call('pane','process-info','--pane',task['runtime']['pane'])['process_info']
-        foreground = info.get('foreground_processes',[])
-        if info.get('pane_id') != task['runtime']['pane'] or type(info.get('foreground_process_group_id')) is not int or info['foreground_process_group_id'] <= 1 or not foreground or not any(p.get('name') == task['provider'] for p in foreground):
-            return {'action':'inspect','reason':'writer is not in the foreground'}
         pids = process_family([p['pid'] for p in foreground])
         task = store.supervise_transition(task_id,owner,task,stopping=True,detail={'pids':pids,'pgid':info['foreground_process_group_id']})
         # Record intent before sending exit. Never resend after uncertain transport.

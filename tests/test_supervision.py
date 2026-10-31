@@ -238,3 +238,19 @@ class SupervisionTests(Fixture):
             with self.assertRaises(ValueError):
                 with controller_lock(self.state,'T1','owner'):pass
             with controller_lock(self.state.with_name('other.sqlite'),'T1','owner'):pass
+
+    def test_low_context_cannot_send_into_unrelated_foreground(self):
+        import os
+        from teamkit.supervisor import supervise_once
+        self.boundary()
+        with patch.dict(os.environ,{'HERDR_ENV':'1'}),patch('teamkit.supervisor.Herdr') as h:
+            self.native(h,remaining=99)
+            previous=h.return_value.call.side_effect
+            def call(*args):
+                if args[:2]==('pane','process-info'):
+                    return {'process_info':{'pane_id':'w1:p1','shell_pid':1,'foreground_process_group_id':126,'foreground_processes':[{'pid':126,'name':'editor'}]}}
+                return previous(*args)
+            h.return_value.call.side_effect=call
+            self.assertEqual(supervise_once(self.value,self.state,'T1','owner',apply=True)['action'],'inspect')
+            self.assertFalse(any(c.args[:2]==('agent','prompt') for c in h.return_value.call.call_args_list))
+        self.assertIn('boundary',self.call('show','T1'))
