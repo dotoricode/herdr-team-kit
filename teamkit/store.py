@@ -167,6 +167,19 @@ class Store:
             value.update(state='handed_off', owner=None, checkpoint=checkpoint)
             return self._save(value, 'handed_off', checkpoint)
 
+    def authorize(self, task, decision, approved):
+        fields = {'failure_count','approval_reference','provider','model','effort'}
+        if not approved or not isinstance(decision, dict) or set(decision) != fields or type(decision['failure_count']) is not int or not isinstance(decision['approval_reference'], str) or not decision['approval_reference'].strip() or decision['provider'] not in ('codex','claude') or not isinstance(decision['model'], str) or not decision['model'].strip() or decision['effort'] not in ('low','medium','high','xhigh','max'):
+            raise ValueError('explicit user approval and complete model decision required')
+        with self.transaction():
+            value = self.get(task)
+            failures = value.get('failures', [])
+            meaningful = [f for f in failures if f['kind'] in ('reasoning','insufficient_evidence')]
+            if value['state'] != 'handed_off' or value.get('owner') is not None or not meaningful or meaningful[-1]['effort'] not in ('high','xhigh','max') or decision['failure_count'] != len(failures):
+                raise ValueError('decision does not match the stopped high-effort failure')
+            value['user_decision'] = dict(decision)
+            return self._save(value, 'user_authorized', decision)
+
     def complete(self, task, owner, head, evidence, reviewed_head=None):
         if not sha(head) or not isinstance(evidence, list) or not evidence or not all(isinstance(x,str) and x.strip() for x in evidence):
             raise ValueError('completion requires full SHA and verification evidence')

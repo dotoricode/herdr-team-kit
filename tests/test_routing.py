@@ -128,3 +128,27 @@ class RoutingTests(Fixture):
             with self.assertRaises(ValueError):self.call('dispatch','T1')
             h.assert_not_called()
         self.assertEqual(self.call('plan','T1')['action'],'ask_user')
+
+    def test_user_decision_resumes_same_task_and_new_failure_invalidates_it(self):
+        task=self.make()
+        with StoreContext(self.state) as db:
+            db.claim('T1','owner','codex','team','general-fixture','high')
+            db.handoff('T1','owner',{'head':task['base'],'dirty':False,'verification':['unresolved'],
+                'next':'ask user','failure':{'cause':'same','kind':'reasoning'}},True)
+        decision={'failure_count':1,'approval_reference':'local-user-answer-1','provider':'codex','model':'chosen-fixture','effort':'high'}
+        path=self.root/'decision.json';path.write_text(json.dumps(decision))
+        self.call('authorize','T1','--decision-file',str(path),'--user-approved')
+        plan=self.call('plan','T1');self.assertEqual((plan['action'],plan['model']),('dispatch','chosen-fixture'))
+        with StoreContext(self.state) as db:
+            db.claim('T1','next','codex','team',plan['model'],plan['effort'])
+            db.handoff('T1','next',{'head':task['base'],'dirty':False,'verification':['still unresolved'],
+                'next':'ask again','failure':{'cause':'same','kind':'reasoning'}},True)
+        self.assertEqual(self.call('plan','T1')['action'],'ask_user')
+        with self.assertRaises(ValueError):self.call('authorize','T1','--decision-file',str(path),'--user-approved')
+        self.assertEqual(len(self.call('show','T1')['failures']),2)
+
+    def test_decision_requires_explicit_approval_and_matching_failure(self):
+        self.make();path=self.root/'decision.json'
+        path.write_text(json.dumps({'failure_count':0,'approval_reference':'answer','provider':'codex','model':'fixture','effort':'high'}))
+        with self.assertRaises(ValueError):self.call('authorize','T1','--decision-file',str(path),'--user-approved')
+        with self.assertRaises(SystemExit):self.call('authorize','T1','--decision-file',str(path))

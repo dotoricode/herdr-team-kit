@@ -20,3 +20,15 @@ python3 teamkit_cli.py plan TASK-1
 실패 종류는 `reasoning`, `insufficient_evidence`, `environment`, `typo`입니다. 작업 기록에 실패 당시 effort와 원인·종류가 누적됩니다. reasoning의 같은 원인 2회 또는 insufficient_evidence는 다음 배정을 high로 올립니다. 환경 오류와 오타는 상향 횟수에서 제외합니다. 마지막 유효 실패가 high 이상에서 발생했다면 `ask_user`를 반환하고 인증 조회·claim·전송을 하지 않습니다. 그 이후 모델 선택은 사용자 판단이며 자동 최고 effort·다른 계열 모델 전환은 없습니다.
 
 계정은 선택한 provider 안에서 회사 구독 → 개인 구독 → 대기 순서입니다. 두 한도 창이 유효하고 90% 미만이어야 합니다. 한도 누락·만료·오류를 0%로 바꾸거나 다른 provider·API·추가 결제로 우회하지 않습니다. 작업 분류와 실패 기록은 운영자의 입력이며 자동 진단·실제 모델 지원·전체 제품 검증을 대신하지 않습니다.
+
+사용자 결정을 받은 뒤에만 다음 형식의 로컬 파일을 작성합니다. `failure_count`는 현재 작업의 전체 failures 길이에 고정하고, 승인 근거는 로컬 기록 위치나 실제 사용자 답변 식별자로 남깁니다.
+
+```json
+{"failure_count":2,"approval_reference":"local-user-answer-1","provider":"codex","model":"replace-with-user-selected-model","effort":"high"}
+```
+
+```bash
+python3 teamkit_cli.py authorize TASK-1 --decision-file /srv/example/private/decision.json --user-approved
+```
+
+이 명령은 운영자가 이미 받은 승인을 기록하는 수단이며 승인을 생성하거나 확인하는 인증 체계가 아닙니다. 자동 워커가 사용자 결정을 만들어서는 안 됩니다. 소유자가 없는 handed_off 상태의 high 실패와 현재 실패 개수가 일치해야 승인 기록을 저장합니다. 기존 작업 ID·실패 이력은 보존하며, 새 실패가 추가되면 이전 결정은 더 이상 재개 근거가 되지 않습니다. 모델 변경은 이 명시적 결정에 한해서 가능하며 provider는 구성된 구독 프로필만 사용합니다. 계정과 한도·권한 검사는 이후 dispatch에서 그대로 수행합니다.

@@ -85,6 +85,9 @@ def parser():
         x.add_argument('--evidence-file', required=True)
         if cmd == 'handoff':
             x.add_argument('--writer-stopped', action='store_true')
+    x = commands.add_parser('authorize'); x.add_argument('task')
+    x.add_argument('--decision-file', required=True)
+    x.add_argument('--user-approved', action='store_true', required=True)
     x = commands.add_parser('context'); x.add_argument('--used', type=float)
     x.add_argument('--safe-boundary', action='store_true')
     return p
@@ -153,6 +156,13 @@ def run(args):
         task = store.get(args.task)
         if args.command == 'plan':
             return execution_policy(config, task)
+        if args.command == 'authorize':
+            decision = json.loads(Path(args.decision_file).read_text())
+            if not isinstance(decision, dict) or decision.get('provider') not in config['profiles']:
+                raise ValueError('decision requires a configured provider')
+            selected = profile(config, decision['provider'], 'team', decision)
+            launch_spec(decision['provider'], selected, None)
+            return store.authorize(args.task, decision, args.user_approved)
         if args.command == 'dispatch':
             # Refuse before claiming: outside Herdr is a known no-op, not an uncertain launch.
             if os.environ.get('HERDR_ENV') != '1':
