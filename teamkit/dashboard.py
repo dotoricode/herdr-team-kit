@@ -41,6 +41,8 @@ def model(data,config):
             failure=task.get('checkpoint',{}).get('failure',{})
             if failure.get('kind')=='environment':
                 phase='environment';reason='환경 실패: '+failure.get('cause','unknown')
+        if work['phase']=='complete':
+            phase='complete';reason=''
         approved=bool(work.get('approval'))
         percent=None
         if approved:
@@ -146,17 +148,17 @@ def live(screen,args,config):
         for index,(phase,code) in enumerate(COLORS.items(),1):
             fg={'31':curses.COLOR_RED,'32':curses.COLOR_GREEN,'33':curses.COLOR_YELLOW,'34':curses.COLOR_BLUE,'36':curses.COLOR_CYAN}.get(code,curses.COLOR_WHITE)
             curses.init_pair(index,fg,-1);colors[LABELS[phase]]=curses.color_pair(index)|curses.A_BOLD
-    next_read=0;last_publish=0;offset=0;lines=[];warning=''
+    next_read=0;last_publish=float('-inf');offset=0;lines=[];warning=''
     while True:
         now=time.monotonic()
         if now>=next_read:
             view=model(snapshot(args.state),config)
             lines=render(view).splitlines()
             next_read=now+args.interval
-            if args.publish and now-last_publish>=10:
-                try:publish(view,config);warning=''
-                except (KitError,ValueError):warning='좌측 요약 갱신 실패 · 세션과 workspace 연결을 확인해 주세요.'
-                last_publish=now
+        if args.publish and now-last_publish>=10:
+            try:publish(view,config);warning=''
+            except (KitError,ValueError):warning='좌측 요약 갱신 실패 · 세션과 workspace 연결을 확인해 주세요.'
+            last_publish=now
         height,width=screen.getmaxyx();visible=max(1,height-2)
         offset=max(0,min(offset,max(0,len(lines)-visible)))
         screen.erase()

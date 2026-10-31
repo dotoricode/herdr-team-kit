@@ -358,3 +358,36 @@ class WorkflowTests(Fixture):
         with self.assertRaises(ValueError):self.call('work','finish','W1','--review-task','R1')
         self.call('work','record','W1','--step','behavior','--evidence-file',str(evidence))
         self.assertEqual(self.call('work','finish','W1','--review-task','R1')['phase'],'complete')
+
+    def test_complete_work_is_not_counted_as_environment_wait(self):
+        from teamkit.dashboard import model,publish
+        from teamkit.workflow import snapshot,get,save
+        self.setup_work();self.approve();self.task()
+        with StoreContext(self.state) as db:
+            task=db.get('T1');task.update(state='handed_off',checkpoint={'failure':{'kind':'environment','cause':'fixture'}})
+            with db.transaction():
+                db._save(task,'fixture')
+                work=get(db,'W1');work['phase']='complete';save(db,work,'fixture')
+        view=model(snapshot(self.state),self.value)
+        self.assertEqual(view['rows'][0]['phase'],'complete')
+        self.assertEqual(view['rows'][0]['percent'],100)
+        self.assertEqual(view['teams']['alpha'],{'complete':1})
+        self.value['dashboard_workspaces']={'alpha':{'id':'w1','label':'Alpha'}}
+        with patch('teamkit.dashboard.Herdr') as h:
+            h.return_value.call.return_value={'workspace':{'label':'Alpha'}}
+            publish(view,self.value)
+            args=h.return_value.call.call_args.args
+            self.assertIn('work_summary=작업 1 · 완료 1',args)
+            self.assertIn('work_blocked=',args)
+
+    def test_publisher_renews_before_ttl_with_long_snapshot_interval(self):
+        from argparse import Namespace
+        from unittest.mock import MagicMock
+        from teamkit.dashboard import live
+        self.setup_work()
+        screen=MagicMock();screen.getmaxyx.return_value=(40,120)
+        screen.getch.side_effect=[-1,-1,-1,ord('q')]
+        args=Namespace(state=str(self.state),publish=True,color='never',interval=60)
+        with patch('teamkit.dashboard.curses.curs_set'),patch('teamkit.dashboard.time.monotonic',side_effect=[100,110,120,130]),patch('teamkit.dashboard.publish') as pub:
+            live(screen,args,self.value)
+        self.assertEqual(pub.call_count,4)
