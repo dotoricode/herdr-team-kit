@@ -204,3 +204,20 @@ class WorkflowTests(Fixture):
             self.assertEqual(Path(spec['env']['TMPDIR']),(self.root/'private-plans/W1/r1/.tmp').resolve())
             self.assertIn('sandbox_workspace_write.exclude_tmpdir_env_var=false',spec['args'])
             self.assertIn('PLANNING ONLY',h.return_value.prompt.call_args.args[1])
+
+    def test_tui_highlight_uses_display_columns_after_korean_text(self):
+        from argparse import Namespace
+        from unittest.mock import MagicMock
+        from teamkit.dashboard import live
+        self.setup_work();self.call('work','submit','W1')
+        screen=MagicMock();screen.getmaxyx.return_value=(40,120);screen.getch.return_value=ord('q')
+        args=Namespace(state=str(self.state),publish=False,color='always',interval=3)
+        with patch('teamkit.dashboard.curses.curs_set'),patch('teamkit.dashboard.curses.has_colors',return_value=True),patch('teamkit.dashboard.curses.start_color'),patch('teamkit.dashboard.curses.use_default_colors'),patch('teamkit.dashboard.curses.init_pair'),patch('teamkit.dashboard.curses.color_pair',return_value=0):
+            live(screen,args,self.value)
+        rows={c.args[0]:c.args[2] for c in screen.addnstr.call_args_list}
+        for call in screen.addstr.call_args_list:
+            y,x,label=call.args[:3]
+            if label=='승인 대기':
+                prefix=rows[y].split(label,1)[0]
+                expected=sum(2 if '\uac00'<=char<='\ud7a3' else 1 for char in prefix)
+                self.assertEqual(x,expected,'color overlay must not overwrite Korean text or counts')

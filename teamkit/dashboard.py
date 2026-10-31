@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import sys
 import time
+import unicodedata
 
 from .runtime import Herdr, RuntimeError as KitError
 from .store import ACTIVE
@@ -23,6 +24,10 @@ COLORS={'planning':'34','awaiting_approval':'33','approved':'36','in_progress':'
 def clean(value):
     # Persisted titles/reasons must not inject terminal control sequences.
     return ''.join(c if c.isprintable() else ' ' for c in str(value))
+
+
+def columns(text):
+    return sum(0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in ('W','F') else 1 for c in text)
 
 
 def model(data,config):
@@ -153,8 +158,9 @@ def live(screen,args,config):
                 screen.addnstr(y,0,line,max(1,width-1))
                 for label,style in colors.items():
                     where=line.find(label)
-                    if where>=0 and where+len(label)<width:
-                        screen.addstr(y,where,label,style)
+                    if where>=0:
+                        col=columns(line[:where])
+                        if col+columns(label)<width:screen.addstr(y,col,label,style)
             except curses.error:pass
         footer=warning or f'기록 {offset+1}–{min(len(lines),offset+visible)}/{len(lines)} · ↑↓ / PgUp·PgDn · q 종료 · 모델 호출 없음'
         try:screen.addnstr(height-1,0,footer,max(1,width-1),curses.A_REVERSE)
