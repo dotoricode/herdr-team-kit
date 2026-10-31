@@ -84,7 +84,11 @@ class Herdr:
             args += ['--env',key+'='+value]
         result = self.call(*args)
         pane = result['root_pane']['pane_id']
-        detail={'name':name,'pane':pane,'workspace':result['workspace']['id'],'workspace_label':label,
+        if on_created:on_created({'name':name,'pane':pane})
+        workspace=result.get('workspace',{}).get('workspace_id')
+        if not isinstance(workspace,str) or not workspace:
+            raise RuntimeError('workspace identity unavailable; inspect created pane before retry')
+        detail={'name':name,'pane':pane,'workspace':workspace,'workspace_label':label,
                 'managed_workspace':True,'ephemeral':task['role']!='leader' or task.get('classification',{}).get('kind')=='design'}
         if on_created:
             on_created(detail)

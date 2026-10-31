@@ -84,7 +84,7 @@ class VisibilityTests(Fixture):
     def test_new_workspace_label_describes_the_task(self):
         from teamkit.runtime import Herdr
         task={'id':'D1','team':'alpha','role':'leader','classification':{'kind':'design'},'work_id':'W1','root':'/srv/private/design'}
-        with patch.object(Herdr,'call',side_effect=[{'root_pane':{'pane_id':'w9:p1'},'workspace':{'id':'w9'}},{},{'process_info':{'foreground_processes':[{'pid':123,'name':'codex'}]}}]) as call:
+        with patch.object(Herdr,'call',side_effect=[{'root_pane':{'pane_id':'w9:p1'},'workspace':{'workspace_id':'w9'}},{},{'process_info':{'foreground_processes':[{'pid':123,'name':'codex'}]}}]) as call:
             value=Herdr().launch(task,{'env':{},'kind':'codex','args':[]},'tk-opaque')
         self.assertIn('W1 · 설계 · alpha',call.call_args_list[0].args)
         self.assertEqual(value['workspace'],'w9');self.assertTrue(value['ephemeral'])
@@ -203,3 +203,92 @@ class VisibilityTests(Fixture):
         data['monitor']={'namespace':namespace(self.value),'observed_at':data['observed_at'],'native_ttl':10,'agents':[]}
         self.assertEqual(model(data,self.value,now=data['observed_at'])['activity']['alpha']['label'],'대기 중')
         self.assertEqual(model(data,self.value,now=data['observed_at']+11)['activity']['alpha']['label'],'실행 상태 미확인')
+
+    def test_created_pane_is_recorded_when_workspace_metadata_is_invalid(self):
+        from teamkit.runtime import Herdr,RuntimeError as KitError
+        from unittest.mock import Mock
+        task={'id':'D1','team':'alpha','role':'leader','classification':{'kind':'design'},'root':'/srv/private/design'}
+        recorded=Mock()
+        with patch.object(Herdr,'call',return_value={'root_pane':{'pane_id':'w9:p1'},'workspace':{}}) as native:
+            with self.assertRaises(KitError):Herdr().launch(task,{'env':{},'kind':'codex','args':[]},'native',recorded)
+        recorded.assert_called_once_with({'name':'native','pane':'w9:p1'})
+        self.assertEqual(native.call_count,1)
+
+    def test_missing_ready_and_review_owner_are_unknown_not_idle(self):
+        self.setup_work();self.task('D1','leader');data=self.data()
+        from teamkit.monitor import namespace
+        data['monitor']={'namespace':namespace(self.value),'observed_at':100,'native_ttl':10,'agents':[]}
+        data['tasks'][0]['runtime']={'name':'missing-owner'}
+        for state in ('ready','awaiting_review'):
+            with self.subTest(state=state):
+                data['tasks'][0]['state']=state
+                activity=model(data,self.value,now=100)['activity']['alpha']
+                self.assertEqual(activity['label'],'실행 상태 미확인');self.assertIsNone(activity['working'])
+
+    def test_removed_codex_profile_discards_result(self):
+        self.setup_work()
+        from teamkit.monitor import save_quotas
+        expected=binding(self.value['profiles']['codex']['team'])
+        self.value['profiles']={'claude':self.value['profiles']['codex']}
+        self.value['teams']['alpha']['roles']['implementer']['provider']='claude'
+        self.config.write_text(json.dumps(self.value))
+        from teamkit.config import load
+        save_quotas(self.state,load(self.config),[('team',expected,None)])
+        with StoreContext(self.state) as db:self.assertIsNone(db.quota('codex/team'))
+
+    def test_review_revision_change_during_document_read_is_rejected(self):
+        self.setup_work();self.call('work','submit','W1')
+        from teamkit.workflow import document
+        from teamkit.dashboard import open_review
+        import subprocess
+        real_run=subprocess.run;changed=[];opened=[]
+        def replace(config,work):
+            result=document(config,work)
+            if not changed:
+                changed.append(True);self.call('work','revise','W1');self.call('work','submit','W1')
+            return result
+        def route(command,**kwargs):
+            if command[0] in ('open','xdg-open'):opened.append(command);return None
+            return real_run(command,**kwargs)
+        with patch('teamkit.workflow.document',side_effect=replace),patch('subprocess.run',side_effect=route):
+            with self.assertRaises(ValueError):open_review(self.state,self.value,'W1')
+        self.assertFalse(opened);self.assertEqual(self.call('work','show','W1')['revision'],2)
+
+    def test_publisher_rechecks_observation_after_delayed_native_call(self):
+        self.setup_work();self.value['dashboard_workspaces']={'alpha':{'id':'w1','label':'Alpha'}}
+        from teamkit.monitor import namespace
+        from teamkit.dashboard import publish
+        data=self.data();data['monitor']={'namespace':namespace(self.value),'observed_at':100,'native_ttl':10,
+            'agents':[{'name':'representative','workspace_id':'w1','agent_status':'working'}]}
+        view=model(data,self.value,now=100);clock=[100];sent=[]
+        def native(*args):
+            if args[:2]==('workspace','get'):clock[0]=111;return {'workspace':{'label':'Alpha'}}
+            sent.append(args);return {}
+        with patch('teamkit.dashboard.Herdr') as h,patch('teamkit.dashboard.time.time',side_effect=lambda:clock[0]):
+            h.return_value.call.side_effect=native;publish(view,self.value)
+        summary=next(x for x in sent[0] if x.startswith('work_summary='))
+        self.assertIn('실행 상태 미확인',summary)
+
+    def test_company_failure_blocks_route_before_personal_query_finishes(self):
+        self.setup_work()
+        from argparse import Namespace
+        from threading import Event
+        import signal
+        from teamkit.monitor import run
+        now=time.time();expected=binding(self.value['profiles']['codex']['team'])
+        with StoreContext(self.state) as db:db.quota('codex/team',{'binding':expected,'observed_at':now,
+            'five_hour':{'used':1,'resets_at':now+1000},'weekly':{'used':1,'resets_at':now+1000}})
+        release=Event();personal_started=Event();observed=[]
+        def quota(pr):
+            if pr['home']==self.value['profiles']['codex']['team']['home']:raise OSError('synthetic failure')
+            personal_started.set();release.wait(5);return {}
+        def native(*args):
+            personal_started.wait(1)
+            observed.append(self.call('route','--provider','codex')['action'])
+            if len(observed)==2:release.set();signal.raise_signal(signal.SIGTERM)
+            return []
+        try:
+            with patch('teamkit.monitor.codex_quota',side_effect=quota),patch('teamkit.monitor.read_native',side_effect=native):
+                run(Namespace(config=str(self.config),state=str(self.state),interval=1,quota_interval=30,once=False),self.value)
+        finally:release.set()
+        self.assertEqual(observed[-1],'wait')

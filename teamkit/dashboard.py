@@ -50,9 +50,9 @@ def quota_rows(data, config):
                 values[key]=used if age is not None and number(used) and 0<=used<=100 and number(reset) and reset>now else None
             status='최신' if fresh and all(v is not None for v in values.values()) else '이전 기록' if age is not None else '미수집'
             if q.get('unavailable'):status='조회 실패'+(' · 이전 기록' if age is not None else '')
-            elif age is not None and any(v is None for v in values.values()):status='갱신 필요'
+            elif age is not None and any(v is None for v in values.values()):status='일부 한도 확인 불가' if fresh else '갱신 필요'
             rows.append({'provider':provider,'account':account,'label':('Codex' if provider=='codex' else 'Claude')+' '+('회사' if account=='team' else '개인'),
-                         'age':age,'current':fresh and status=='최신','status':status,**values})
+                         'age':age,'current':fresh,'status':status,**values})
     return rows
 
 
@@ -74,7 +74,7 @@ def team_activity(team,tasks,agents,known,config):
     if not known:return {'label':'실행 상태 미확인','working':None,'blocked':None}
     working=sum(a.get('agent_status')=='working' for a in observed)
     blocked=sum(a.get('agent_status')=='blocked' for a in observed)
-    missing=any(t['state'] in ACTIVE and t.get('runtime',{}).get('name') not in agents for t in tasks if t.get('team')==team)
+    missing=any(t['state'] in ACTIVE|{'ready','awaiting_review'} and not t.get('runtime',{}).get('workspace_closed') and t.get('runtime',{}).get('name') not in agents for t in tasks if t.get('team')==team)
     unknown=missing or bool(target.get('id') and not any(a.get('workspace_id')==target['id'] for a in observed)) or any(a.get('agent_status') not in ('working','blocked','idle','done') for a in observed)
     label='작업 중' if working else '입력 요청 있음' if blocked else '실행 상태 미확인' if unknown else '대기 중'
     return {'label':label,'working':working if not unknown or working else None,'blocked':blocked if not unknown or blocked else None}
@@ -136,7 +136,7 @@ def model(data,config,now=None):
                      'next':work.get('checkpoint',{}).get('next',''),
                      'active_model_attempts':len(active)})
     teams={team:dict(Counter(row['phase'] for row in rows if row['team']==team)) for team in config['teams']}
-    return {'rows':rows,'teams':teams,'accounts':quota_rows(data,config),'activity':{team:team_activity(team,data['tasks'],agents,native_known,config) for team in teams},'native_known':native_known,'team_labels':{team:config.get('dashboard_workspaces',{}).get(team,{}).get('label',team) for team in teams},'observed_at':data['observed_at'],'event_sequence':data['event_sequence']}
+    return {'rows':rows,'teams':teams,'accounts':quota_rows(data,config),'activity':{team:team_activity(team,data['tasks'],agents,native_known,config) for team in teams},'native_known':native_known,'native_deadline':data['monitor']['observed_at']+data['monitor']['native_ttl'] if native_known else None,'team_labels':{team:config.get('dashboard_workspaces',{}).get(team,{}).get('label',team) for team in teams},'observed_at':data['observed_at'],'event_sequence':data['event_sequence']}
 
 
 def render(view,color=False,now=None,width=80):
@@ -214,6 +214,8 @@ def open_review(state,config,ident):
     if not work or work['phase']!='awaiting_approval':raise ValueError('검토 요청이 변경됐습니다. 현황을 새로 확인하세요.')
     path,contract,digest=document(config,work)
     if work.get('submitted_digest')!=digest:raise ValueError('설계가 변경됐습니다. 현재 버전을 다시 제출해야 합니다.')
+    latest=next((w for w in snapshot(state)['works'] if w['id']==ident),None)
+    if latest!=work:raise ValueError('검토 요청이 변경됐습니다. 새 revision을 확인하세요.')
     command='open' if sys.platform=='darwin' else 'xdg-open'
     subprocess.run([command,str(path/'plan.md')],check=True,timeout=10,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 
@@ -232,14 +234,17 @@ def publish(view,config):
             raise ValueError('dashboard workspace identity changed; do not publish')
         counts=view['teams'][team]
         total=sum(counts.values())
-        activity=view.get('activity',{}).get(team,{'label':'실행 상태 미확인','working':0})
+        now=time.time();deadline=view.get('native_deadline')
+        fresh=number(deadline) and now<deadline
+        activity=view.get('activity',{}).get(team,{'label':'실행 상태 미확인','working':None}) if fresh else {'label':'실행 상태 미확인','working':None}
+        ttl=min(30000,max(1,int((deadline-now)*1000))) if fresh else 30000
         summary=f"{activity['label']} · 실행 {count_text(activity['working'])} · 업무 {total} · 완료 {counts.get('complete',0)}"
         wait=counts.get('awaiting_approval',0)
         blocked=sum(counts.get(x,0) for x in ('inspect','quota','environment'))
         runtime.call(*prefix,'workspace','report-metadata',target['id'],'--source','teamkit-progress',
                      '--token','work_summary='+summary,
                      '--token','approval_wait='+('설계 검토 필요 '+str(wait) if wait else ''),
-                     '--token','work_blocked='+('확인·차단 '+str(blocked) if blocked else ''),'--ttl-ms','30000')
+                     '--token','work_blocked='+('확인·차단 '+str(blocked) if blocked else ''),'--ttl-ms',str(ttl))
 
 
 def run(args,config):
@@ -294,7 +299,7 @@ def live(screen,args,config):
         selected=max(0,min(selected,len(pending)-1))
         if review_mode:lines=review_lines(view,selected)
         elif resized:lines=render(view,width=max(1,width-1)).splitlines()
-        if args.publish and now-last_publish>=10:
+        if args.publish and now-last_publish>=5:
             try:publish(view,config);warning=''
             except (KitError,ValueError):warning='좌측 요약 갱신 실패 · 세션과 workspace 연결을 확인해 주세요.'
             last_publish=now
