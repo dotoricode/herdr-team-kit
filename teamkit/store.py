@@ -7,8 +7,9 @@ import re
 import sqlite3
 import subprocess
 import time
+import uuid
 
-ACTIVE = {'claimed', 'launching', 'submitted', 'running', 'uncertain'}
+ACTIVE = {'claimed', 'launching', 'submitted', 'running', 'uncertain', 'stopping'}
 
 
 def sha(value):
@@ -36,6 +37,14 @@ def writes_overlap(first, second):
         return left.samefile(right)
     except FileNotFoundError:
         return False
+
+
+def validate_failure(failure, verification):
+    if failure is None:
+        return
+    from .routing import FAILURES
+    if not isinstance(failure, dict) or set(failure) != {'cause','kind'} or failure['kind'] not in FAILURES or not isinstance(failure['cause'], str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}', failure['cause']) or not isinstance(verification, list) or not verification or not all(isinstance(v,str) and v.strip() for v in verification):
+        raise ValueError('failure requires cause, kind and verification evidence')
 
 
 class Store:
@@ -116,7 +125,8 @@ class Store:
                 raise ValueError('global model limit reached')
             if value['role'] == 'implementer' and any(t['role'] == 'implementer' and (t['team'] == value['team'] or writes_overlap(t['root'], value['root'])) for t in active):
                 raise ValueError('team already has an implementation owner')
-            value.update(state='claimed', owner=owner, provider=provider, account=account, model=model, effort=effort)
+            value.pop('boundary', None)
+            value.update(state='claimed', owner=owner, provider=provider, account=account, model=model, effort=effort, runtime={})
             return self._save(value, 'claimed')
 
     def update(self, task, owner, state, detail):
@@ -174,22 +184,56 @@ class Store:
             value['state'] = 'running'
             return self._save(value, 'woken')
 
-    def handoff(self, task, owner, checkpoint, stopped):
+    def handoff(self, task, owner, checkpoint, stopped, expected_task=None):
         required = {'head','dirty','verification','next'}
         if not stopped or not required.issubset(checkpoint) or not sha(checkpoint.get('head')) or not checkpoint['next']:
             raise ValueError('handoff requires stopped writer and complete checkpoint')
         with self.transaction():
             value = self.get(task)
+            if expected_task is not None and value != expected_task:
+                raise ValueError('task changed before handoff; inspect')
             if value.get('owner') != owner or value['state'] not in ACTIVE | {'ready'}:
                 raise ValueError('handoff owner/state mismatch')
             failure = checkpoint.get('failure')
             if failure is not None:
-                from .routing import FAILURES
-                if not isinstance(failure, dict) or set(failure) != {'cause','kind'} or failure['kind'] not in FAILURES or not isinstance(failure['cause'], str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}', failure['cause']) or not isinstance(checkpoint['verification'], list) or not checkpoint['verification'] or not all(isinstance(v,str) and v.strip() for v in checkpoint['verification']):
-                    raise ValueError('failure requires cause, kind and verification evidence')
+                validate_failure(failure, checkpoint['verification'])
                 value.setdefault('failures', []).append({**failure, 'effort':value['effort']})
             value.update(state='handed_off', owner=None, checkpoint=checkpoint)
             return self._save(value, 'handed_off', checkpoint)
+
+    def boundary(self, task, owner, evidence):
+        required = {'head','dirty','worktree_fingerprint','verification','next','owner','rotate_if_unknown'}
+        if not isinstance(evidence, dict) or not required.issubset(evidence) or set(evidence)-required-{'failure'} or evidence['owner'] != owner or not sha(evidence['head']) or not sha(evidence['worktree_fingerprint']) or type(evidence['dirty']) is not bool or type(evidence['rotate_if_unknown']) is not bool or not isinstance(evidence['verification'], list) or not evidence['verification'] or not all(isinstance(v,str) and v.strip() for v in evidence['verification']) or not isinstance(evidence['next'], str) or not evidence['next'].strip():
+            raise ValueError('boundary requires actual Git state, verification and next action')
+        validate_failure(evidence.get('failure'),evidence['verification'])
+        with self.transaction():
+            value = self.get(task)
+            if value.get('owner') != owner or value['state'] != 'running' or value['role'] == 'leader' or not value.get('runtime', {}).get('identity_checked') or value.get('runtime', {}).get('supervision_enrolled') is not True:
+                raise ValueError('boundary requires a running receipted worker owner')
+            value['boundary'] = evidence
+            return self._save(value, 'boundary', evidence)
+
+    def supervise_transition(self, task, owner, expected, stopping=False, detail=None):
+        with self.transaction():
+            value = self.get(task)
+            if value != expected or value.get('owner') != owner or value['state'] != 'running' or value['role'] == 'leader' or 'boundary' not in value:
+                raise ValueError('supervision task changed; inspect')
+            if stopping:
+                value['state'] = 'stopping'
+                value['runtime']['supervision_pending'] = detail
+            else:
+                value['runtime']['supervision_delivery'] = {'token':uuid.uuid4().hex,'status':'pending','next':value['boundary']['next']}
+                value.pop('boundary')
+            return self._save(value, 'stopping' if stopping else 'continuation_pending')
+
+    def supervision_accepted(self, task, owner, token):
+        with self.transaction():
+            value = self.get(task)
+            pending = value.get('runtime', {}).get('supervision_delivery', {})
+            if value.get('owner') != owner or value['state'] not in ('running','awaiting_review') or pending.get('token') != token or pending.get('status') != 'pending':
+                raise ValueError('continuation intent changed; inspect')
+            pending['status'] = 'submitted'
+            return self._save(value,'continuation_submitted',{'token':token})
 
     def authorize(self, task, decision, approved):
         fields = {'failure_count','approval_reference','provider','model','effort'}

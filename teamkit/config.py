@@ -35,6 +35,8 @@ def load(path):
     shared = value.get('shared_roots', [])
     if not isinstance(shared, list) or any(not isinstance(root, str) or not Path(root).is_absolute() for root in shared):
         raise ValueError('shared_roots requires a list of absolute paths')
+    if type(value.get('context_supervision', False)) is not bool:
+        raise ValueError('context_supervision must be boolean')
     ttl = value.get('quota_ttl_seconds', 120)
     if type(ttl) is not int or not 1 <= ttl <= 300:
         raise ValueError('quota TTL must be 1..300 seconds')
@@ -60,3 +62,12 @@ def cached_quota(config, store, provider, account):
     if provider == 'claude' and value and value.get('source') != CLAUDE_QUOTA_SOURCE:
         return None
     return value if value and value.get('binding') == binding(profile(config, provider, account)) else None
+
+
+def validate_state_directory(config,state):
+    from .checkpoint import paths_overlap
+    root = Path(state).expanduser().resolve().parent
+    for accounts in config['profiles'].values():
+        for configured in accounts.values():
+            if paths_overlap(root,Path(configured['home']).resolve()):
+                raise ValueError('ledger write directory overlaps authentication home')

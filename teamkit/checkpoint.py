@@ -10,7 +10,7 @@ def git_bytes(root, *args):
 
 def fingerprint(root):
     digest = hashlib.sha256()
-    for args in (('status','--porcelain=v1','-z'), ('diff','--binary','HEAD')):
+    for args in (('status','--porcelain=v1','-z'), ('diff','--binary','HEAD'), ('diff','--cached','--binary','HEAD')):
         digest.update(git_bytes(root, *args))
     for name in git_bytes(root,'ls-files','--others','--exclude-standard','-z').split(b'\0'):
         if not name:
@@ -82,3 +82,16 @@ def revision_guard(root):
                     path.unlink()
             except FileNotFoundError:
                 pass
+
+
+def paths_overlap(first, second):
+    if first.is_relative_to(second) or second.is_relative_to(first):
+        return True
+    for path, other in ((first, second), (second, first)):
+        for ancestor in (path, *path.parents):
+            try:
+                if ancestor.samefile(other):
+                    return True
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+    return False

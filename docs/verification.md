@@ -12,7 +12,7 @@
 | 매뉴얼 실제 수정·빌드·화면 | 미실행 | 실제 문서 작업에서 검증 |
 | 장기 성능·토큰 절감 | 미측정 | 유형별 비교 자료 필요 |
 
-현재 로컬 검사 68개가 통과했습니다. 검사 명령은 `python3 -m unittest discover -s tests -v`입니다. PR 리뷰 후에는 receipt·완료 상태·경로·리뷰 SHA·동시성 회귀 검사를 추가했습니다. policy의 주요 판단은 stub에서 동작 assertion 실패를 확인한 뒤 구현했습니다. 나머지 검사는 구현 후 추가한 회귀 검사이며, 모두 수정 전 실패를 증명한 것으로 보고하지 않습니다.
+현재 로컬 검사 123개가 통과했습니다. 검사 명령은 `python3 -m unittest discover -s tests -v`입니다. PR 리뷰 후에는 receipt·완료 상태·경로·리뷰 SHA·동시성 회귀 검사를 추가했습니다. policy의 주요 판단은 stub에서 동작 assertion 실패를 확인한 뒤 구현했습니다. 나머지 검사는 구현 후 추가한 회귀 검사이며, 모두 수정 전 실패를 증명한 것으로 보고하지 않습니다.
 
 생산 경로는 CLI → 설정·계정 확인 → SQLite claim → Herdr workspace/start/prompt → 에이전트 receipt → 검증 기록입니다. 테스트에서는 실제 Git·SQLite·임시 파일을 사용하고 모델·Herdr·계정 경계는 대역으로 바꿉니다. 이 통과는 실제 모델·계정·Herdr 통합 성공을 증명하지 않습니다.
 
@@ -21,3 +21,5 @@
 기본 Claude 홈의 인증 namespace 차이는 설치된 CLI의 모델 없는 auth status로 대조했고, 수정 후 기대 계정 대조도 확인했습니다. Codex --no-daemon은 설치 CLI 도움말과 생성 인자로 확인했으며 실제 Herdr 환경 전달 성공을 아직 증명하지는 않습니다.
 
 Claude statusline 경로는 [수집 계약](statusline.md)의 범위로 검증합니다. 만료 입력 replay 회귀는 고정 base의 capture 경로에서 배정 가능으로 잘못 바뀌는 실패를 확인한 뒤 수정했습니다. 새 수집기는 응답 메타데이터 시각에 고정하며 서버 quota 캐시의 실제 관찰 시각을 증명하지 않습니다. 기존 renderer·파일·SQLite 경계와 live 계정/CLI 검증을 구분합니다.
+
+워커 컨텍스트 감독은 [별도 계약](context-supervision.md)의 범위로 검사합니다. 실제 Git·SQLite·파일 잠금·임시 프로세스의 종료를 확인하고 native 관측·전송 경계 일부는 대역입니다. 실제 자동 교체·70% 통과·전체 제품 시범은 이 호스트 통과만으로 증명하지 않습니다.
