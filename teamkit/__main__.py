@@ -56,6 +56,9 @@ def parser():
     p.add_argument('--state', default=str(Path.home()/'.local/state/herdr-team-kit/state.sqlite'))
     commands = p.add_subparsers(dest='command', required=True)
     commands.add_parser('doctor')
+    x = commands.add_parser('statusline')
+    x.add_argument('--account', choices=['team','personal'], required=True)
+    x.add_argument('--display-command')
     for cmd in ('refresh', 'capture'):
         x = commands.add_parser(cmd)
         x.add_argument('--provider', choices=['codex','claude'], required=True)
@@ -95,6 +98,9 @@ def run(args):
                 'teams':list(config['teams']), 'providers':list(config['profiles']),
                 'quota_ttl_seconds':config['quota_ttl_seconds'],
                 'live_verified':False}
+    if args.command == 'capture' and args.provider == 'claude':
+        from .statusline import collect
+        return collect(config, args.state, args.account, json.load(sys.stdin))
     if args.command == 'dispatch':
         if not Path(args.state).is_file():
             raise ValueError('dispatch requires an existing task ledger')
@@ -237,7 +243,11 @@ def run(args):
 
 def main():
     try:
-        result = run(parser().parse_args())
+        args = parser().parse_args()
+        if args.command == 'statusline':
+            from .statusline import render
+            return render(args)
+        result = run(args)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError, KitError) as error:
         print(json.dumps({'error':str(error)}), file=sys.stderr)

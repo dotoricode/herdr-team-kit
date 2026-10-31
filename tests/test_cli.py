@@ -1,4 +1,5 @@
 import contextlib
+from datetime import datetime, timezone
 import io
 import json
 import os
@@ -38,6 +39,22 @@ class Fixture(unittest.TestCase):
 
     def call(self, *args):
         return run(parser().parse_args(['--config',str(self.config),'--state',str(self.state),*args]))
+
+    def native_statusline(self, at=None, session='fixture-session', usage=None, account='team'):
+        at = time.time()-1 if at is None else at
+        usage = usage or {'input_tokens':2, 'output_tokens':4,
+                          'cache_creation_input_tokens':100, 'cache_read_input_tokens':200}
+        home = Path(self.value['profiles']['claude'][account]['home'])
+        path = home/'projects'/'fixture'/ (session+'.jsonl')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        row = {'type':'assistant', 'sessionId':session, 'uuid':'response-fixture',
+               'timestamp':datetime.fromtimestamp(at, timezone.utc).isoformat(),
+               'message':{'usage':usage, 'content':'PRIVATE-CONTENT-FIXTURE'}}
+        path.write_text(json.dumps(row)+'\n')
+        return {'session_id':session, 'transcript_path':str(path),
+                'context_window':{'current_usage':usage},
+                'rate_limits':{'five_hour':{'used_percentage':3,'resets_at':at+3600},
+                               'seven_day':{'used_percentage':4,'resets_at':at+86400}}}
 
     def create(self):
         return self.call('create','T1','--team','alpha','--root',str(self.repo),'--goal-file',str(self.root/'goal.txt'))
@@ -96,10 +113,22 @@ class IntegrationTests(Fixture):
         self.value['profiles']['claude'] = self.value['profiles'].pop('codex')
         self.value['teams']['alpha']['roles']['implementer']['provider'] = 'claude'
         self.config.write_text(json.dumps(self.value))
+        raw = self.native_statusline()
+        raw['transcript'] = 'private text'
         with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR':str(self.root/'team')}), patch('teamkit.providers.identity'), patch('sys.stdin',io.StringIO(json.dumps(raw))):
             self.call('capture','--provider','claude','--account','team')
         self.assertNotIn(b'private text', self.state.read_bytes())
         self.assertEqual(self.call('route','--provider','claude')['account'],'team')
+
+
+    def test_claude_capture_cannot_revive_an_expired_native_response(self):
+        self.value['profiles']['claude'] = self.value['profiles'].pop('codex')
+        self.value['teams']['alpha']['roles']['implementer']['provider'] = 'claude'
+        self.config.write_text(json.dumps(self.value))
+        raw = self.native_statusline(time.time()-600)
+        with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR':str(self.root/'team')}), patch('teamkit.providers.identity'), patch('sys.stdin',io.StringIO(json.dumps(raw))):
+            self.call('capture','--provider','claude','--account','team')
+        self.assertEqual(self.call('route','--provider','claude')['action'],'wait')
 
 
 class StoreContext:

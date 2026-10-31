@@ -31,7 +31,7 @@ python3 teamkit_cli.py refresh --provider codex --account personal
 python3 teamkit_cli.py route --provider codex
 ```
 
-Claude는 공식 statusline의 `rate_limits` 입력을 `capture --provider claude --account team`으로 전달합니다. 설정된 프로필 환경과 실제 인증 계정을 대조한 뒤 정규화한 한도만 저장합니다. 원본 statusline·대화는 저장하지 않습니다. 조직 계정 등에서 필요한 윈도가 제공되지 않으면 배정을 보류합니다. 기존 statusline을 자동으로 덮어쓰지 않습니다.
+Claude는 `statusline --account team --display-command '기존 렌더러 명령'`으로 기존 출력을 유지하며 수집합니다. 실제 계정과 해당 프로필의 최신 응답 메타데이터를 대조하고 응답 시각에 고정해 redraw·resume이 TTL을 연장하지 않도록 합니다. 회사 Team 한도 제공은 가정하지 않습니다. 설정·되돌리기·관찰 시각의 한계는 [Claude 한도 수집](docs/statusline.md)을 확인하세요. `capture --provider claude`도 완전한 native 입력과 같은 응답 검증을 요구하며 `rate_limits`만 있는 입력은 승격하지 않습니다.
 
 Herdr 관리 pane에서 작업을 등록하고 배정합니다.
 

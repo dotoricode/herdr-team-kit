@@ -24,7 +24,7 @@ class BootstrapTests(Fixture):
                 now = time.time()
                 with StoreContext(self.state) as db:
                     db.quota(provider+'/team', {'binding':binding(self.value['profiles'][provider]['team']),
-                        'observed_at':now, 'five_hour':{'used':1,'resets_at':now+900},
+                        'observed_at':now, 'source':'claude-statusline-response', 'five_hour':{'used':1,'resets_at':now+900},
                         'weekly':{'used':1,'resets_at':now+900}})
                 with patch.dict(os.environ, {'HERDR_ENV':'1'}), patch('teamkit.providers.identity'), patch('teamkit.__main__.Herdr') as runtime:
                     runtime.return_value.launch.return_value = {'name':'fixture','pane':'w1:p2'}

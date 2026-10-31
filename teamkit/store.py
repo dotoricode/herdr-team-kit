@@ -15,7 +15,7 @@ def sha(value):
 
 
 class Store:
-    def __init__(self, path):
+    def __init__(self, path, timeout=10):
         self.path = Path(path).expanduser()
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         # Create privately before SQLite opens the file; never chmod existing parent dirs.
@@ -26,7 +26,7 @@ class Store:
         else:
             os.close(fd)
         os.chmod(self.path, 0o600)
-        self.db = sqlite3.connect(self.path, timeout=10, isolation_level=None)
+        self.db = sqlite3.connect(self.path, timeout=timeout, isolation_level=None)
         self.db.execute('CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, body TEXT NOT NULL)')
         self.db.execute('CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, task TEXT, event TEXT, at REAL, body TEXT)')
         self.db.execute('CREATE TABLE IF NOT EXISTS quotas (profile TEXT PRIMARY KEY, body TEXT NOT NULL)')

@@ -61,15 +61,15 @@ class DefaultReceiptTests(Fixture):
         self.assertEqual(result['state'],'running')
 
     def test_capture_accepts_default_namespace_without_exposing_input(self):
-        import io,time
-        default=str(Path.home()/'.claude')
+        import io
+        default=str(self.root/'.claude')
         self.value['profiles']['claude']=self.value['profiles'].pop('codex')
         self.value['profiles']['claude']['personal']['home']=default
         self.value['teams']['alpha']['roles']['implementer']['provider']='claude'
         self.config.write_text(json.dumps(self.value))
-        data={'rate_limits':{'five_hour':{'used_percentage':7,'resets_at':time.time()+900},
-                             'seven_day':{'used_percentage':8,'resets_at':time.time()+900}}}
-        with patch.dict(os.environ,{'CLAUDE_CONFIG_DIR':''}),patch('teamkit.providers.identity'),patch('sys.stdin',io.StringIO(json.dumps(data))):
+        data=self.native_statusline(account='personal')
+        data['rate_limits']['five_hour']['used_percentage']=7
+        with patch.dict(os.environ,{'HOME':str(self.root),'CLAUDE_CONFIG_DIR':''}),patch('teamkit.providers.identity'),patch('sys.stdin',io.StringIO(json.dumps(data))):
             result=self.call('capture','--provider','claude','--account','personal')
         self.assertEqual(result['quota']['five_hour']['used'],7)
         self.assertEqual(self.call('route','--provider','claude')['account'],'personal')
