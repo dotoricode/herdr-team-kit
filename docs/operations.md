@@ -53,3 +53,26 @@ GitHub 변경은 PR 생성 → Codex 독립 리뷰 → 지적 검증·수정 →
 내부 Git의 push·PR 게시·merge는 각각 사용자 승인을 받습니다. 내부 PR 내 리뷰 절차는 적용하지 않되 구현과 독립 검증은 구분합니다. 읽기용 브라우저 접근과 게시 승인은 별개입니다. GitHub 승인 범위를 내부 Git으로 확대하지 않습니다.
 
 Receipt waiters record SIGINT/SIGTERM cancellation before exiting. SIGKILL or host/process failure can prevent cleanup; inspect and hand off the stopped owner before retrying. A ledger receipt is not process-liveness proof.
+
+## 운영 현황과 계정 사용률
+
+`monitor`는 호스트에서 native 실행 상태를 3초마다 관측하고 Codex 회사/개인 사용률을 30초마다 조회합니다. provider 조회는 별도 스레드에서 실행하여 지연된 한도 조회가 실행 상태 관측을 막지 않습니다. Claude는 기존 실제 응답에 연결된 statusline 수집을 유지합니다. 한도 확인을 위한 모델 턴·API fallback은 만들지 않습니다.
+
+```bash
+python3 teamkit_cli.py monitor
+python3 teamkit_cli.py dashboard --publish
+```
+
+두 프로그램은 별도 터미널에서 실행합니다. dashboard는 읽기 전용이며 monitor는 장부의 quota와 별도 관측 파일만 갱신합니다. 각 서비스는 단일 실행 잠금을 사용합니다. 관측이 없거나 오래됐으면 실행 상태를 미확인으로 표시합니다. 한도 누락·계정 binding 불일치·만료는 0%가 아닙니다. 이전 자료는 별표와 수집 경과를 표시하며 조회 실패는 새 배정 가능 근거로 사용하지 않습니다.
+
+`설계 검토 필요`는 모델의 권한 팝업과 다릅니다. 현황에 표시한 비공개 문서에서 대안·범위·검증을 확인하고 총괄 대화에서 선택과 승인을 남깁니다. 제품 업무의 미완료 건수와 native 작업 중/대기/입력 요청은 별도로 표시합니다.
+
+## 종료된 임시 작업 공간
+
+새 workspace 표시는 `업무ID · 역할 · 팀`이며 내부 고유 agent 이름과 분리합니다. 상시 팀장과 작업별 설계 실행도 구분합니다. 작업 호스트는 완료 보고 전에 결과·인계 자료를 보존하고 native idle/done과 백그라운드 작업 종료를 직접 확인한 뒤 임시 공간을 정리합니다. idle 자체를 작업 검증 완료로 간주하지 않습니다.
+
+```bash
+python3 teamkit_cli.py retire TASK-1 --owner OWNER --writer-stopped --evidence-file /srv/example/private/retirement.json
+```
+
+근거에는 비어 있지 않은 `verification` 목록을 넣습니다. 이 명령은 호스트의 정지 확인을 요구하며 자동 janitor가 아닙니다. 새 실행기가 만든 임시 workspace만 허용하고, 기존 owner·workspace label/layout·native foreground PID와 상태를 대조합니다. 상시 팀장·현재 workspace는 보호하며 결과·설계·Git/worktree 파일은 삭제하지 않습니다. 닫기 결과가 불명이면 intent를 보존하여 재시도 대신 inspect하게 합니다. 이미 닫은 실행에 tell을 보내지 않으며 후속 실행은 근거를 보존해 handoff한 뒤 배정합니다.

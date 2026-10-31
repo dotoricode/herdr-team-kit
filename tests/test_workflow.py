@@ -247,7 +247,7 @@ class WorkflowTests(Fixture):
         rows={c.args[0]:c.args[2] for c in screen.addnstr.call_args_list}
         for call in screen.addstr.call_args_list:
             y,x,label=call.args[:3]
-            if label=='승인 대기':
+            if label=='설계 검토 필요':
                 prefix=rows[y].split(label,1)[0]
                 expected=sum(2 if '\uac00'<=char<='\ud7a3' else 1 for char in prefix)
                 self.assertEqual(x,expected,'color overlay must not overwrite Korean text or counts')
@@ -377,7 +377,7 @@ class WorkflowTests(Fixture):
             h.return_value.call.return_value={'workspace':{'label':'Alpha'}}
             publish(view,self.value)
             args=h.return_value.call.call_args.args
-            self.assertIn('work_summary=작업 1 · 완료 1',args)
+            self.assertIn('work_summary=실행 상태 미확인 · 실행 — · 업무 1 · 완료 1',args)
             self.assertIn('work_blocked=',args)
 
     def test_publisher_renews_before_ttl_with_long_snapshot_interval(self):
@@ -398,13 +398,13 @@ class WorkflowTests(Fixture):
         self.setup_work();self.approve()
         view=model(snapshot(self.state),self.value)
         output=render(view)
-        self.assertIn('[░░░░░░░░░░░░░░░░░░░░]   0% 0/1',output)
+        self.assertIn('[                    ]   0% 0/1',output)
         self.assertIn('남은 작업 1건',output)
         self.assertIn('남은 단계: Verify behavior',output)
         evidence=self.root/'step.json';evidence.write_text(json.dumps({'verification':['checked']}))
         self.call('work','record','W1','--step','behavior','--evidence-file',str(evidence))
         output=render(model(snapshot(self.state),self.value))
-        self.assertIn('[███████████████████░]  99% 1/1',output)
+        self.assertIn('[███████████████████ ]  99% 1/1',output)
         self.assertIn('남은 단계: 최종 검증·독립 리뷰·완료 확인',output)
 
     def test_unapproved_progress_is_unknown_and_complete_has_no_remaining_work(self):
@@ -432,7 +432,7 @@ class WorkflowTests(Fixture):
         with patch('teamkit.dashboard.curses.curs_set'):
             live(screen,Namespace(state=str(self.state),publish=False,color='never',interval=3),self.value)
         shown=[c.args[2][:c.args[3]] for c in screen.addnstr.call_args_list]
-        self.assertTrue(any('[███████████████████░]  99% 1/1' in line for line in shown))
+        self.assertTrue(any('[███████████████████ ]  99% 1/1' in line for line in shown))
 
     def test_block_progress_keeps_counts_and_percent_at_narrow_widths(self):
         from teamkit.dashboard import model,render

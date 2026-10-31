@@ -193,6 +193,8 @@ class Store:
     def wake(self, task, owner, approval_config=None):
         with self.transaction():
             value = self.get(task)
+            if value.get('runtime',{}).get('retire_requested'):
+                raise ValueError('workspace retirement was requested; inspect and hand off before reuse')
             if value.get('owner') != owner or value['role'] != 'leader' or value['state'] != 'ready':
                 raise ValueError('leader is not ready')
             if value.get('work_id') and approval_config is None:

@@ -80,6 +80,8 @@ def parser():
     commands.add_parser('list')
     for cmd in ('receipt', 'park'):
         x = commands.add_parser(cmd); x.add_argument('task'); x.add_argument('--owner', required=True)
+    x = commands.add_parser('retire');x.add_argument('task');x.add_argument('--owner',required=True)
+    x.add_argument('--writer-stopped',action='store_true',required=True);x.add_argument('--evidence-file',required=True)
     x = commands.add_parser('tell'); x.add_argument('task'); x.add_argument('--message-file', required=True)
     for cmd in ('handoff', 'complete'):
         x = commands.add_parser(cmd); x.add_argument('task'); x.add_argument('--owner', required=True)
@@ -103,6 +105,9 @@ def parser():
         if action in ('checkpoint','record'):x.add_argument('--evidence-file',required=True)
         if action=='record':x.add_argument('--step',required=True)
         if action=='finish':x.add_argument('--review-task',required=True)
+    x=commands.add_parser('monitor')
+    x.add_argument('--once',action='store_true');x.add_argument('--interval',type=float,default=3)
+    x.add_argument('--quota-interval',type=float,default=30)
     x=commands.add_parser('dashboard')
     x.add_argument('--once',action='store_true');x.add_argument('--json',action='store_true')
     x.add_argument('--publish',action='store_true');x.add_argument('--interval',type=float,default=3)
@@ -119,6 +124,9 @@ def run(args):
     if args.command=='dashboard':
         from .dashboard import run as dashboard
         return dashboard(args,config)
+    if args.command == 'monitor':
+        from .monitor import run as monitor
+        return monitor(args,config)
     if args.command == 'doctor':
         return {'config':'valid', 'herdr_managed':os.environ.get('HERDR_ENV') == '1',
                 'teams':list(config['teams']), 'providers':list(config['profiles']),
@@ -277,6 +285,9 @@ def run(args):
                 store.delivery_failed(args.task, owner)
                 raise
             return store.get(args.task)
+        if args.command == 'retire':
+            from .retirement import retire
+            return retire(store,config,args.task,args.owner,json.loads(Path(args.evidence_file).read_text()),args.writer_stopped)
         if args.command == 'park':
             return store.park(args.task, args.owner)
         if args.command == 'tell':

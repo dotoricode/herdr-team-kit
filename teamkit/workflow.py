@@ -272,11 +272,18 @@ def run(args,config,store):
 def snapshot(state):
     """Read-only: a status refresh never creates a DB or starts a model."""
     path=Path(state).expanduser().resolve()
-    if not path.is_file():return {'works':[],'tasks':[],'event_sequence':0,'observed_at':time.time()}
+    if not path.is_file():return {'works':[],'tasks':[],'quotas':{},'monitor':None,'event_sequence':0,'observed_at':time.time()}
     with sqlite3.connect(path.as_uri()+'?mode=ro',uri=True) as db:
         db.execute('BEGIN')
         tasks=[json.loads(r[0]) for r in db.execute('SELECT body FROM tasks')]
         exists=db.execute("SELECT 1 FROM sqlite_master WHERE name='work_items'").fetchone()
         works=[json.loads(r[0]) for r in db.execute('SELECT body FROM work_items')] if exists else []
         events=db.execute('SELECT MAX(seq) FROM events').fetchone()[0] or 0
-    return {'works':works,'tasks':tasks,'event_sequence':events,'observed_at':time.time()}
+        quotas={k:json.loads(v) for k,v in db.execute('SELECT profile,body FROM quotas')}
+    from .monitor import cache_path
+    monitor=None
+    try:
+        cached=cache_path(state)
+        if cached.stat().st_size<=1024*1024:monitor=json.loads(cached.read_text())
+    except (OSError,ValueError):pass
+    return {'works':works,'tasks':tasks,'quotas':quotas,'monitor':monitor,'event_sequence':events,'observed_at':time.time()}

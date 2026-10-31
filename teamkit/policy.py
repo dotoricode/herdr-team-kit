@@ -9,7 +9,7 @@ def number(value):
 
 
 def eligible(snapshot, now, ttl=120):
-    if not isinstance(snapshot, dict):
+    if not isinstance(snapshot, dict) or snapshot.get('unavailable'):
         return False
     at = snapshot.get('observed_at')
     if not number(at) or not 0 <= now - at <= ttl:
