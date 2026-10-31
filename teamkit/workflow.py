@@ -91,7 +91,10 @@ def save(store, work, event):
 
 
 def document(config, work):
-    path=private_root(config)/work['id']/('r'+str(work['revision']))
+    root=private_root(config)
+    if work.get('private_root')!=str(root):
+        raise ValueError('private design storage changed; restore the original path before execution')
+    path=root/work['id']/('r'+str(work['revision']))
     if path.is_symlink() or path.resolve()!=path or (path/'plan.md').is_symlink() or (path/'contract.json').is_symlink():
         raise ValueError('private revision path changed')
     outside_git(path)
@@ -179,7 +182,7 @@ def run(args,config,store):
             for filename,data in (('plan.md',plan),('contract.json',json.dumps(contract,ensure_ascii=False,indent=2).encode())):
                 fd=os.open(path/filename,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
                 with os.fdopen(fd,'wb') as out:out.write(data);out.flush();os.fsync(out.fileno())
-            work={'id':args.work,'team':args.team,'root':str(root),'revision':1,'phase':'planning','title':contract['title'],'steps':contract['steps'],'milestones':{},'created_at':time.time()}
+            work={'private_root':str(private),'id':args.work,'team':args.team,'root':str(root),'revision':1,'phase':'planning','title':contract['title'],'steps':contract['steps'],'milestones':{},'created_at':time.time()}
             return save(store,work,'work_created')
     with store.transaction():
         work=get(store,args.work)
@@ -257,6 +260,9 @@ def run(args,config,store):
                 completed=[(max(e['seq'] for e in store.events(t['id']) if e['event']=='awaiting_review'),t['id']) for t in reviews]
                 if not completed or max(completed)[1]!=reviewer['id']:
                     raise ValueError('a newer applicable review must be resolved first')
+                current=fingerprint(work['root'])
+                if any(m.get('head')!=head or m.get('fingerprint')!=current for m in work['milestones'].values()):
+                    raise ValueError('source changed after step verification; rerun verification and record affected steps')
                 scope_check(work,contract)
                 work.update(phase='complete',review_task=reviewer['id'],completed_head=head)
             return save(store,work,'work_verified')

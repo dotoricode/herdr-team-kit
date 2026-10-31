@@ -47,7 +47,7 @@ python3 teamkit_cli.py work finish WORK-1 --review-task REVIEW-1
 
 checkpoint 입력에는 비어 있지 않은 `verification` 목록과 `next`를 넣습니다. 실제 HEAD와 index·working tree·untracked 내용의 지문을 기록하고 다음 구현 claim에서 확인한 뒤 소비합니다. 강제 종료의 결과를 모르면 inspect하며 파일을 덮어쓰거나 명령을 반복하지 않습니다. 변경된 입력만 재검증하고, 같은 SHA·입력·환경의 유효한 근거는 재사용합니다.
 
-record는 승인된 단계의 완료 근거와 파일 해시·소스 지문을 남깁니다. 기록 자체가 명령 실행이나 의미상 검증을 대신하지 않습니다. 진행률은 승인한 단계 가중치(합계100)의 합이며 마지막 독립 리뷰 전에는 최대99입니다. finish는 전체 단계와 동일 승인 버전·현재 clean SHA의 별도 reviewer 작업, 명시적 `review_verdict: "pass"`를 요구합니다. `findings`·`blocked` 리뷰는 완료로 처리하지 않습니다. push·게시·merge는 별도 승인 범위입니다.
+record는 승인된 단계의 완료 근거와 파일 해시·소스 지문을 남깁니다. finish 시 모든 단계 기록의 HEAD와 소스 지문이 현재 상태와 같아야 합니다. 단계 기록 후 코드가 바뀌면 최종 소스에서 검증을 다시 실행하고 단계를 다시 기록합니다. 기록 자체가 명령 실행이나 의미상 검증을 대신하지 않습니다. 진행률은 승인한 단계 가중치(합계100)의 합이며 마지막 독립 리뷰 전에는 최대99입니다. finish는 전체 단계와 동일 승인 버전·현재 clean SHA의 별도 reviewer 작업, 명시적 `review_verdict: "pass"`를 요구합니다. `findings`·`blocked` 리뷰는 완료로 처리하지 않습니다. push·게시·merge는 별도 승인 범위입니다.
 
 ## 모델을 깨우지 않는 현황
 

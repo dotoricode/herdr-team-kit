@@ -318,3 +318,43 @@ class WorkflowTests(Fixture):
 
     def test_tell_rechecks_revision_changed_during_status_read(self):
         self.assert_stale_design_tell_refused(True)
+
+    def test_relocated_private_root_refuses_existing_design(self):
+        import shutil
+        from teamkit.workflow import document
+        self.setup_work();self.approve()
+        relocated=self.root/'relocated'
+        shutil.copytree(self.root/'private-plans',relocated)
+        self.value['private_plan_root']=str(relocated)
+        with StoreContext(self.state) as db:
+            from teamkit.workflow import get
+            with self.assertRaises(ValueError):document(self.value,get(db,'W1'))
+
+    def test_design_claim_clears_resolved_quota_hold(self):
+        from teamkit.workflow import get,save
+        self.setup_work()
+        self.call('create','D1','--team','alpha','--role','leader','--work-kind','design',
+            '--root',str(self.repo),'--work','W1','--goal-file',str(self.root/'goal.txt'))
+        with StoreContext(self.state) as db:
+            with db.transaction():
+                w=get(db,'W1');w['hold']={'kind':'quota','reason':'waiting'};save(db,w,'quota_wait')
+            db.claim('D1','designer','codex','team','fixture','high',approval_config=self.value)
+            self.assertNotIn('hold',get(db,'W1'))
+            self.assertEqual(get(db,'W1')['phase'],'planning')
+
+    def test_finish_requires_step_evidence_for_current_source(self):
+        self.setup_work();self.approve()
+        evidence=self.root/'step.json';evidence.write_text(json.dumps({'verification':['old behavior checked']}))
+        self.call('work','record','W1','--step','behavior','--evidence-file',str(evidence))
+        (self.repo/'feature.txt').write_text('changed after verification')
+        subprocess.run(['git','-C',str(self.repo),'add','feature.txt'],check=True)
+        subprocess.run(['git','-C',str(self.repo),'commit','-qm','change'],check=True)
+        self.task('R1','reviewer')
+        with StoreContext(self.state) as db:
+            db.claim('R1','reviewer','codex','team','fixture','high',approval_config=self.value)
+            db.update('R1','reviewer','launching',{'name':'independent'})
+            db.update('R1','reviewer','submitted',{});db.receipt('R1','reviewer')
+            head=db.get('R1')['base'];db.complete('R1','reviewer',head,['review'],head,'pass')
+        with self.assertRaises(ValueError):self.call('work','finish','W1','--review-task','R1')
+        self.call('work','record','W1','--step','behavior','--evidence-file',str(evidence))
+        self.assertEqual(self.call('work','finish','W1','--review-task','R1')['phase'],'complete')

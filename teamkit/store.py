@@ -133,6 +133,10 @@ class Store:
             value.update(state='claimed', owner=owner, provider=provider, account=account, model=model, effort=effort)
             value['attempt_count']=value.get('attempt_count',0)+1
             value['runtime']={}
+            if work and value['role']!='implementer' and work.get('hold',{}).get('kind')=='quota':
+                from .workflow import save
+                work.pop('hold')
+                save(self,work,'quota_resolved')
             if work and value['role']=='implementer':
                 from .workflow import save
                 work.pop('checkpoint',None)
