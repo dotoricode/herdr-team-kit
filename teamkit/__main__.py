@@ -195,7 +195,7 @@ def run(args):
             supervised = config.get('context_supervision',False) and task['role'] != 'leader'
             runtime = Herdr()
             try:
-                store.update(args.task, owner, 'launching', {'context_footer':supervised and provider == 'codex'})
+                store.update(args.task, owner, 'launching', {'context_footer':supervised and provider == 'codex','supervision_enrolled':supervised})
                 spec = launch_spec(provider, pr, None)
                 spec['args'] += ['--add-dir', str(Path(args.state).parent)]
                 if supervised and provider == 'codex':

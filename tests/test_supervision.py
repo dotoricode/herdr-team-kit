@@ -8,7 +8,7 @@ class SupervisionTests(Fixture):
         task=self.create()
         with StoreContext(self.state) as db:
             db.claim('T1','owner','codex','team','fixture','medium')
-            db.update('T1','owner','launching',{'name':'fixture','pane':'w1:p1','context_footer':True})
+            db.update('T1','owner','launching',{'name':'fixture','pane':'w1:p1','context_footer':True,'supervision_enrolled':True})
             db.update('T1','owner','submitted',{})
             db.receipt('T1','owner')
         self.value['context_supervision']=True
@@ -56,6 +56,7 @@ class SupervisionTests(Fixture):
             if args[:2]==('agent','get'):return {'agent':agent}
             if args[:2]==('pane','process-info'):return info
             if args[:2]==('agent','prompt') and exit_error:raise RuntimeError('unknown delivery')
+            if args[:2]==('agent','prompt'):return {'agent':dict(agent,agent_status='working')}
             return {}
         h.return_value.call.side_effect=call
         h.return_value.read.return_value=f'model · Context {remaining}% left\n'
@@ -254,3 +255,73 @@ class SupervisionTests(Fixture):
             self.assertEqual(supervise_once(self.value,self.state,'T1','owner',apply=True)['action'],'inspect')
             self.assertFalse(any(c.args[:2]==('agent','prompt') for c in h.return_value.call.call_args_list))
         self.assertIn('boundary',self.call('show','T1'))
+
+    def test_index_only_content_change_changes_fingerprint(self):
+        import subprocess
+        from teamkit.checkpoint import fingerprint
+        path=self.repo/'tracked.txt';path.write_text('base')
+        subprocess.run(['git','-C',str(self.repo),'add','tracked.txt'],check=True)
+        subprocess.run(['git','-C',str(self.repo),'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','base'],check=True)
+        path.write_text('index-a');subprocess.run(['git','-C',str(self.repo),'add','tracked.txt'],check=True);path.write_text('working')
+        first=fingerprint(self.repo)
+        path.write_text('index-b');subprocess.run(['git','-C',str(self.repo),'add','tracked.txt'],check=True);path.write_text('working')
+        self.assertNotEqual(fingerprint(self.repo),first)
+
+    def test_disabled_at_launch_attempt_is_not_adopted_after_config_opt_in(self):
+        import os
+        from teamkit.supervisor import supervise_once
+        self.boundary()
+        with StoreContext(self.state) as db:db.note('T1','owner',{'supervision_enrolled':False})
+        with patch.dict(os.environ,{'HERDR_ENV':'1'}),patch('teamkit.supervisor.Herdr') as h:
+            self.native(h,remaining=99)
+            self.assertEqual(supervise_once(self.value,self.state,'T1','owner',apply=True)['action'],'inactive')
+            h.assert_not_called()
+
+    def test_native_becoming_working_during_observation_is_not_quit(self):
+        import os
+        from teamkit.supervisor import supervise_once
+        self.boundary()
+        with patch.dict(os.environ,{'HERDR_ENV':'1'}),patch('teamkit.supervisor.Herdr') as h,patch('teamkit.supervisor.process_family',return_value=[125]),patch('teamkit.supervisor.stopped',return_value=True):
+            self.native(h)
+            old=h.return_value.call.side_effect;gets=[]
+            def call(*args):
+                result=old(*args)
+                if args[:2]==('agent','get'):
+                    gets.append(True)
+                    if len(gets)>1:result['agent']['agent_status']='working'
+                return result
+            h.return_value.call.side_effect=call
+            self.assertEqual(supervise_once(self.value,self.state,'T1','owner',apply=True)['action'],'inspect')
+            self.assertFalse(any(c.args[:2]==('agent','prompt') for c in h.return_value.call.call_args_list))
+
+    def test_continuation_intent_is_durable_before_transport(self):
+        self.boundary()
+        with StoreContext(self.state) as db:
+            before=db.get('T1');db.supervise_transition('T1','owner',before)
+        task=self.call('show','T1')
+        self.assertEqual(task['runtime']['supervision_delivery']['status'],'pending')
+        self.assertTrue(task['runtime']['supervision_delivery']['token'])
+
+    def test_git_change_during_process_observation_prevents_exit(self):
+        import os
+        from teamkit.supervisor import supervise_once
+        self.boundary()
+        with patch.dict(os.environ,{'HERDR_ENV':'1'}),patch('teamkit.supervisor.Herdr') as h,patch('teamkit.supervisor.process_family',return_value=[125]),patch('teamkit.supervisor.stopped',return_value=True):
+            self.native(h);old=h.return_value.call.side_effect
+            def call(*args):
+                if args[:2]==('pane','process-info'):(self.repo/'late.txt').write_text('uncheckpointed')
+                return old(*args)
+            h.return_value.call.side_effect=call
+            self.assertEqual(supervise_once(self.value,self.state,'T1','owner',apply=True)['action'],'inspect')
+            self.assertFalse(any(c.args[:2]==('agent','prompt') for c in h.return_value.call.call_args_list))
+
+    def test_accepted_exit_can_wait_and_recover_without_second_exit(self):
+        import os
+        from teamkit.supervisor import supervise_once
+        self.boundary()
+        with patch.dict(os.environ,{'HERDR_ENV':'1'}),patch('teamkit.supervisor.Herdr') as h,patch('teamkit.supervisor.process_family',return_value=[125]),patch('teamkit.supervisor.stopped',return_value=False) as stopped,patch('teamkit.supervisor.time.sleep'):
+            self.native(h)
+            self.assertEqual(supervise_once(self.value,self.state,'T1','owner',apply=True)['action'],'waiting_exit')
+            stopped.return_value=True
+            self.assertEqual(supervise_once(self.value,self.state,'T1','owner',apply=True)['action'],'handed_off')
+            self.assertEqual(sum(c.args[:2]==('agent','prompt') for c in h.return_value.call.call_args_list),1)

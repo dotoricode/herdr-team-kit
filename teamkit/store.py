@@ -7,6 +7,7 @@ import re
 import sqlite3
 import subprocess
 import time
+import uuid
 
 ACTIVE = {'claimed', 'launching', 'submitted', 'running', 'uncertain', 'stopping'}
 
@@ -207,7 +208,7 @@ class Store:
         validate_failure(evidence.get('failure'),evidence['verification'])
         with self.transaction():
             value = self.get(task)
-            if value.get('owner') != owner or value['state'] != 'running' or value['role'] == 'leader' or not value.get('runtime', {}).get('identity_checked'):
+            if value.get('owner') != owner or value['state'] != 'running' or value['role'] == 'leader' or not value.get('runtime', {}).get('identity_checked') or value.get('runtime', {}).get('supervision_enrolled') is not True:
                 raise ValueError('boundary requires a running receipted worker owner')
             value['boundary'] = evidence
             return self._save(value, 'boundary', evidence)
@@ -221,8 +222,18 @@ class Store:
                 value['state'] = 'stopping'
                 value['runtime']['supervision_pending'] = detail
             else:
+                value['runtime']['supervision_delivery'] = {'token':uuid.uuid4().hex,'status':'pending','next':value['boundary']['next']}
                 value.pop('boundary')
-            return self._save(value, 'stopping' if stopping else 'boundary_continued')
+            return self._save(value, 'stopping' if stopping else 'continuation_pending')
+
+    def supervision_accepted(self, task, owner, token):
+        with self.transaction():
+            value = self.get(task)
+            pending = value.get('runtime', {}).get('supervision_delivery', {})
+            if value.get('owner') != owner or value['state'] not in ('running','awaiting_review') or pending.get('token') != token or pending.get('status') != 'pending':
+                raise ValueError('continuation intent changed; inspect')
+            pending['status'] = 'submitted'
+            return self._save(value,'continuation_submitted',{'token':token})
 
     def authorize(self, task, decision, approved):
         fields = {'failure_count','approval_reference','provider','model','effort'}

@@ -1,6 +1,6 @@
 # 워커 컨텍스트 감독
 
-`context_supervision: true`로 새로 배정하는 구현·리뷰 워커에만 감독기를 선택 적용합니다. 기본값은 false입니다. 기존 팀장·세션·전역 설정은 바꾸거나 종료하지 않습니다. 구현은 Unix의 파일 잠금·프로세스 조회를 사용합니다.
+`context_supervision: true`로 새로 배정하는 구현·리뷰 워커에만 감독기를 선택 적용합니다. 기본값은 false입니다. 배정 시점의 enrollment를 시도에 고정합니다. 나중에 전역 flag를 켜도 기존 unenrolled 시도를 감독하지 않습니다. 기존 팀장·세션·전역 설정은 바꾸거나 종료하지 않습니다. 구현은 Unix의 파일 잠금·프로세스 조회를 사용합니다.
 
 새 managed Codex 워커는 실행 인자로 native `context-remaining` footer를 표시합니다. 마지막 footer의 실제 남은 비율을 사용률로 변환합니다. 표시가 없거나 지원하지 않으면 unknown입니다. Claude는 이 footer 경로를 지원하지 않으므로 unknown이며 임의 사용률을 만들지 않습니다. 이 기능은 quota 유효기간을 바꾸지 않습니다. [공식 Codex 설정](https://learn.chatgpt.com/docs/config-file/config-sample)을 참고합니다.
 
@@ -16,7 +16,7 @@
 python3 teamkit_cli.py boundary TASK-1 --owner OWNER --evidence-file /srv/example/private/boundary.json --rotate-if-unknown
 ```
 
-실패한 시도라면 기존 routing의 `failure` 원인·종류를 추가할 수 있습니다. 경계 기록은 실제 HEAD·dirty·worktree fingerprint와 현재 receipted owner에 고정합니다. 입력 파일로 이를 덮어쓸 수 없습니다. 기록 뒤에는 추가 수정 없이 턴을 끝냅니다. 전체 작업을 마쳤다면 boundary 대신 기존 complete로 실제 완료 근거를 기록합니다.
+실패한 시도라면 기존 routing의 `failure` 원인·종류를 추가할 수 있습니다. 경계 기록은 실제 HEAD·dirty·worktree fingerprint와 현재 receipted owner에 고정합니다. fingerprint는 working tree뿐 아니라 staged index의 내용도 포함합니다. 입력 파일로 이를 덮어쓸 수 없습니다. 기록 뒤에는 추가 수정 없이 턴을 끝냅니다. 전체 작업을 마쳤다면 boundary 대신 기존 complete로 실제 완료 근거를 기록합니다.
 
 사용률 60% 이상은 prepare, 70% 이상은 경계 확인 후 교체 대상입니다. unknown일 때 `--rotate-if-unknown`을 명시한 경계는 새 세션으로 교체합니다. 알려진 사용률이 낮으면 경계를 한 번 소비하고 같은 소유자·세션에서 다음 작업을 계속하도록 전송합니다. 실패 경계는 사용률과 관계없이 종료 확인 후 인계해 실패 이력을 보존합니다. 환경 실패는 추가 모델 시도 없이 대기합니다.
 
@@ -34,7 +34,7 @@ supervise 기본값은 native 관찰·판단만 수행하며 입력 전송·소�
 
 그 뒤 새 dispatch가 기존 quota·계정·모델·HEAD·fingerprint·소유권 검사를 다시 수행합니다. Codex 한도는 구독 native 읽기로 회사부터 확인하며 Claude는 실제 수집 캐시를 사용합니다. 사용 불가면 handed_off 상태로 대기하고 API·추가 결제·다른 계열 모델로 우회하지 않습니다. 회사 계정 복귀는 새 dispatch에만 적용됩니다.
 
-전송·종료 결과가 불명확하면 자동 재전송하지 않습니다. stopping은 활성 소유권을 유지합니다. 이미 종료된 writer와 동일한 경계를 확인할 수 있으면 supervise apply로 남은 인계를 마칠 수 있지만, writer가 아직 있으면 inspect로 남깁니다. 계속 전송의 불확실 상태도 수동 확인이 필요합니다. 운영자가 native 상태·실제 파일을 확인한 뒤 기존 인계 절차로 복구하며, 승인·검증 근거를 만들어내지 않습니다. 사용자 결정이 필요한 high 실패는 기존 routing의 ask_user를 유지합니다.
+전송·종료 결과가 불명확하면 자동 재전송하지 않습니다. stopping은 활성 소유권을 유지합니다. 이미 종료된 writer와 동일한 경계를 확인할 수 있으면 supervise apply로 남은 인계를 마칠 수 있지만, writer가 아직 있으면 inspect로 남깁니다. 계속 전송의 pending 기록은 프로세스 강제 종료에도 남으므로 불확실 전송을 재전송하지 않습니다. 종료 요청이 접수됐지만 프로세스가 남아 있으면 watch는 같은 프로세스를 재관측하며 종료 명령을 반복하지 않습니다. 계속 전송의 불확실 상태도 수동 확인이 필요합니다. 운영자가 native 상태·실제 파일을 확인한 뒤 기존 인계 절차로 복구하며, 승인·검증 근거를 만들어내지 않습니다. 사용자 결정이 필요한 high 실패는 기존 routing의 ask_user를 유지합니다.
 
 ## 검증 범위
 
