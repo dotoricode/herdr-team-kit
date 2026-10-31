@@ -448,3 +448,18 @@ class WorkflowTests(Fixture):
                 self.assertIn('99% 1/1',line)
                 self.assertIn('█',line)
                 self.assertNotIn('#',line)
+
+    def test_resize_reflows_cached_view_without_extra_ledger_read(self):
+        from argparse import Namespace
+        from unittest.mock import MagicMock
+        from teamkit.dashboard import live
+        from teamkit.workflow import snapshot
+        self.setup_work();self.approve()
+        data=snapshot(self.state)
+        screen=MagicMock();screen.getmaxyx.side_effect=[(40,120),(40,20),(40,60)];screen.getch.side_effect=[-1,-1,ord('q')]
+        args=Namespace(state=str(self.state),publish=True,color='never',interval=60)
+        with patch('teamkit.dashboard.curses.curs_set'),patch('teamkit.dashboard.time.monotonic',side_effect=[100,110,120]),patch('teamkit.dashboard.publish') as pub,patch('teamkit.dashboard.snapshot',side_effect=[data,AssertionError('resize must not query a locked ledger')]) as read:
+            live(screen,args,self.value)
+        self.assertEqual(read.call_count,1)
+        self.assertEqual(pub.call_count,3)
+        self.assertTrue(any('0% 0/1' in c.args[2] and c.args[3]==19 for c in screen.addnstr.call_args_list))

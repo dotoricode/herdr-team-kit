@@ -166,12 +166,13 @@ def live(screen,args,config):
     next_read=0;last_publish=float('-inf');offset=0;lines=[];warning='';last_width=None
     while True:
         height,width=screen.getmaxyx()
-        if width!=last_width:next_read=0;last_width=width
+        resized=width!=last_width;last_width=width
         now=time.monotonic()
         if now>=next_read:
             view=model(snapshot(args.state),config)
-            lines=render(view,width=max(1,width-1)).splitlines()
             next_read=now+args.interval
+            resized=True
+        if resized:lines=render(view,width=max(1,width-1)).splitlines()
         if args.publish and now-last_publish>=10:
             try:publish(view,config);warning=''
             except (KitError,ValueError):warning='좌측 요약 갱신 실패 · 세션과 workspace 연결을 확인해 주세요.'
