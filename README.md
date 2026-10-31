@@ -47,6 +47,8 @@ python3 teamkit_cli.py show TASK-1
 
 운영 절차·인계·매뉴얼·승인 규칙은 `docs/operations.md`, 검증 범위와 남은 작업은 `docs/verification.md`를 확인하세요.
 
+제품의 [설계 승인·재개·현황 화면](docs/approved-workflow.md)은 `work`와 실행 task를 분리합니다. 비공개 설계를 Git 밖에 저장하고 승인 버전·현재 소스를 대조해 배정하며, dashboard는 모델 호출 없이 장부를 표시합니다. 예제의 `require_design_approval`을 켜면 위 create 예제에도 승인한 `--work` 연결이 필요합니다.
+
 ## 공개 자료 경계
 
 이 저장소에는 범용 코드와 가짜 설정만 둡니다. 회사 제품 코드·지침·매뉴얼·실행 기록·계정 정보는 별도 로컬 설정으로 연결합니다. 공개 검사 스크립트는 알려진 실수를 찾는 보조 수단이며 비밀정보 검토를 대신하지 않습니다.

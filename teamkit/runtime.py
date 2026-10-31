@@ -63,6 +63,11 @@ class Herdr:
         if result.returncode:
             # Do not echo terminal text or internal paths into external logs.
             raise RuntimeError('Herdr command failed; inspect local runtime before retry')
+        operation=args[2:] if args[:1]==('--session',) else args
+        if operation[:2]==('workspace','report-metadata') and not result.stdout.strip():
+            # Installed Herdr acknowledges presentation updates with exit 0 only.
+            # Do not weaken JSON requirements for lifecycle or task commands.
+            return {'metadata_accepted':True}
         try:
             body = json.loads(result.stdout)
         except ValueError as error:
