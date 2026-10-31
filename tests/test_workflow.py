@@ -391,3 +391,45 @@ class WorkflowTests(Fixture):
         with patch('teamkit.dashboard.curses.curs_set'),patch('teamkit.dashboard.time.monotonic',side_effect=[100,110,120,130]),patch('teamkit.dashboard.publish') as pub:
             live(screen,args,self.value)
         self.assertEqual(pub.call_count,4)
+
+    def test_progress_bar_uses_verified_percent_and_lists_remaining_steps(self):
+        from teamkit.dashboard import model,render
+        from teamkit.workflow import snapshot
+        self.setup_work();self.approve()
+        view=model(snapshot(self.state),self.value)
+        output=render(view)
+        self.assertIn('0% [--------------------]',output)
+        self.assertIn('남은 작업 1건',output)
+        self.assertIn('남은 단계: Verify behavior',output)
+        evidence=self.root/'step.json';evidence.write_text(json.dumps({'verification':['checked']}))
+        self.call('work','record','W1','--step','behavior','--evidence-file',str(evidence))
+        output=render(model(snapshot(self.state),self.value))
+        self.assertIn('99% [###################-]',output)
+        self.assertIn('남은 단계: 최종 검증·독립 리뷰·완료 확인',output)
+
+    def test_unapproved_progress_is_unknown_and_complete_has_no_remaining_work(self):
+        from teamkit.dashboard import model,render
+        from teamkit.workflow import snapshot
+        self.setup_work()
+        view=model(snapshot(self.state),self.value)
+        self.assertIn('미정 [????????????????????]',render(view))
+        self.approve()
+        view=model(snapshot(self.state),self.value)
+        view['rows'][0].update(phase='complete',percent=100)
+        output=render(view)
+        self.assertIn('100% [####################]',output)
+        self.assertIn('남은 작업 0건',output)
+        self.assertNotIn('남은 단계:',output)
+
+    def test_narrow_live_screen_keeps_numeric_progress_visible(self):
+        from argparse import Namespace
+        from unittest.mock import MagicMock
+        from teamkit.dashboard import live
+        self.setup_work();self.approve()
+        evidence=self.root/'step.json';evidence.write_text(json.dumps({'verification':['checked']}))
+        self.call('work','record','W1','--step','behavior','--evidence-file',str(evidence))
+        screen=MagicMock();screen.getmaxyx.return_value=(40,40);screen.getch.return_value=ord('q')
+        with patch('teamkit.dashboard.curses.curs_set'):
+            live(screen,Namespace(state=str(self.state),publish=False,color='never',interval=3),self.value)
+        shown=[c.args[2][:c.args[3]] for c in screen.addnstr.call_args_list]
+        self.assertTrue(any('99% [###################-]' in line for line in shown))
