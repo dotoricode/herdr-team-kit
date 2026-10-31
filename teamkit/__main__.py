@@ -277,11 +277,13 @@ def run(args):
         if args.command == 'tell':
             if os.environ.get('HERDR_ENV') != '1':
                 raise KitError('tell must run inside Herdr')
+            from .workflow import check_task
+            check_task(config,store,task)
             status = Herdr().call('agent','get',task['runtime']['name'])
             agent = status.get('agent', status)
             if agent.get('agent_status') not in ('idle','done'):
                 raise KitError('leader is not idle; inspect before sending')
-            store.wake(args.task, task['owner'])
+            store.wake(args.task, task['owner'], approval_config=config)
             try:
                 Herdr().prompt(task['runtime']['name'], Path(args.message_file).read_text()+
                                '\nAfter processing, park the leader through the task ledger.')

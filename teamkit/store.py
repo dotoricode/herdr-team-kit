@@ -186,11 +186,16 @@ class Store:
             value['state'] = 'ready'
             return self._save(value, 'ready')
 
-    def wake(self, task, owner):
+    def wake(self, task, owner, approval_config=None):
         with self.transaction():
             value = self.get(task)
             if value.get('owner') != owner or value['role'] != 'leader' or value['state'] != 'ready':
                 raise ValueError('leader is not ready')
+            if value.get('work_id') and approval_config is None:
+                raise ValueError('linked work wake requires approval validation')
+            if approval_config is not None:
+                from .workflow import check_task
+                check_task(approval_config,self,value)
             if sum(t['state'] in ACTIVE for t in self.list()) >= 3:
                 raise ValueError('global model limit reached')
             value['state'] = 'running'

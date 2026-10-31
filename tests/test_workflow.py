@@ -291,3 +291,30 @@ class WorkflowTests(Fixture):
         with patch.dict(os.environ,{'HERDR_ENV':'1'}),patch('teamkit.runtime.subprocess.run',return_value=SimpleNamespace(returncode=0,stdout='',stderr='')):
             self.assertTrue(Herdr().call('--session','fixture','workspace','report-metadata','w1','--source','test','--token','x=1')['metadata_accepted'])
             with self.assertRaises(RuntimeError):Herdr().call('agent','start','worker','--kind','codex','--pane','w1:p1')
+
+    def assert_stale_design_tell_refused(self, during_status):
+        self.setup_work()
+        self.call('create','D1','--team','alpha','--role','leader','--work-kind','design',
+            '--root',str(self.repo),'--work','W1','--goal-file',str(self.root/'goal.txt'))
+        with StoreContext(self.state) as db:
+            db.claim('D1','owner','codex','team','fixture','high',approval_config=self.value)
+            db.update('D1','owner','launching',{'name':'old-designer'})
+            db.update('D1','owner','submitted',{})
+            db.receipt('D1','owner');db.park('D1','owner')
+        def revise(*args):
+            self.call('work','revise','W1')
+            return {'agent_status':'idle'}
+        if not during_status:self.call('work','revise','W1')
+        with patch.dict(os.environ,{'HERDR_ENV':'1'}),patch('teamkit.__main__.Herdr') as herdr:
+            if during_status:herdr.return_value.call.side_effect=revise
+            else:herdr.return_value.call.return_value={'agent_status':'idle'}
+            with self.assertRaises(ValueError):
+                self.call('tell','D1','--message-file',str(self.root/'goal.txt'))
+            herdr.return_value.prompt.assert_not_called()
+        self.assertEqual(self.call('show','D1')['state'],'ready')
+
+    def test_tell_refuses_parked_design_from_old_revision(self):
+        self.assert_stale_design_tell_refused(False)
+
+    def test_tell_rechecks_revision_changed_during_status_read(self):
+        self.assert_stale_design_tell_refused(True)
