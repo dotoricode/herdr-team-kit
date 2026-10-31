@@ -35,3 +35,16 @@ class SharedRootsTests(Fixture):
                 self.value['shared_roots']=roots;self.config.write_text(json.dumps(self.value))
                 with self.assertRaises(ValueError):load(self.config)
         self.assertFalse(self.state.exists())
+
+    def test_two_teams_cannot_write_sibling_paths_of_same_shared_worktree(self):
+        from test_cli import StoreContext
+        root=self.shared();(root/'one').mkdir();(root/'two').mkdir()
+        self.value['shared_roots']=[str(root)]
+        self.value['teams']['beta']=dict(self.value['teams']['alpha'])
+        self.config.write_text(json.dumps(self.value))
+        for task,team,sub in [('M1','alpha','one'),('M2','beta','two')]:
+            self.call('create',task,'--team',team,'--root',str(root/sub),'--goal-file',str(self.root/'goal.txt'))
+        with StoreContext(self.state) as db:
+            db.claim('M1','owner1','codex','team','fixture','medium')
+            with self.assertRaises(ValueError):db.claim('M2','owner2','codex','team','fixture','medium')
+            self.assertEqual(db.get('M2')['state'],'queued')
