@@ -140,8 +140,9 @@ def run(args):
         if args.command == 'create':
             team = config['teams'][args.team]
             root = Path(args.root).resolve()
-            if not root.is_relative_to(Path(team['root']).resolve()):
-                raise ValueError('task root is outside configured team root')
+            allowed = [team['root'], *config.get('shared_roots', [])]
+            if not any(root.is_relative_to(Path(candidate).resolve()) for candidate in allowed):
+                raise ValueError('task root is outside configured team and shared roots')
             try:
                 base, kind = git(root, 'rev-parse','HEAD'), 'git'
             except subprocess.CalledProcessError:

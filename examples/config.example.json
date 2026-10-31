@@ -83,5 +83,8 @@
       "model": "replace-with-supported-model",
       "effort": "medium"
     }
-  }
+  },
+  "shared_roots": [
+    "/srv/example/shared-manual"
+  ]
 }

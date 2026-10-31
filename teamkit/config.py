@@ -32,6 +32,9 @@ def load(path):
     for route in routes.values():
         if not isinstance(route, dict) or set(route) != {'provider','model','effort'} or route.get('provider') not in value['profiles'] or not isinstance(route.get('model'), str) or not route['model'] or route.get('effort') not in ('low','medium','high'):
             raise ValueError('routing requires provider, model and supported effort')
+    shared = value.get('shared_roots', [])
+    if not isinstance(shared, list) or any(not isinstance(root, str) or not Path(root).is_absolute() for root in shared):
+        raise ValueError('shared_roots requires a list of absolute paths')
     ttl = value.get('quota_ttl_seconds', 120)
     if type(ttl) is not int or not 1 <= ttl <= 300:
         raise ValueError('quota TTL must be 1..300 seconds')

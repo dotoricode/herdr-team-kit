@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import subprocess
 import time
 
 ACTIVE = {'claimed', 'launching', 'submitted', 'running', 'uncertain'}
@@ -12,6 +13,29 @@ ACTIVE = {'claimed', 'launching', 'submitted', 'running', 'uncertain'}
 
 def sha(value):
     return isinstance(value, str) and re.fullmatch(r'[a-fA-F0-9]{40}|[a-fA-F0-9]{64}', value)
+
+
+def write_root(root):
+    result = subprocess.run(['git','-C',str(root),'rev-parse','--show-toplevel'],
+                            text=True, capture_output=True, timeout=5)
+    if result.returncode:
+        if not Path(root).exists():
+            return Path(root).resolve()
+        raise ValueError('cannot establish implementation worktree identity')
+    top = result.stdout.removesuffix('\n')
+    if not top or not Path(top).is_absolute():
+        raise ValueError('invalid implementation worktree identity')
+    return Path(top).resolve()
+
+
+def writes_overlap(first, second):
+    left, right = write_root(first), write_root(second)
+    if left == right or left.is_relative_to(right) or right.is_relative_to(left):
+        return True
+    try:
+        return left.samefile(right)
+    except FileNotFoundError:
+        return False
 
 
 class Store:
@@ -90,7 +114,7 @@ class Store:
             active = [t for t in self.list() if t['state'] in ACTIVE]
             if len(active) >= 3:
                 raise ValueError('global model limit reached')
-            if value['role'] == 'implementer' and any(t['role'] == 'implementer' and (t['team'] == value['team'] or t['root'] == value['root']) for t in active):
+            if value['role'] == 'implementer' and any(t['role'] == 'implementer' and (t['team'] == value['team'] or writes_overlap(t['root'], value['root'])) for t in active):
                 raise ValueError('team already has an implementation owner')
             value.update(state='claimed', owner=owner, provider=provider, account=account, model=model, effort=effort)
             return self._save(value, 'claimed')
