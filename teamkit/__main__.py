@@ -72,6 +72,7 @@ def parser():
     x.add_argument('--work-kind', choices=KINDS, default='general')
     x.add_argument('--risk', choices=RISKS, action='append', default=[])
     x.add_argument('--root', required=True); x.add_argument('--goal-file', required=True)
+    x.add_argument('--work', help='parent product work ID; binds the exact design revision')
     x = commands.add_parser('dispatch')
     x.add_argument('task')
     for cmd in ('show', 'events', 'plan'):
@@ -90,6 +91,22 @@ def parser():
     x.add_argument('--user-approved', action='store_true', required=True)
     x = commands.add_parser('context'); x.add_argument('--used', type=float)
     x.add_argument('--safe-boundary', action='store_true')
+    w=commands.add_parser('work').add_subparsers(dest='action',required=True)
+    for action in ('create','show','submit','approve','revise','checkpoint','record','finish'):
+        x=w.add_parser(action);x.add_argument('work')
+        if action=='create':
+            x.add_argument('--team',required=True);x.add_argument('--root',required=True)
+            x.add_argument('--plan-file',required=True);x.add_argument('--contract-file',required=True)
+        if action=='approve':
+            x.add_argument('--user-approved',action='store_true',required=True)
+            x.add_argument('--approval-reference',required=True)
+        if action in ('checkpoint','record'):x.add_argument('--evidence-file',required=True)
+        if action=='record':x.add_argument('--step',required=True)
+        if action=='finish':x.add_argument('--review-task',required=True)
+    x=commands.add_parser('dashboard')
+    x.add_argument('--once',action='store_true');x.add_argument('--json',action='store_true')
+    x.add_argument('--publish',action='store_true');x.add_argument('--interval',type=float,default=3)
+    x.add_argument('--color',choices=['auto','always','never'],default='auto')
     return p
 
 
@@ -99,6 +116,9 @@ def run(args):
     args.config = str(Path(args.config).expanduser().resolve())
     args.state = str(Path(args.state).expanduser().resolve())
     config = load(args.config)
+    if args.command=='dashboard':
+        from .dashboard import run as dashboard
+        return dashboard(args,config)
     if args.command == 'doctor':
         return {'config':'valid', 'herdr_managed':os.environ.get('HERDR_ENV') == '1',
                 'teams':list(config['teams']), 'providers':list(config['profiles']),
@@ -119,6 +139,9 @@ def run(args):
     store = Store(args.state)
     try:
         now = time.time()
+        if args.command=='work':
+            from .workflow import run as workflow
+            return workflow(args,config,store)
         if args.command in ('refresh','capture'):
             pr = profile(config, args.provider, args.account)
             if args.command == 'refresh':
@@ -149,7 +172,15 @@ def run(args):
                 if args.role != 'leader':
                     raise ValueError('implementation/review tasks require a Git worktree')
                 base, kind = instructions_basis(team), 'instructions'
-            return store.create(args.task, args.team, args.role, str(root), base, Path(args.goal_file).read_text(), kind, classification(args.role, args.work_kind, args.risk))
+            digest=None;revision=None
+            if args.work:
+                from .workflow import get,document
+                work=get(store,args.work)
+                if work['team']!=args.team or Path(work['root'])!=root:
+                    raise ValueError('execution scope differs from product work')
+                digest=document(config,work)[2]
+                revision=work['revision']
+            return store.create(args.task, args.team, args.role, str(root), base, Path(args.goal_file).read_text(), kind, classification(args.role, args.work_kind, args.risk),args.work,digest,revision)
         if args.command == 'list':
             return store.list()
         if args.command in ('show','events'):
@@ -168,12 +199,20 @@ def run(args):
             # Refuse before claiming: outside Herdr is a known no-op, not an uncertain launch.
             if os.environ.get('HERDR_ENV') != '1':
                 raise KitError('dispatch must run inside Herdr')
+            from .workflow import check_task
+            work=check_task(config,store,task)
             role = execution_policy(config, task)
             if role['action'] != 'dispatch':
                 return role
             provider = role['provider']
             account = choose_account(cached_quota(config, store, provider, 'team'), cached_quota(config, store, provider, 'personal'), now, config['quota_ttl_seconds'])
             if not account:
+                if work:
+                    from .workflow import get,save
+                    with store.transaction():
+                        waiting=get(store,work['id'])
+                        waiting['hold']={'kind':'quota','reason':'유효한 동일 provider 구독 한도 근거를 기다립니다.'}
+                        save(store,waiting,'quota_wait')
                 return {'action':'wait', 'reason':'no fresh eligible quota'}
             pr = profile(config, provider, account, role)
             providers.identity(provider, pr)
@@ -186,17 +225,34 @@ def run(args):
                 raise ValueError('base/checkpoint HEAD changed; reconcile before dispatch')
             if checkpoint and checkpoint.get('worktree_fingerprint') != task_fingerprint(task, config):
                 raise ValueError('checkpoint worktree changed; reconcile before dispatch')
+            spec = launch_spec(provider, pr, None)
+            spec['args'] += ['--add-dir', str(Path(args.state).parent)]
+            launch_task=task
+            designing=work and task['role']=='leader'
+            if designing:
+                if provider!='codex':raise ValueError('design execution currently requires the Codex sandbox adapter')
+                from .workflow import document
+                design_dir=document(config,work)[0]
+                scratch=design_dir/'.tmp';scratch.mkdir(mode=0o700,exist_ok=True)
+                if scratch.is_symlink() or scratch.resolve().parent!=design_dir:
+                    raise ValueError('design temporary directory identity changed')
+                spec['env']['TMPDIR']=str(scratch)
+                spec['env']['TMPPREFIX']=str(scratch/'zsh')
+                # Native writable cwd is private storage, not the product tree.
+                spec['args']+=['-c','sandbox_workspace_write.exclude_tmpdir_env_var=false',
+                               '-c','sandbox_workspace_write.exclude_slash_tmp=true']
+                if paths_overlap(design_dir,Path(task['root'])) or paths_overlap(Path(args.state).parent,Path(task['root'])):
+                    raise ValueError('design writable roots overlap product source')
+                launch_task={**task,'root':str(design_dir)}
             owner = uuid.uuid4().hex
-            store.claim(args.task, owner, provider, account, pr['model'], pr.get('effort','medium'), expected_task=task)
+            spec['env'].update(TEAMKIT_TASK=args.task, TEAMKIT_OWNER=owner,
+                               TEAMKIT_CONFIG=str(Path(args.config).resolve()), TEAMKIT_STATE=str(Path(args.state).resolve()))
+            store.claim(args.task, owner, provider, account, pr['model'], pr.get('effort','medium'), expected_task=task,approval_config=config)
             runtime = Herdr()
+            name = 'tk-'+owner[:20]
             try:
                 store.update(args.task, owner, 'launching', {})
-                spec = launch_spec(provider, pr, None)
-                spec['args'] += ['--add-dir', str(Path(args.state).parent)]
-                name = 'tk-'+owner[:20]
-                spec['env'].update(TEAMKIT_TASK=args.task, TEAMKIT_OWNER=owner,
-                                   TEAMKIT_CONFIG=str(Path(args.config).resolve()), TEAMKIT_STATE=str(Path(args.state).resolve()))
-                launched = runtime.launch(task, spec, name, lambda detail: store.note(args.task, owner, detail))
+                launched = runtime.launch(launch_task, spec, name, lambda detail: store.note(args.task, owner, detail))
                 store.update(args.task, owner, 'submitted', launched)
                 receipt = [sys.executable,str(Path(__file__).resolve().parent.parent/'teamkit_cli.py'),'--config',str(Path(args.config).resolve()),
                            '--state',str(Path(args.state).resolve()),'receipt',args.task,'--owner',owner]
@@ -206,6 +262,9 @@ def run(args):
                           '\nIf receipt fails, stop. Preserve existing work. Report verification separately from completion.'+
                           '\nLocal instruction pointers (read only what the task needs): '+json.dumps(config['teams'][task['team']].get('references', []))+
                           '\nUse the local team instructions. Complete or hand off through the ledger with actual evidence.'+
+                          ('\nApproved design: '+str(Path(config.get('private_plan_root',Path.home()/'.local/state/herdr-team-kit/private-plans'))/work['id']/('r'+str(work['revision'])))+
+                           '\nRead only the relevant approved contract sections. Keep changes inside approved paths and preserve result, failure, ownership and lifetime contracts. Add files/classes only for a concrete responsibility boundary. Report semantic changes for user approval; never approve your own design. Report milestones through work record with real evidence. Avoid status-only model requests, full-history copies and repeated unchanged reads.' if work else '')+
+                          ('\nPLANNING ONLY: product source is read-only. Write design artifacts only in the private working directory. Compare alternatives and failure conditions; ask the user for consequential contract choices. Never implement or approve the product design.' if designing else '')+
                           ('\nAfter processing, park this leader with the same CLI: park '+args.task+' --owner '+owner if task['role'] == 'leader' else ''))
                 runtime.prompt(name, prompt)
             except BaseException:
@@ -218,11 +277,13 @@ def run(args):
         if args.command == 'tell':
             if os.environ.get('HERDR_ENV') != '1':
                 raise KitError('tell must run inside Herdr')
+            from .workflow import check_task
+            check_task(config,store,task)
             status = Herdr().call('agent','get',task['runtime']['name'])
             agent = status.get('agent', status)
             if agent.get('agent_status') not in ('idle','done'):
                 raise KitError('leader is not idle; inspect before sending')
-            store.wake(args.task, task['owner'])
+            store.wake(args.task, task['owner'], approval_config=config)
             try:
                 Herdr().prompt(task['runtime']['name'], Path(args.message_file).read_text()+
                                '\nAfter processing, park the leader through the task ledger.')
@@ -246,6 +307,8 @@ def run(args):
             evidence.update(head=head, dirty=bool(git(task['root'],'status','--porcelain')) if task['basis_kind'] == 'git' else False,
                             worktree_fingerprint=task_fingerprint(task, config))
             return store.handoff(args.task, args.owner, evidence, args.writer_stopped)
+        from .workflow import check_task
+        check_task(config,store,task)
         if task['role'] == 'reviewer':
             if task['basis_kind'] != 'git':
                 raise ValueError('review completion requires a pinned Git worktree')
@@ -253,7 +316,7 @@ def run(args):
                 head = task_head(task, config)
                 if git(task['root'],'status','--porcelain'):
                     raise ValueError('review completion requires a clean pinned Git worktree')
-                return store.complete(args.task, args.owner, head, evidence['verification'], evidence.get('reviewed_head'))
+                return store.complete(args.task, args.owner, head, evidence['verification'], evidence.get('reviewed_head'),evidence.get('review_verdict'))
         return store.complete(args.task, args.owner, head, evidence['verification'])
     finally:
         store.close()

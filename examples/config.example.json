@@ -1,6 +1,9 @@
 {
   "version": 1,
   "quota_ttl_seconds": 120,
+  "private_plan_root": "/srv/example/private-plans",
+  "require_design_approval": true,
+  "dashboard_workspaces": {},
   "profiles": {
     "codex": {
       "team": {
@@ -76,7 +79,7 @@
     "design": {
       "provider": "codex",
       "model": "replace-with-supported-model",
-      "effort": "medium"
+      "effort": "high"
     },
     "wording": {
       "provider": "codex",
