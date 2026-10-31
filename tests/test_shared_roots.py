@@ -48,3 +48,27 @@ class SharedRootsTests(Fixture):
             db.claim('M1','owner1','codex','team','fixture','medium')
             with self.assertRaises(ValueError):db.claim('M2','owner2','codex','team','fixture','medium')
             self.assertEqual(db.get('M2')['state'],'queued')
+
+    def test_separate_linked_worktrees_remain_independently_writable(self):
+        from test_cli import StoreContext
+        root=self.shared();other=self.root/'manual-other'
+        subprocess.run(['git','-C',str(root),'worktree','add','-q','--detach',str(other),'HEAD'],check=True)
+        self.value['shared_roots']=[str(root),str(other)]
+        self.value['teams']['beta']=dict(self.value['teams']['alpha']);self.config.write_text(json.dumps(self.value))
+        for task,team,target in [('M1','alpha',root),('M2','beta',other)]:
+            self.call('create',task,'--team',team,'--root',str(target),'--goal-file',str(self.root/'goal.txt'))
+        with StoreContext(self.state) as db:
+            db.claim('M1','owner1','codex','team','fixture','medium')
+            self.assertEqual(db.claim('M2','owner2','codex','team','fixture','medium')['state'],'claimed')
+
+    def test_native_case_alias_of_shared_worktree_cannot_get_second_owner(self):
+        from test_cli import StoreContext
+        root=self.shared();alias=root.parent/root.name.upper()
+        if not alias.exists() or not alias.samefile(root):self.skipTest('requires case-insensitive filesystem')
+        self.value['shared_roots']=[str(root)]
+        self.value['teams']['beta']=dict(self.value['teams']['alpha']);self.config.write_text(json.dumps(self.value))
+        for task,team,target in [('M1','alpha',root),('M2','beta',alias)]:
+            self.call('create',task,'--team',team,'--root',str(target),'--goal-file',str(self.root/'goal.txt'))
+        with StoreContext(self.state) as db:
+            db.claim('M1','owner1','codex','team','fixture','medium')
+            with self.assertRaises(ValueError):db.claim('M2','owner2','codex','team','fixture','medium')
