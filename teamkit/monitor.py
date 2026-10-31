@@ -63,13 +63,21 @@ def save_quotas(state,config,results):
     store=Store(state)
     try:
         for account,expected,quota in results:
-            if binding(profile(config,'codex',account))!=expected:continue
+            current=config['profiles'].get('codex',{}).get(account)
+            if current is None or binding(current)!=expected:continue
             if quota is None:
                 previous=store.quota('codex/'+account) or {}
                 quota=previous if previous.get('binding')==expected else {'binding':expected}
                 quota={**quota,'unavailable':True,'refresh_attempt_at':time.time()}
             store.quota('codex/'+account,quota)
     finally:store.close()
+
+
+def collect_and_save(state,config_path,account,pr):
+    # Each account persists independently; neither another account nor native RPC
+    # may postpone invalidating a failed quota observation.
+    result=collect_codex({'profiles':{'codex':{account:pr}}})
+    save_quotas(state,load(config_path),result)
 
 
 def run(args,config):
@@ -85,21 +93,24 @@ def run(args,config):
         nonlocal stopping
         stopping=True
     old=signal.signal(signal.SIGTERM,stop)
-    future=None;next_quota=0
+    futures={};next_quota={}
     try:
-        with ThreadPoolExecutor(max_workers=1) as pool:
+        with ThreadPoolExecutor(max_workers=2) as pool:
             while not stopping:
                 config=load(args.config)
-                if future is not None and future.done():
-                    save_quotas(args.state,config,future.result());future=None
-                if future is None and time.monotonic()>=next_quota:
-                    future=pool.submit(collect_codex,config);next_quota=time.monotonic()+args.quota_interval
+                for account,future in list(futures.items()):
+                    if future.done():future.result();del futures[account]
+                for account,pr in config['profiles'].get('codex',{}).items():
+                    if account not in futures and time.monotonic()>=next_quota.get(account,0):
+                        futures[account]=pool.submit(collect_and_save,args.state,args.config,account,pr)
+                        next_quota[account]=time.monotonic()+args.quota_interval
+                observed_at=time.time()
                 try:agents=read_native(config);error=''
                 except Exception:agents=[];error='Herdr 실행 상태 조회 실패'
-                write_cache(args.state,{'namespace':namespace(config),'observed_at':time.time(),
-                    'agents':agents,'error':error,'quota_refreshing':future is not None,'native_ttl':max(10,args.interval*3)})
+                write_cache(args.state,{'namespace':namespace(config),'observed_at':observed_at,
+                    'agents':agents,'error':error,'quota_refreshing':bool(futures),'native_ttl':max(10,args.interval*3)})
                 if args.once:
-                    save_quotas(args.state,load(args.config),future.result())
+                    for future in futures.values():future.result()
                     break
                 until=time.monotonic()+args.interval
                 while not stopping and time.monotonic()<until:time.sleep(0.1)
