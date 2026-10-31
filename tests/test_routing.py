@@ -152,3 +152,15 @@ class RoutingTests(Fixture):
         path.write_text(json.dumps({'failure_count':0,'approval_reference':'answer','provider':'codex','model':'fixture','effort':'high'}))
         with self.assertRaises(ValueError):self.call('authorize','T1','--decision-file',str(path),'--user-approved')
         with self.assertRaises(SystemExit):self.call('authorize','T1','--decision-file',str(path))
+
+    def test_user_selected_model_is_preserved_after_lower_effort_failure(self):
+        from teamkit.routing import execution_policy
+        task=self.make()
+        task['failures']=[{'cause':'old','kind':'reasoning','effort':'high'},
+                          {'cause':'new','kind':'reasoning','effort':'medium'}]
+        task['user_decision']={'failure_count':1,'approval_reference':'answer','provider':'codex','model':'user-selected-fixture','effort':'medium'}
+        plan=execution_policy(self.value,task)
+        self.assertEqual((plan['model'],plan['effort']),('user-selected-fixture','medium'))
+        task['failures'].append({'cause':'new','kind':'reasoning','effort':'medium'})
+        plan=execution_policy(self.value,task)
+        self.assertEqual((plan['model'],plan['effort']),('user-selected-fixture','high'))

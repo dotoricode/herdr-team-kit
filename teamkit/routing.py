@@ -30,11 +30,12 @@ def execution_policy(config, task):
         elif kind != 'general':
             raise ValueError('work kind requires an explicit routing policy')
     failures = task.get('failures', [])
+    decision = task.get('user_decision')
+    if decision:
+        role = {k:decision[k] for k in ('provider','model','effort')}
+        failures = failures[decision['failure_count']:]
     meaningful = [f for f in failures if f['kind'] in ('reasoning','insufficient_evidence')]
     if meaningful and meaningful[-1]['effort'] in ('high','xhigh','max'):
-        decision = task.get('user_decision')
-        if decision and decision['failure_count'] == len(failures):
-            return {'action':'dispatch', **{k:decision[k] for k in ('provider','model','effort')}}
         return {'action':'ask_user', 'reason':'unresolved after high effort; report evidence before choosing another model'}
     counts = Counter(f['cause'] for f in meaningful)
     if any(n >= 2 for n in counts.values()) or any(f['kind'] == 'insufficient_evidence' for f in meaningful):
