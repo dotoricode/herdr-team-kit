@@ -61,7 +61,7 @@ def model(data,config):
     return {'rows':rows,'teams':teams,'team_labels':{team:config.get('dashboard_workspaces',{}).get(team,{}).get('label',team) for team in teams},'observed_at':data['observed_at'],'event_sequence':data['event_sequence']}
 
 
-def render(view,color=False,now=None):
+def render(view,color=False,now=None,width=80):
     now=time.time() if now is None else now
     lines=['팀 운영 현황  ·  '+time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(now)),
            '제품 작업 건수 기준 · 요청 모델/effort 표시 · 화면 갱신은 모델을 호출하지 않음','']
@@ -76,12 +76,18 @@ def render(view,color=False,now=None):
         label=LABELS.get(row['phase'],row['phase'])
         if color:label='\x1b['+COLORS.get(row['phase'],'37')+'m'+label+'\x1b[0m'
         percent='미정' if row['percent'] is None else str(row['percent'])+'%'
-        filled=0 if row['percent'] is None else row['percent']//5
-        bar='?'*20 if row['percent'] is None else '#'*filled+'-'*(20-filled)
         seconds=max(0,int(now-row['updated_at']))
         actor='—' if row['model_requested'] is None else clean(row['model_requested'])+'/'+clean(row['effort_requested'])
         lines.append(f"{clean(row['id'])}  {label}  {actor}  {seconds}초 전")
-        lines.append(f'  {percent} [{bar}]')
+        counts=f"{row['steps_done']}/{row['steps_total']}"
+        if row['percent'] is None:
+            lines.append(f'  미정 · {counts}')
+        else:
+            suffix=f'{percent:>4} {counts}'
+            length=max(0,min(20,width-len(suffix)-5))
+            filled=row['percent']*length//100
+            bar='█'*filled+'░'*(length-filled)
+            lines.append(f'  [{bar}] {suffix}' if length else '  '+suffix)
         lines.append('  '+clean(row['title'])+f"  [설계 v{row['revision']}, 구현·검증 단계 {row['steps_done']}/{row['steps_total']}]")
         if row['phase']!='complete':
             pending=' / '.join(clean(title) for title in row.get('remaining_steps',[]))
@@ -157,18 +163,20 @@ def live(screen,args,config):
         for index,(phase,code) in enumerate(COLORS.items(),1):
             fg={'31':curses.COLOR_RED,'32':curses.COLOR_GREEN,'33':curses.COLOR_YELLOW,'34':curses.COLOR_BLUE,'36':curses.COLOR_CYAN}.get(code,curses.COLOR_WHITE)
             curses.init_pair(index,fg,-1);colors[LABELS[phase]]=curses.color_pair(index)|curses.A_BOLD
-    next_read=0;last_publish=float('-inf');offset=0;lines=[];warning=''
+    next_read=0;last_publish=float('-inf');offset=0;lines=[];warning='';last_width=None
     while True:
+        height,width=screen.getmaxyx()
+        if width!=last_width:next_read=0;last_width=width
         now=time.monotonic()
         if now>=next_read:
             view=model(snapshot(args.state),config)
-            lines=render(view).splitlines()
+            lines=render(view,width=max(1,width-1)).splitlines()
             next_read=now+args.interval
         if args.publish and now-last_publish>=10:
             try:publish(view,config);warning=''
             except (KitError,ValueError):warning='좌측 요약 갱신 실패 · 세션과 workspace 연결을 확인해 주세요.'
             last_publish=now
-        height,width=screen.getmaxyx();visible=max(1,height-2)
+        visible=max(1,height-2)
         offset=max(0,min(offset,max(0,len(lines)-visible)))
         screen.erase()
         for y,line in enumerate(lines[offset:offset+visible]):
