@@ -58,7 +58,7 @@ python3 teamkit_cli.py dashboard --publish
 
 TUI는 모델이 아닌 일반 프로그램입니다. read-only SQLite snapshot을 수초마다 읽고 요청 모델/effort·업무 단계·승인 대기·갱신 경과를 표시합니다. native idle/done을 업무 완료로 바꾸지 않습니다. 설계 승인 전 진행률은 미정이며 완료 단계 수를 따로 표시합니다. 기록 갱신 경과는 마지막 업무 기록 시각으로, 프로세스 생존 여부가 아닙니다. 화면을 닫아도 업무 기록과 AI 세션은 유지됩니다.
 
-`dashboard_workspaces`는 `{ "alpha": { "id": "w1", "label": "Alpha leader" } }`처럼 명시합니다. `herdr_session`을 지정하면 존재하는 세션인지 확인하고, 이름까지 일치하는 workspace에만 요약 metadata를 전달합니다. publisher는 하나만 실행하며 10초 간격·30초 TTL로 표시를 갱신합니다. metadata는 서버 재시작 후 복원되지 않으므로 dashboard가 장부에서 재구성합니다. Herdr의 원래 agent lifecycle은 바꾸지 않습니다.
+`dashboard_workspaces`는 `{ "alpha": { "id": "w1", "label": "Alpha leader" } }`처럼 명시합니다. `herdr_session`을 지정하면 존재하는 세션인지 확인하고, 이름까지 일치하는 workspace에만 요약 metadata를 전달합니다. publisher는 하나만 실행하며 5초 간격으로 표시를 갱신합니다. native 상태는 게시 직전에 유효기간을 재확인하고 남은 관측 유효기간 이하의 TTL을 사용합니다. 관측이 없거나 만료됐으면 실행 상태를 미확인으로 표시합니다. metadata는 서버 재시작 후 복원되지 않으므로 dashboard가 장부에서 재구성합니다. Herdr의 원래 agent lifecycle은 바꾸지 않습니다.
 
 좌측 rows에는 `$work_summary`, `$approval_wait`, `$work_blocked`를 넣을 수 있습니다. 빨강=확인 필요, 노랑=승인·대기, 파랑=진행, 초록=검증 완료로 색과 상태 이름을 함께 사용합니다. 설정 변경 전 백업하고 실제 화면을 확인하며 기존 밝은 배경을 유지합니다.
 

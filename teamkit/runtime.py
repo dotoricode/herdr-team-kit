@@ -77,15 +77,27 @@ class Herdr:
         return body.get('result', body)
 
     def launch(self, task, spec, name, on_created=None):
-        args = ['workspace','create','--cwd',task['root'],'--label',name,'--no-focus']
+        role={'leader':'설계' if task.get('classification',{}).get('kind')=='design' else '팀장','implementer':'구현','reviewer':'리뷰'}[task['role']]
+        label=''.join(c if c.isprintable() else ' ' for c in task.get('work_id',task['id'])+' · '+role+' · '+task['team'])
+        args = ['workspace','create','--cwd',task['root'],'--label',label,'--no-focus']
         for key, value in spec['env'].items():
             args += ['--env',key+'='+value]
         result = self.call(*args)
         pane = result['root_pane']['pane_id']
+        if on_created:on_created({'name':name,'pane':pane})
+        workspace=result.get('workspace',{}).get('workspace_id')
+        if not isinstance(workspace,str) or not workspace:
+            raise RuntimeError('workspace identity unavailable; inspect created pane before retry')
+        detail={'name':name,'pane':pane,'workspace':workspace,'workspace_label':label,
+                'managed_workspace':True,'ephemeral':task['role']!='leader' or task.get('classification',{}).get('kind')=='design'}
         if on_created:
-            on_created({'name':name, 'pane':pane})
+            on_created(detail)
         self.call('agent','start',name,'--kind',spec['kind'],'--pane',pane,'--',*spec['args'])
-        return {'name':name, 'pane':pane}
+        process=self.call('pane','process-info','--pane',pane)['process_info']['foreground_processes']
+        if len(process)!=1 or type(process[0].get('pid')) is not int:
+            raise RuntimeError('native process identity unavailable; inspect before prompting')
+        detail['native_pid']=process[0]['pid']
+        return detail
 
     def prompt(self, name, text):
         # A settled state is not a task receipt. Completion is a separate ledger event.
