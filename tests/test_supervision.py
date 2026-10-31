@@ -325,3 +325,51 @@ class SupervisionTests(Fixture):
             stopped.return_value=True
             self.assertEqual(supervise_once(self.value,self.state,'T1','owner',apply=True)['action'],'handed_off')
             self.assertEqual(sum(c.args[:2]==('agent','prompt') for c in h.return_value.call.call_args_list),1)
+
+    def test_settled_native_without_receipt_exits_watch_for_inspection(self):
+        from argparse import Namespace
+        from teamkit.supervisor import watch
+        self.create();self.value['context_supervision']=True;self.config.write_text(json.dumps(self.value))
+        with StoreContext(self.state) as db:
+            db.claim('T1','owner','codex','team','fixture','medium')
+            db.update('T1','owner','launching',{'name':'fixture','pane':'w1:p1','supervision_enrolled':True})
+            db.update('T1','owner','submitted',{})
+        with patch('teamkit.supervisor.Herdr') as h:
+            h.return_value.call.return_value={'agent':{'name':'fixture','pane_id':'w1:p1','agent':'codex','agent_status':'done','completion_seq':1}}
+            result=watch(Namespace(config=str(self.config),state=str(self.state),task='T1',owner='owner',interval=.2,max_seconds=1))
+            self.assertEqual(result['action'],'inspect')
+            h.return_value.read.assert_not_called()
+        self.assertEqual(self.call('show','T1')['state'],'submitted')
+
+    def test_foreign_provider_acknowledgement_is_not_accepted(self):
+        import os
+        from teamkit.supervisor import supervise_once
+        from teamkit.runtime import RuntimeError
+        self.boundary()
+        with patch.dict(os.environ,{'HERDR_ENV':'1'}),patch('teamkit.supervisor.Herdr') as h:
+            self.native(h,remaining=99);old=h.return_value.call.side_effect
+            def call(*args):
+                result=old(*args)
+                if args[:2]==('agent','prompt'):result['agent']['agent']='claude'
+                return result
+            h.return_value.call.side_effect=call
+            with self.assertRaises(RuntimeError):supervise_once(self.value,self.state,'T1','owner',apply=True)
+        task=self.call('show','T1');self.assertEqual(task['runtime']['supervision_delivery']['status'],'pending')
+
+    def test_continuation_rechecks_git_after_final_foreground_query(self):
+        import os
+        from teamkit.supervisor import supervise_once
+        self.boundary()
+        with patch.dict(os.environ,{'HERDR_ENV':'1'}),patch('teamkit.supervisor.Herdr') as h:
+            self.native(h,remaining=99)
+            old=h.return_value.call.side_effect;queries=[]
+            def call(*args):
+                result=old(*args)
+                if args[:2]==('pane','process-info'):
+                    queries.append(True)
+                    if len(queries)==2:(self.repo/'late-edit.txt').write_text('external write')
+                return result
+            h.return_value.call.side_effect=call
+            self.assertEqual(supervise_once(self.value,self.state,'T1','owner',apply=True)['action'],'inspect')
+            self.assertFalse(any(c.args[:2]==('agent','prompt') for c in h.return_value.call.call_args_list))
+        self.assertIn('boundary',self.call('show','T1'))
