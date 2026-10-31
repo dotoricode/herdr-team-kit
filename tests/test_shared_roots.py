@@ -72,3 +72,17 @@ class SharedRootsTests(Fixture):
         with StoreContext(self.state) as db:
             db.claim('M1','owner1','codex','team','fixture','medium')
             with self.assertRaises(ValueError):db.claim('M2','owner2','codex','team','fixture','medium')
+
+    def test_nonzero_git_identity_lookup_cannot_admit_second_writer(self):
+        from test_cli import StoreContext
+        from unittest.mock import patch
+        root=self.shared();(root/'one').mkdir();(root/'two').mkdir()
+        self.value['shared_roots']=[str(root)]
+        self.value['teams']['beta']=dict(self.value['teams']['alpha']);self.config.write_text(json.dumps(self.value))
+        for task,team,sub in [('M1','alpha','one'),('M2','beta','two')]:
+            self.call('create',task,'--team',team,'--root',str(root/sub),'--goal-file',str(self.root/'goal.txt'))
+        with StoreContext(self.state) as db:
+            db.claim('M1','owner1','codex','team','fixture','medium')
+            with patch('teamkit.store.subprocess.run',return_value=subprocess.CompletedProcess([],128,stdout='',stderr='fixture failure')):
+                with self.assertRaises(ValueError):db.claim('M2','owner2','codex','team','fixture','medium')
+            self.assertEqual(db.get('M2')['state'],'queued')

@@ -18,7 +18,14 @@ def sha(value):
 def write_root(root):
     result = subprocess.run(['git','-C',str(root),'rev-parse','--show-toplevel'],
                             text=True, capture_output=True, timeout=5)
-    return Path(result.stdout.strip() if result.returncode == 0 else root).resolve()
+    if result.returncode:
+        if not Path(root).exists():
+            return Path(root).resolve()
+        raise ValueError('cannot establish implementation worktree identity')
+    top = result.stdout.strip()
+    if not top or not Path(top).is_absolute():
+        raise ValueError('invalid implementation worktree identity')
+    return Path(top).resolve()
 
 
 def writes_overlap(first, second):
