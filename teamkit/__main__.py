@@ -10,7 +10,7 @@ import uuid
 from . import providers
 from .config import load, profile, binding, cached_quota
 from .checkpoint import fingerprint, revision_guard
-from .policy import choose_account, context_action, normalize_quota
+from .policy import account_order, choose_account, context_action, normalize_quota
 from .runtime import Herdr, RuntimeError as KitError, launch_spec, profile_home_matches
 from .store import Store
 from .routing import KINDS, RISKS, classification, execution_policy
@@ -175,7 +175,7 @@ def run(args):
             store.quota(args.provider+'/'+args.account, snapshot)
             return {'quota':snapshot}
         if args.command == 'route':
-            selected = choose_account(cached_quota(config, store, args.provider, 'team'), cached_quota(config, store, args.provider, 'personal'), now, config['quota_ttl_seconds'])
+            selected = choose_account(cached_quota(config, store, args.provider, 'team'), cached_quota(config, store, args.provider, 'personal'), now, config['quota_ttl_seconds'], order=account_order(config, now))
             return {'account':selected, 'action':'dispatch' if selected else 'wait'}
         if args.command == 'create':
             team = config['teams'][args.team]
@@ -230,7 +230,7 @@ def run(args):
             if role['action'] != 'dispatch':
                 return role
             provider = role['provider']
-            account = choose_account(cached_quota(config, store, provider, 'team'), cached_quota(config, store, provider, 'personal'), now, config['quota_ttl_seconds'])
+            account = choose_account(cached_quota(config, store, provider, 'team'), cached_quota(config, store, provider, 'personal'), now, config['quota_ttl_seconds'], order=account_order(config, now))
             if not account:
                 if work:
                     from .workflow import get,save
@@ -241,7 +241,7 @@ def run(args):
                 return {'action':'wait', 'reason':'no fresh eligible quota'}
             pr = profile(config, provider, account, role)
             providers.identity(provider, pr)
-            if choose_account(cached_quota(config, store, provider, 'team'), cached_quota(config, store, provider, 'personal'), time.time(), config['quota_ttl_seconds']) != account:
+            if choose_account(cached_quota(config, store, provider, 'team'), cached_quota(config, store, provider, 'personal'), time.time(), config['quota_ttl_seconds'], order=account_order(config, time.time())) != account:
                 raise ValueError('quota changed during preflight; route again')
             checkpoint = task.get('checkpoint')
             expected = checkpoint['head'] if checkpoint else task['base']

@@ -13,7 +13,7 @@ import uuid
 from .app_bridge import core_read
 from .config import load, profile, binding, cached_quota
 from .core_runtime import _call, require_managed, CoreRuntime, startup_native
-from .policy import choose_account
+from .policy import account_order, choose_account
 from .runtime import launch_spec, RuntimeError as KitError
 from .store import Store
 from . import providers
@@ -141,7 +141,7 @@ def run_job(request):
             raise ValueError('GUI 총괄 작업 폴더는 GUI 비공개 기록 안에 있어야 합니다.')
         store=Store(state)
         try:
-            account=choose_account(cached_quota(config,store,'codex','team'),cached_quota(config,store,'codex','personal'),time.time(),config['quota_ttl_seconds'])
+            account=choose_account(cached_quota(config,store,'codex','team'),cached_quota(config,store,'codex','personal'),time.time(),config['quota_ttl_seconds'], order=account_order(config, time.time()))
         finally:store.close()
         if not account:raise ValueError('최신 구독 사용량을 확인한 뒤 총괄을 열 수 있습니다. 사용량 갱신을 실행하세요.')
         pr=profile(config,'codex',account,policy);providers.identity('codex',pr)
@@ -171,7 +171,7 @@ def run_job(request):
             raise ValueError('총괄 실행 설정이 신원 확인 중 바뀌었습니다.')
         store=Store(state)
         try:
-            current=choose_account(cached_quota(config,store,'codex','team'),cached_quota(config,store,'codex','personal'),time.time(),config['quota_ttl_seconds'])
+            current=choose_account(cached_quota(config,store,'codex','team'),cached_quota(config,store,'codex','personal'),time.time(),config['quota_ttl_seconds'], order=account_order(config, time.time()))
         finally:store.close()
         if current!=account:
             raise ValueError('총괄 구독 한도가 신원 확인 중 바뀌었습니다. 갱신 후 다시 확인하세요.')

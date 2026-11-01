@@ -1,5 +1,7 @@
 """Pure routing rules. Missing or expired quota never means zero usage."""
 import math
+from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 CLAUDE_QUOTA_SOURCE = 'claude-statusline-response'
 CLAUDE_NATIVE_QUOTA_SOURCE = 'claude-native-usage'
@@ -27,10 +29,30 @@ def eligible(snapshot, now, ttl=120):
     return True
 
 
-def choose_account(team, personal, now, ttl=120, active=None):
+def account_order(config, now):
+    if 'account_selection' not in config:
+        return ('team', 'personal')
+    schedule = config['account_selection']
+    if not isinstance(schedule, dict) or set(schedule) != {'timezone', 'weekdays', 'weekends'}:
+        raise ValueError('account_selection requires timezone, weekdays and weekends')
+    for key in ('weekdays', 'weekends'):
+        order = schedule[key]
+        if not isinstance(order, list) or len(order) != 2 or any(a not in ('team', 'personal') for a in order) or set(order) != {'team', 'personal'}:
+            raise ValueError('account order must contain team and personal once each')
+    try:
+        zone = ZoneInfo(schedule['timezone'])
+    except (TypeError, ValueError, ZoneInfoNotFoundError) as error:
+        raise ValueError('account_selection requires a valid timezone') from error
+    key = 'weekends' if datetime.fromtimestamp(now, zone).weekday() >= 5 else 'weekdays'
+    return tuple(schedule[key])
+
+
+def choose_account(team, personal, now, ttl=120, active=None, *, order=('team', 'personal')):
     if active in ('team', 'personal'):
         return active
-    for account, snapshot in (('team', team), ('personal', personal)):
+    snapshots = {'team': team, 'personal': personal}
+    for account in order:
+        snapshot = snapshots[account]
         if eligible(snapshot, now, ttl):
             return account
     return None
