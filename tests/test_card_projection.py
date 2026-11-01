@@ -144,3 +144,27 @@ class ProjectionTests(FeedbackFixture):
         delivery.record_receipt(self.state,rid,'responded','처리 확인',rid,{'host':'fixture'})
         self.assertEqual(delivery.summary(delivery.request_dir(self.state,rid))['state'],'unknown')
         self.assertEqual(self.detail('W1','work')['interaction']['state'],'responded')
+
+    def test_reviewing_implementation_is_waiting_not_running_or_a_user_decision(self):
+        from test_cli import StoreContext
+        self.setup_work()
+        self.call('create','IMPL','--team','alpha','--role','implementer','--root',str(self.repo),'--goal-file',str(self.root/'goal.txt'),'--work','W1')
+        with StoreContext(self.state) as store:
+            with store.transaction():
+                import json
+                work=json.loads(store.db.execute('SELECT body FROM work_items').fetchone()[0]);work['phase']='in_progress'
+                store.db.execute('UPDATE work_items SET body=?',(json.dumps(work),))
+                task=store.get('IMPL');task['state']='awaiting_review';store._save(task,'fixture')
+        card=self.detail('W1','work');row=self.board()['works'][0]
+        self.assertFalse(card['needs_decision'])
+        self.assertEqual(card['interaction']['state'],'review_wait')
+        self.assertEqual(row['interaction']['column'],'waiting')
+        self.assertEqual(row['phase'],'in_progress')
+        for task_state,display_state,column in (('queued','assignment_wait','waiting'),('running','progress','progress'),('done','execution_unknown','review')):
+            with self.subTest(task_state=task_state),StoreContext(self.state) as store:
+                with store.transaction():
+                    task=store.get('IMPL');task['state']=task_state;store._save(task,'fixture')
+                current=self.detail('W1','work')
+                self.assertEqual(current['interaction']['state'],display_state)
+                self.assertEqual(current['interaction']['column'],column)
+                self.assertFalse(current['needs_decision'])

@@ -115,6 +115,7 @@ def _current(config_path,state,binding_path,kind,ident):
             value['reason']+=' · 설계 문서를 읽지 못했습니다. 일반 답변만 기록하며 설계 승인으로 처리하지 않습니다.'
         basis={'source':str(Path(state).resolve()),'work':work,'document':doc,
                'tasks':[t for t in data['tasks'] if t.get('work_id')==ident],'leader':leader}
+        value['execution_states']=[t['state'] for t in basis['tasks'] if t.get('role')!='leader']
     prompts=linked.get('card_prompts',{})
     override=prompts.get(_key(kind,ident)) if isinstance(prompts,dict) else None
     if isinstance(override,str) and override.strip():value['prompt']=override.strip()
@@ -250,6 +251,15 @@ def apply_interaction(value):
                 result.update(state=response['outcome'],column='waiting',label='보류 접수됨' if response['outcome']=='deferred' else '담당자 응답 확인됨',reason=response['summary'],action='응답 기록 보기')
     elif not complete and not question and value.get('answer'):
         needs=False;result.update(state='recorded',column='waiting',label='확인 기록됨 · 총괄 확인 대기',reason='선택은 기록됐습니다. 작업 완료나 설계 승인으로 처리하지 않습니다.',action='기록 보기')
+    if result['state']=='progress' and value['status']=='in_progress':
+        tasks=value.get('execution_states',[])
+        if not any(state in ('claimed','launching','submitted','running') for state in tasks):
+            if 'awaiting_review' in tasks:
+                result.update(state='review_wait',column='waiting',label='검토 결과 대기',reason='구현 담당 작업은 검토 대기로 기록돼 있습니다. 검토 결과와 남은 검증을 기록해야 합니다.')
+            elif 'queued' in tasks:
+                result.update(state='assignment_wait',column='waiting',label='담당자 배정 대기',reason='구현 작업은 배정 대기로 기록돼 있습니다. 실행 중인 구현 요청 기록이 없습니다.')
+            else:
+                result.update(state='execution_unknown',column='review',label='진행 상태 확인 필요',reason='진행 단계이지만 실행 중인 구현 요청 기록이 없습니다. 담당자가 현재 상태를 확인해야 합니다.',action='상태 기록 확인')
     value['needs_decision']=needs
     value['interaction']=result
 
