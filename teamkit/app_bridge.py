@@ -163,6 +163,55 @@ def document_view(config_path, state, ident):
             'resumable':resumable}
 
 
+def session_read(address):
+    result=subprocess.run(['hc','get','--json',address],capture_output=True,text=True,timeout=5,check=True)
+    value=json.loads(result.stdout)
+    if not isinstance(value,dict):raise ValueError('invalid native session')
+    return value
+
+
+def work_detail(config_path, state, binding_path, ident):
+    """Read one GUI work's purpose and current/historical execution sessions."""
+    config=load(config_path);linked=bindings(binding_path,config);data=readonly_snapshot(state)
+    row=next((w for w in model(data,config)['rows'] if w['id']==ident),None)
+    if row is None:raise ValueError('GUI 장부에 없는 작업입니다.')
+    native_error=''
+    try:native={t['address']:t for t in core_read()['terminals']}
+    except (OSError,ValueError,subprocess.SubprocessError):
+        native={};native_error='앱 실행 상태를 확인하지 못했습니다. 종료로 추정하지 않습니다.'
+    from .core_runtime import ADDRESS, _process_matches, _detector_matches
+    tasks=[]
+    for task in data['tasks']:
+        if task.get('work_id')!=ident:continue
+        runtime=task.get('runtime',{});terminal=runtime.get('terminal') if runtime.get('backend')=='core' else None
+        observed=native.get(terminal,{})
+        present=None if native_error else observed.get('state')=='live'
+        verified=False;app_state='unknown'
+        if present and task.get('owner') and isinstance(terminal,str) and ADDRESS.fullmatch(terminal):
+            try:
+                current=session_read(terminal);labels=current.get('labels',{});fg=current.get('foreground') or {}
+                status=current.get('status') or {};pid=runtime.get('native_pid')
+                verified=(current.get('address')==terminal and current.get('state')=='live'
+                    and current.get('name')==runtime.get('native_name',runtime.get('name'))
+                    and labels.get('teamkit.owner')==task['owner'] and labels.get('teamkit.task')==task['id']
+                    and labels.get('teamkit.name')==runtime.get('name')
+                    and type(pid) is int and pid>0 and type(fg.get('pid')) is int and fg['pid']==pid
+                    and _process_matches(task.get('provider'),fg.get('name'))
+                    and _detector_matches(task.get('provider'),status.get('app')))
+                if verified:app_state=status.get('state','unknown')
+            except (OSError,ValueError,subprocess.SubprocessError):pass
+        tasks.append({'id':task['id'],'goal':'\n'.join(clean(line) for line in task.get('goal','').split('\n')),
+            'state':task['state'],'role':task['role'],'owner':task.get('owner'),'current_owner':bool(task.get('owner')),
+            'attempt':task.get('attempt_count',0),'provider':task.get('provider'),'account':task.get('account'),
+            'model_requested':task.get('model'),'effort_requested':task.get('effort'),'root':task['root'],
+            'terminal':terminal,'session_name':observed.get('name') or runtime.get('name'),
+            'session_location':observed.get('where'),'native_state':app_state,'session_present':present,
+            'identity_verified':verified,'can_focus':verified})
+    leader=linked['teams'][row['team']]
+    return {**row,'observed_at':time.time(),'description':row['title'],'team_label':leader.get('label',row['team']),
+            'tasks':tasks,'leader':{k:leader.get(k) for k in ('label','terminal','space')},'native_error':native_error}
+
+
 def selected(config_path, state, binding_path, ident, revision, digest, confirmed):
     config = load(config_path)
     if not confirmed or bindings(binding_path, config).get('actions_enabled') is not True:
@@ -327,7 +376,7 @@ def main():
     parser.add_argument('--config', default=str(Path.home()/'.config/herdr-team-kit-app/config.json'))
     parser.add_argument('--state', default=str(Path.home()/'.local/state/herdr-team-kit-app/state.sqlite'))
     parser.add_argument('--bindings', default=str(Path.home()/'.config/herdr-team-kit-app/bindings.json'))
-    parser.add_argument('action', choices=('view','document','approve','resume','resume-job','recover-coordinator','coordinator-job','refresh-usage','usage-job'))
+    parser.add_argument('action', choices=('view','document','work-detail','approve','resume','resume-job','recover-coordinator','coordinator-job','refresh-usage','usage-job'))
     parser.add_argument('--work'); parser.add_argument('--revision', type=int); parser.add_argument('--digest')
     parser.add_argument('--task'); parser.add_argument('--owner'); parser.add_argument('--request')
     parser.add_argument('--attempt',type=int)
@@ -336,6 +385,7 @@ def main():
     try:
         if args.action == 'view': result = view(args.config, args.state, args.bindings)
         elif args.action == 'document': result = document_view(args.config, args.state, args.work)
+        elif args.action == 'work-detail': result = work_detail(args.config,args.state,args.bindings,args.work)
         elif args.action == 'approve': result = approve(args.config, args.state, args.bindings, args.work, args.revision, args.digest, args.confirmed)
         elif args.action == 'resume': result = resume(args.config, args.state, args.bindings, args.work, args.revision, args.digest, args.task, args.owner, args.confirmed, args.attempt)
         elif args.action == 'recover-coordinator':
