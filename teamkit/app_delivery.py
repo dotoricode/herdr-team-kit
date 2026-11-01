@@ -216,7 +216,7 @@ def summary(folder, now=None):
             'created_at': request['created_at'], 'updated_at': last['at'], 'payload_hash': request['payload_hash'],
             'binding': {k: request['payload'].get(k) for k in ('card_revision', 'document_revision', 'document_digest', 'question_id', 'question_revision')},
             'selection': {k: request['payload'].get(k) for k in ('choice', 'comment', 'option_id', 'other_text')},
-            'destination': {k: dest.get(k) for k in ('team', 'task', 'owner', 'attempt', 'terminal')} if dest else None}
+            'destination': {k: dest.get(k) for k in ('team', 'task', 'owner', 'attempt', 'terminal', 'label', 'space')} if dest else None}
 
 
 def submit(state, request):

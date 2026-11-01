@@ -132,6 +132,7 @@ def _current(config_path,state,binding_path,kind,ident):
     revision_basis={'kind':kind,'id':ident,'content':basis,'prompt':value['prompt']}
     if value['decision'] is not None:revision_basis['decision']=value['decision']
     value['revision']=_digest(revision_basis)
+    value['_revision_basis']=revision_basis
     if kind=='inventory':value['document_revision']=0;value['document_digest']=value['revision']
     value['can_answer']=not complete and linked.get('actions_enabled') is True
     value['choices']=[dict(choice) for choice in CHOICES]
@@ -221,6 +222,7 @@ def card_detail(config_path,state,binding_path,kind,ident,*,_include_signature=F
     except (OSError,ValueError):
         value['deliveries']=[];value['delivery_error']='전달 기록을 읽지 못했습니다. 저장된 요청을 확인해야 합니다.'
     apply_interaction(value)
+    value.pop('_revision_basis',None)
     return value
 
 
@@ -235,7 +237,17 @@ def apply_interaction(value):
     matches=[]
     for item in value.get('deliveries',[]):
         bound=item.get('binding',{})
-        if (bound.get('card_revision'),bound.get('document_revision'),bound.get('document_digest')) != (value['revision'],value['document_revision'],value.get('document_digest')):continue
+        if (bound.get('document_revision'),bound.get('document_digest')) != (value['document_revision'],value.get('document_digest')):continue
+        same_card=bound.get('card_revision')==value['revision']
+        if not same_card and value['kind']=='work':
+            # Prove the old full card hash by substituting only its recorded route.
+            # A changed prompt, design, task or work state still fails this comparison.
+            source=value['_revision_basis'];content=source['content'];destination=item.get('destination') or {}
+            leader={**content['leader'],'terminal':destination.get('terminal'),
+                    'label':destination.get('label') or content['leader'].get('label'),
+                    'space':destination.get('space') or content['leader'].get('space')}
+            same_card=bool(destination.get('terminal')) and bound.get('card_revision')==_digest({**source,'content':{**content,'leader':leader}})
+        if not same_card:continue
         if question and (bound.get('question_id'),bound.get('question_revision')) != (question['question_id'],question['question_revision']):continue
         matches.append(item)
     if not complete and (value.get('delivery_error') or any('binding' not in d for d in value.get('deliveries',[]))):

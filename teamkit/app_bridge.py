@@ -393,7 +393,7 @@ def destination(config_path, state, binding_path, kind, ident):
         CoreRuntime(task)._native(runtime.get('name'), ready=True)
     except (KitError, OSError, ValueError) as error:
         raise Refusal('담당 팀장의 실행 신원이나 대기 상태를 확인하지 못했습니다: ' + str(error)) from error
-    return {'team': team, 'label': setting.get('label', team), 'task': task['id'], 'owner': task['owner'],
+    return {'team': team, 'label': setting.get('label', team), 'space':setting.get('space'), 'task': task['id'], 'owner': task['owner'],
             'attempt': task.get('attempt_count', 0), 'terminal': runtime['terminal'], 'name': runtime.get('name'),
             'native_pid': runtime.get('native_pid')}
 

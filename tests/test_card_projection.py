@@ -173,3 +173,13 @@ class ProjectionTests(FeedbackFixture):
                 current=store.get('IMPL');current['state']='queued';store._save(current,'fixture')
                 old=dict(current,id='OLD',state='awaiting_review',design_revision=0,design_digest='0'*64);store._save(old,'fixture')
         self.assertEqual(self.detail('W1','work')['interaction']['state'],'assignment_wait')
+
+    def test_leader_route_change_does_not_reopen_the_same_answered_decision(self):
+        import json
+        self.setup_delivery()
+        self.linked['teams']['alpha']['terminal']='t8';self.links.write_text(json.dumps(self.linked))
+        card=self.detail('W1','work')
+        self.assertFalse(card['needs_decision'])
+        self.assertEqual(card['interaction']['state'],'sent')
+        self.linked['card_prompts']['work:W1']='새로 바뀐 결정 내용';self.links.write_text(json.dumps(self.linked))
+        self.assertTrue(self.detail('W1','work')['needs_decision'])
