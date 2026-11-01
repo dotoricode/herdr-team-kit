@@ -14,6 +14,20 @@
 
 선택적으로 `account_selection`에 `timezone`, `weekdays`, `weekends`를 지정할 수 있습니다. 예를 들어 `{"timezone":"Asia/Seoul","weekdays":["team","personal"],"weekends":["personal","team"]}`는 해당 시간대의 토·일요일에 개인계정을 우선합니다. 두 순서에는 `team`과 `personal`이 각각 한 번씩 있어야 합니다. 이 설정은 route, 새 배정, 신원 확인 뒤 재검사와 총괄 복구에 동일하게 적용되며, 실행 중인 작업을 다른 계정으로 옮기거나 한도·승인 검사를 생략하지 않습니다. 미설정 시 기존 팀계정 우선 순서를 유지합니다. 공급자·모델은 기존 역할 및 명시적 사용자 결정으로 정하며, 계정 순서가 공급자 전환을 승인하지는 않습니다.
 
+일반 팀장 작업과 일반·소규모 구현 작업에서 공급자 간 대체 실행을 허용하려면 다음 설정을 추가합니다.
+
+```json
+{"execution_preference":{"provider_order":["claude","codex"],"weekend_account_first":true}}
+```
+
+이 설정과 위 계정 일정의 조합은 주말에 **개인 Claude → 개인 Codex → 회사 Claude → 회사 Codex** 순서로 새 배정을 고릅니다. 개인 Claude를 사용할 수 없어도 개인 Codex가 가능하면 회사 Claude보다 먼저 선택합니다. 평일에는 **회사 Claude → 개인 Claude → 회사 Codex → 개인 Codex** 순서입니다. `account_selection`을 함께 지정하면 해당 시간대와 평일·주말 계정 순서를 따릅니다. 계정 일정 없이 이 설정만 켜면 `Asia/Seoul` 기준 평일은 회사, 주말은 개인을 먼저 검토합니다. `weekend_account_first=false`이면 주말에도 공급자 순서 안에서 계정 일정을 적용합니다.
+
+공급자를 바꾸는 경우 선택한 공급자·계정 프로필의 모델을 쓰고 작업의 effort는 유지합니다. 같은 공급자는 역할·작업 유형에 지정한 모델을 유지합니다. 소규모 구현의 기본 모델도 선호 정책이므로, 개인 Claude를 사용할 수 없으면 개인 Codex를 먼저 선택하고 low effort를 유지합니다. 개인 Claude가 가능하면 소규모 작업에 지정한 모델을 그대로 사용합니다. 명시적 `user_decision`, 리뷰어, 설계, 위험 분류가 있는 작업은 공급자·모델을 바꾸지 않고 기존 계정 일정만 적용합니다. 이 설정이 없으면 기존 공급자 고정 배정을 유지합니다. `plan`은 이 설정이 있을 때 현재 한도에 따른 실제 후보를 보여주며, 신원 조회나 실행은 하지 않습니다.
+
+배정은 현재 프로필에 연결된 최신 한도 근거만 사용합니다. 신원 확인 뒤 공급자·모델·계정·effort와 프로필 연결을 다시 선택해 대조하며, 달라지면 claim 전에 중단합니다. 기존 승인·소유권·동시성 검사는 그대로 적용합니다. 이 선택 순서는 실행 중인 작업을 옮기거나 API 계정으로 전환하지 않습니다.
+
+Codex 공식 응답의 `ordinaryUsageAllowed=true`이고 유효한 알려진 윈도가 하나 이상일 때만 제공되지 않은 다른 윈도를 `not_applicable`로 기록합니다. 예를 들어 주간 윈도만 제공된 구독을 5시간 한도 누락으로 차단하지 않습니다. 제공된 각 윈도는 계속 90% 미만·유효한 초기화 시각·TTL을 충족해야 합니다. 명시적 일반 사용 차단, 지출 제어 도달, 구성원 크레딧 소진은 낮은 사용률보다 우선하여 배정을 막습니다. 허용 정보가 없거나 잘못된 기존 자료에서 적용 제외를 추정하지 않습니다. Claude의 검증 기준은 바꾸지 않습니다.
+
 진행 작업은 안전한 경계까지 유지합니다. 팀계정 복구는 새 작업부터 적용합니다. 같은 계정·같은 작업의 resume은 native CLI로 수행하고 기존 소유권을 유지합니다. 현재 dispatch는 교차 계정 인계 후 새 세션을 시작합니다. Codex 새 실행과 resume에는 `--no-daemon`을 넣어 관리 pane의 실행 환경을 공유 background server에 맡기지 않습니다. 실제 Herdr 환경 전달은 별도 통합 검증 대상입니다. 인증 파일이나 세션 저장소를 공유하지 않습니다. 기존 로그인 홈을 재사용할 때도 실제 계정 일치를 먼저 확인합니다. Claude의 정확한 기본 홈은 기본 keychain namespace로 실행하고, 별도 홈은 `CLAUDE_CONFIG_DIR`로 분리합니다. 기본 경로를 명시하는 것과 환경변수를 비우는 것이 같은 인증 namespace라고 가정하지 않습니다. 기본 프로필의 receipt·capture는 환경변수가 unset 또는 빈 값일 때만 허용하며, 명시적 기본 경로는 인증 조회 전에 거절합니다.
 
 새 Codex 배정의 receipt는 host 중계를 사용합니다. worker는 지정된 profile 환경을 확인하고 owner·attempt·nonce·profile binding·만료 시각에 묶인 요청을 남깁니다. 배정 host가 요청 이후 실제 provider identity를 조회하고, 요청과 현재 설정·소유권·기한을 다시 대조한 뒤 수신을 확정합니다. worker sandbox에 인증 홈 쓰기 권한을 추가하거나 인증 파일을 복사하지 않습니다. 기존 preflight만 재사용하지 않으며 `identity_source=host-fresh-provider`로 출처를 구분합니다. 이는 로컬 장부의 attestation이며 native 세션 인증을 암호학적으로 증명하지 않습니다.

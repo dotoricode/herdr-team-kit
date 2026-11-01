@@ -26,6 +26,35 @@ class DeliveryTests(FeedbackFixture):
     def submit(self,**kw):return delivery.submit(self.state,request(**kw))
     def folder(self,rid='req-0001-aaaa'):return self.feedback_root/'delivery'/rid
 
+    def test_first_delivery_directory_creation_is_safe_when_concurrent(self):
+        self.feedback_root.mkdir(mode=0o700, exist_ok=True)
+        target = (self.feedback_root / 'delivery').resolve()
+        barrier = threading.Barrier(2)
+        exists = Path.exists
+        results, errors = [], []
+
+        def synchronized_exists(path):
+            value = exists(path)
+            if path == target and not value:
+                barrier.wait(timeout=5)
+            return value
+
+        def create():
+            try:
+                results.append(delivery._base(self.state, True))
+            except BaseException as error:
+                errors.append(error)
+
+        with patch.object(Path, 'exists', synchronized_exists):
+            threads = [threading.Thread(target=create) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(results, [target, target])
+        self.assertEqual(target.stat().st_mode & 0o777, 0o700)
+
     def test_request_and_events_are_private_and_synced_before_returning(self):
         with patch('teamkit.app_delivery.os.fsync',wraps=os.fsync) as sync:
             seen,created=self.submit()

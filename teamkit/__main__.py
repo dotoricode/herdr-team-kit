@@ -10,10 +10,31 @@ import uuid
 from . import providers
 from .config import load, profile, binding, cached_quota
 from .checkpoint import fingerprint, revision_guard
-from .policy import account_order, choose_account, context_action, normalize_quota
+from .policy import account_order, choose_account, context_action, normalize_quota, eligible
 from .runtime import Herdr, RuntimeError as KitError, launch_spec, profile_home_matches
 from .store import Store
-from .routing import KINDS, RISKS, classification, execution_policy
+from .routing import KINDS, RISKS, classification, execution_policy, execution_candidates
+
+
+def select_execution(config, store, task, now):
+    role = execution_policy(config, task)
+    if role['action'] != 'dispatch':
+        return role
+    candidates = execution_candidates(config, task, role, now)
+    if candidates is None:
+        provider = role['provider']
+        account = choose_account(cached_quota(config, store, provider, 'team'),
+            cached_quota(config, store, provider, 'personal'), now,
+            config['quota_ttl_seconds'], order=account_order(config, now))
+        if account:
+            return {**role, 'account': account,
+                    'effort': role.get('effort', config['profiles'][provider][account].get('effort', 'medium'))}
+    else:
+        for candidate in candidates:
+            if eligible(cached_quota(config, store, candidate['provider'], candidate['account']),
+                        now, config['quota_ttl_seconds']):
+                return candidate
+    return {'action': 'wait', 'reason': 'no fresh eligible quota'}
 
 
 def git(root, *args):
@@ -221,7 +242,8 @@ def run(args):
             if args.command=='tell' and args.expected_owner is not None and task.get('owner')!=args.expected_owner:
                 raise ValueError('selected task owner changed; inspect before sending')
         if args.command == 'plan':
-            return execution_policy(config, task)
+            return (select_execution(config, store, task, now) if 'execution_preference' in config
+                    else execution_policy(config, task))
         if args.command == 'authorize':
             decision = json.loads(Path(args.decision_file).read_text())
             if not isinstance(decision, dict) or decision.get('provider') not in config['profiles']:
@@ -245,23 +267,27 @@ def run(args):
                 raise KitError('terminal adoption is limited to unlinked plain core leaders')
             from .workflow import check_task
             work=check_task(config,store,task)
-            role = execution_policy(config, task)
-            if role['action'] != 'dispatch':
-                return role
-            provider = role['provider']
-            account = choose_account(cached_quota(config, store, provider, 'team'), cached_quota(config, store, provider, 'personal'), now, config['quota_ttl_seconds'], order=account_order(config, now))
-            if not account:
+            role = select_execution(config, store, task, now)
+            if role['action'] == 'wait':
                 if work:
                     from .workflow import get,save
                     with store.transaction():
                         waiting=get(store,work['id'])
-                        waiting['hold']={'kind':'quota','reason':'유효한 동일 provider 구독 한도 근거를 기다립니다.'}
+                        waiting['hold']={'kind':'quota','reason':('유효한 구독 한도 근거를 기다립니다.' if 'execution_preference' in config
+                                                               else '유효한 동일 provider 구독 한도 근거를 기다립니다.')}
                         save(store,waiting,'quota_wait')
-                return {'action':'wait', 'reason':'no fresh eligible quota'}
+                return role
+            if role['action'] != 'dispatch':
+                return role
+            provider, account = role['provider'], role['account']
             pr = profile(config, provider, account, role)
             providers.identity(provider, pr)
-            if choose_account(cached_quota(config, store, provider, 'team'), cached_quota(config, store, provider, 'personal'), time.time(), config['quota_ttl_seconds'], order=account_order(config, time.time())) != account:
-                raise ValueError('quota changed during preflight; route again')
+            recheck_config = load(args.config) if 'execution_preference' in config else config
+            recheck = select_execution(recheck_config, store, store.get(args.task), time.time())
+            keys = ('action', 'provider', 'account', 'model', 'effort')
+            if (any(recheck.get(key) != role.get(key) for key in keys)
+                    or binding(profile(recheck_config, provider, account)) != binding(pr)):
+                raise ValueError('quota changed during preflight; execution policy/profile must also remain unchanged; route again')
             checkpoint = task.get('checkpoint')
             expected = checkpoint['head'] if checkpoint else task['base']
             current_head = task_head(task, config)

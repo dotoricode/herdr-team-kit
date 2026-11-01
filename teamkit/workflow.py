@@ -1,4 +1,5 @@
 """Private, versioned design approval and restart records for product work."""
+from contextlib import closing
 import hashlib
 import json
 import os
