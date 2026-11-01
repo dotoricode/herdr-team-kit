@@ -71,11 +71,18 @@ def frame(view, ui, width=100, now=0):
     else:
         items.extend([text('팀 운영 현황'),text('● 현재 실행과 제품 진행을 구분합니다 · 화면 갱신은 모델을 호출하지 않습니다'),Text('')])
         pending=[r for r in view['rows'] if r['phase']=='awaiting_approval']
-        if pending:
-            items.append(text('⚑ 사용자 확인 '+str(len(pending))+'건',attention=True))
+        held=[r for r in view['rows'] if r['phase'] in ('inspect','quota','environment')]
+        inputs=[team for team,a in view.get('activity',{}).items() if a.get('blocked')]
+        if pending or held or inputs:
+            items.append(text('⚑ 확인할 항목 '+str(len(pending)+len(held)+len(inputs))+'개',attention=True))
             for row in pending:
                 items.append(text('  [설계 읽고 선택하기] '+row['id'],('review',row['id']),True))
-            items.extend([text('팀장 창은 실행 기록입니다. 설계 문서는 위 항목을 클릭하거나 v로 읽으세요.'),Text('')])
+            for row in held:
+                items.append(text('  [업무 확인] '+row['id']+' · '+LABELS[row['phase']],('work',row['id']),True))
+            for team in inputs:
+                items.append(text('  [입력 요청 확인] '+view['team_labels'].get(team,team)+' · 실제 입력은 해당 팀장 창에서',('team',team),True))
+            if pending:items.append(text('팀장 창은 실행 기록입니다. 설계 문서는 위 항목을 클릭하거나 v로 읽으세요.'))
+            items.append(Text(''))
         else:items.extend([text('✓ 사용자 확인 사항 없음'),Text('')])
 
         items.append(text('계정 사용률 · 행 클릭 / Enter로 수집 정보 펼치기'))
@@ -108,7 +115,7 @@ def frame(view, ui, width=100, now=0):
             status=('● ' if a['working'] else '○ ')+a['label']
             if action in ui.expanded:status+='\n실행 '+count_text(a['working'])+' · 입력 요청 '+count_text(a['blocked'])+'\n팀장 창: 실행 기록 / 설계 선택: 이 화면 상단'
             count=str(sum(counts.values()));done=str(counts.get('complete',0))
-            check=('설계 선택 '+str(waiting) if waiting else '')+(' · 확인 '+str(blocked) if blocked else '')
+            check=' · '.join(label for label in ('설계 선택 '+str(waiting) if waiting else '', '확인 '+str(blocked) if blocked else '', '입력 요청 '+str(a['blocked']) if a.get('blocked') else '') if label)
             check=check.strip(' ·') or '—'
             cells=[marker(action)+view['team_labels'].get(team,team),status,count+' / '+done,check] if narrow else [marker(action)+view['team_labels'].get(team,team),status,count_text(a['working']),count,done,check]
             teams.add_row(*[text(c,action, bool(attention) and i==len(cells)-1) for i,c in enumerate(cells)])

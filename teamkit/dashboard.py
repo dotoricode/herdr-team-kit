@@ -371,7 +371,7 @@ def live(screen,args,config):
                 _,x,y,_,buttons=curses.getmouse()
                 if buttons&curses.BUTTON4_PRESSED:offset=max(0,offset-3)
                 elif buttons&getattr(curses,'BUTTON5_PRESSED',0):offset+=3
-                elif buttons&(curses.BUTTON1_PRESSED|curses.BUTTON1_CLICKED):
+                elif buttons&(curses.BUTTON1_PRESSED|curses.BUTTON1_CLICKED) and 0<=y<visible and 0<=x<width-1:
                     action=result.hit(y+offset,x)
                     if action:activate(action)
             except curses.error:pass
