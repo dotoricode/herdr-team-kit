@@ -1,10 +1,22 @@
 import { View, div, image, svg } from "gpui-kit";
-import { v_flex, h_flex, Popover, Scrollbar, Textarea, TextareaState, Editor, EditorState } from "gpui-base";
+import { v_flex, h_flex, Popover, Scrollbar, Textarea, TextareaState, TextView, Editor, EditorState } from "gpui-base";
 import { appHome, readTextFile, exec, agents, terminals, theme, settings, run, nextCommand, props as getModProps, openOverlay, closeOverlay } from "herdr";
 
 const LOCAL = "/mods/team-operations/local.json";
 const DUMMY = "—";
 const visibleSnapshot = value => JSON.stringify(value, (key, item) => key === "observed_at" ? undefined : key === "age" && typeof item === "number" ? Math.floor(item / 60) : item);
+function documentPreview(source) {
+  let fence = null;
+  return String(source ?? "").split("\n").map(line => {
+    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (marker) {
+      if (!fence) fence = marker[1];
+      else if (marker[1][0] === fence[0] && marker[1].length >= fence.length && line.slice(marker[0].length).trim() === "") fence = null;
+      return line;
+    }
+    return fence || !line.trim() || /^( {4}|\t)/.test(line) || /(?: {2}|\\)$/.test(line) ? line : `${line}  `;
+  }).join("\n");
+}
 const display = value => value == null ? "미확인" : typeof value === "string" ? value : typeof value === "number" ? String(value) : Array.isArray(value) ? value.map(display).join(" / ") : typeof value === "boolean" ? (value ? "예" : "아니요") : JSON.stringify(value);
 const clock = value => {
   if (value == null) return DUMMY;
@@ -73,7 +85,7 @@ export default class TeamOperations extends View {
     this.viewProps = props ?? getModProps() ?? {};
     this.role = this.viewProps.role ?? "full";
     this.data = null; this.error = null; this.busy = false; this.seq = 0;
-    this.expanded = new Set(); this.doc = null; this.docBusy = false;
+    this.expanded = new Set(); this.doc = null; this.docBusy = false; this.docSource = false;
     this.confirm = null; this.actionBusy = false; this.message = null;
     this.showCompleted = false; this.coordinatorConfirm = false; this.coordinatorBusy = false; this.coordinatorMessage = null;
     this.usageBusy = false; this.usageMessage = null;
@@ -258,7 +270,7 @@ export default class TeamOperations extends View {
 
   async document(work, cx) {
     if (this.actionBusy || this.docBusy) return;
-    this.selectedWorkId = work.id; this.docBusy = true; this.confirm = null; this.message = null; this.doc = null;
+    this.selectedWorkId = work.id; this.docBusy = true; this.docSource = false; this.confirm = null; this.message = null; this.doc = null;
     this.docEditor?.release(); this.docEditor = null;
     const id = work.id;
     try {
@@ -465,17 +477,26 @@ export default class TeamOperations extends View {
         .when(Boolean(doc?.can_approve), el => el.child(button("detail-approve", "이 설계 승인", cx => this.begin("approve", null, cx), !doc.can_approve)))
         .children((doc?.resumable ?? []).map(task => button(`detail-resume-${task.id}`, `재개 · ${task.id}`, cx => this.begin("resume", task, cx))));
       const documentSection = v_flex().id("detail-document").min_h(0).gap(6).pt(4)
-        .when(this.docBusy || this.docEditor != null, x => x.h(300).flex_none())
-        .when(!this.docBusy && this.docEditor == null, x => x.flex_none())
+        .when(this.docBusy || this.docSource && this.docEditor != null, x => x.h(300).flex_none())
+        .when(!this.docBusy && !this.docSource, x => x.flex_none())
         .child(h_flex().flex_none().items_center().justify_between().gap(8)
           .child(div().whitespace_nowrap().font_semibold().text_color(t.accent).child(doc ? `${display(doc.title)} · v${display(doc.revision)}` : "설계 문서"))
           .child(h_flex().gap(6).children([
             button("detail-read-document", this.docBusy ? "읽는 중" : doc ? "설계 다시 읽기" : "설계 읽기", cx => cx.spawn(async cx => this.document(detailWork, cx)), this.docBusy || this.actionBusy),
+            ...(doc ? [button("detail-toggle-source", this.docSource ? "문서 보기" : "원문 보기", cx => { this.docSource = !this.docSource; cx.notify(); })] : []),
             ...(doc ? [button("detail-close-document", "문서 닫기", cx => this.closeDocument(cx))] : [])
           ])))
         .when(Boolean(this.message), x => x.child(div().flex_none().text_color(/실패|오류|fail|error/i.test(this.message) ? t.blocked : t.muted).child(this.message)))
         .when(this.docBusy, x => x.child(div().flex_none().text_color(t.dim).child("설계를 읽는 중입니다.")))
-        .when(this.docEditor != null, x => x.child(Editor.new(this.docEditor).flex_1().min_h(0)))
+        .when(Boolean(doc) && !this.docSource, x => x.child(TextView.markdown(`design-preview-${doc.id}-${doc.revision}-${doc.digest}`, documentPreview(doc.body)).selectable(true).scrollable(false).w_full().max_w(880).flex_none().px(10).text_size(13).line_height("22px")
+          .on_link_click((url, cx) => {
+            try {
+              const target = new URL(url);
+              if (target.protocol === "https:" || target.protocol === "http:") { cx.open_url(target.href); return; }
+            } catch (_) {}
+            this.message = "이 링크는 이 화면에서 열 수 없습니다."; cx.notify();
+          })))
+        .when(this.docEditor != null && Boolean(this.docSource), x => x.child(Editor.new(this.docEditor).flex_1().min_h(0)))
         .when(Boolean(doc) && !this.confirm && selectedActionAllowed, x => x.child(approvalButtons))
         .when(Boolean(this.confirm), x => x.child(confirmBox));
       const shownStatus = card?.status_label ?? phaseText(detail?.phase ?? detailWork.phase ?? detailWork.status);
