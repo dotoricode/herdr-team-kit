@@ -1,5 +1,6 @@
 """Opt-in, durable context rollover. Native uncertainty never authorizes a retry."""
 import fcntl
+import difflib
 import hashlib
 import json
 import os
@@ -269,20 +270,27 @@ def _checkpoint(config_path, state, nonce, evidence_file, stopped):
     if target['kind'] == 'coordinator' and os.environ.get('TEAMKIT_GUI_COORDINATOR') != target['owner']:
         raise ValueError('checkpoint requires the current coordinator')
     native(target, state)
-    if target['provider'] == 'codex' and job.get('trigger') and job['trigger'].get('metric','context')=='context':
-        actual_session = os.environ.get('CODEX_THREAD_ID')
-        if actual_session != job['trigger']['session_id']:
+    actual_session=None
+    if target['provider'] == 'codex':
+        actual_session=os.environ.get('CODEX_THREAD_ID')
+        if not isinstance(actual_session,str) or not SESSION.fullmatch(actual_session):
+            raise ValueError('checkpoint requires native session identity')
+        if job.get('trigger') and job['trigger'].get('metric','context')=='context' and actual_session != job['trigger']['session_id']:
             if actual_session and SESSION.fullmatch(actual_session):
                 save_registration(state, target, actual_session)
             set_phase(state,job,'cancelled','새 대화가 열려 이전 인계를 취소했습니다.')
             raise ValueError('native thread changed since context observation; do not exit')
-    if target['provider'] == 'claude' and job.get('trigger') and job['trigger'].get('metric','context')=='context':
+        save_registration(state,target,actual_session)
+    if target['provider'] == 'claude':
         current=observe(load(config_path),state,target)
-        if current and current.get('session_id') != job['trigger']['session_id']:
+        actual_session=(current or {}).get('session_id')
+        if not isinstance(actual_session,str) or not SESSION.fullmatch(actual_session):
+            raise ValueError('checkpoint requires native Claude session observation')
+        if job.get('trigger') and job['trigger'].get('metric','context')=='context' and actual_session != job['trigger']['session_id']:
             set_phase(state,job,'cancelled','새 대화가 열려 이전 인계를 취소했습니다.')
             raise ValueError('native Claude session changed since observation')
-        actual_session = os.environ.get('CLAUDE_SESSION_ID')
-        if actual_session and actual_session != job['trigger']['session_id']:
+        reported_session=os.environ.get('CLAUDE_SESSION_ID')
+        if reported_session and reported_session != actual_session:
             raise ValueError('native Claude session changed since observation')
     expected = directory(state) / (nonce + '-evidence.json')
     if Path(evidence_file).absolute() != expected:
@@ -296,7 +304,32 @@ def _checkpoint(config_path, state, nonce, evidence_file, stopped):
             or not isinstance(evidence['pending_approvals'], list)
             or not all(isinstance(s, str) for s in evidence['pending_approvals'])):
         raise ValueError('complete checkpoint and stopped background writers required')
+    job['checkpoint_session_id']=actual_session
     return save_checkpoint(load(config_path),state,job,evidence,'agent')
+
+
+def exit_session_matches(config,state,job):
+    target=current_target(config,state,job['target'])
+    expected=job.get('checkpoint_session_id')
+    if target is None or not isinstance(expected,str) or not SESSION.fullmatch(expected):
+        return False
+    if target['provider']=='claude':
+        packet=observe(config,state,target)
+        return bool(packet and packet.get('session_id')==expected and not packet.get('unavailable'))
+    if target.get('session_id')!=expected:return False
+    # Native /status is local UI state; it cannot start a model turn.
+    def screen():
+        return subprocess.run(['hc','read','--lines','60',target['terminal']],capture_output=True,text=True,timeout=5,check=True).stdout.splitlines()
+    before=screen()
+    _call('send',target['terminal'],'/status')
+    after=screen()
+    changed=[]
+    for tag,_,__,start,end in difflib.SequenceMatcher(a=before,b=after,autojunk=False).get_opcodes():
+        if tag in ('insert','replace'):changed.extend(after[start:end])
+    found=re.findall(r'^\s*Session:\s+([a-f0-9-]{36})\s*$','\n'.join(changed),re.M)
+    if not found or found[-1]!=expected:return False
+    latest=current_target(config,state,target)
+    return bool(latest and latest.get('session_id')==expected)
 
 
 def save_checkpoint(config,state,job,evidence,source):
@@ -413,7 +446,10 @@ def _advance(config_path, state, job):
                     job['needs_you'] = (value.get('status') or {}).get('state') in ('idle','done','blocked')
                     return set_phase(state, job, 'pending', '입력·확인 창을 정리해 주세요.' if job['needs_you'] else '현재 작업이 끝나면 인계합니다. 입력 초안은 보존합니다.')
                 job['needs_you'] = False
-                if parked_checkpoint(config,state,job,value):return
+                trigger=job.get('trigger') or {}
+                if trigger.get('metric')=='account_blocked' or trigger.get('metric') in ('five_hour','weekly') and trigger.get('used')==100:
+                    job['needs_you']=True
+                    return set_phase(state,job,'pending','한도가 소진되어 인계 기록을 작성할 수 없습니다. 마지막 작업과 쓰기 중단 확인이 필요합니다.')
                 if target['provider']=='claude' and job.get('trigger') and job['trigger'].get('metric','context')=='context':
                     measured=observe(config,state,target)
                     if measured and measured.get('session_id') != job['trigger']['session_id']:
@@ -436,6 +472,9 @@ def _advance(config_path, state, job):
                 return
             if not clean_prompt(value, target):
                 return
+            if not exit_session_matches(config,state,job):
+                return set_phase(state,job,'uncertain','인계 기록 이후 대화가 변경됐거나 현재 대화를 확인할 수 없습니다. 기존 실행을 보존했습니다.')
+            if not clean_prompt(native(target,state),target):return
             set_phase(state, job, 'stopping', '인계 기록을 저장했습니다. 기존 실행 종료를 확인합니다.')
             _call('send', target['terminal'], '/exit')
             return
@@ -778,52 +817,3 @@ def capacity_available(state, target=None, current_job=None):
             t=job['target'];active.add('task:'+t['id'] if t['kind']=='task' else 'coordinator')
     key=('task:'+target['id'] if target['kind']=='task' else 'coordinator') if target else None
     return len(active)<=3 if key in active else len(active)<3
-
-
-def parked_checkpoint(config,state,job,value):
-    """A quota-blocked parked leader needs no new model turn to save standby state."""
-    target=job['target']
-    if job['verification_only'] or target['kind']!='task' or (job.get('trigger') or {}).get('metric','context')=='context':
-        return False
-    store=Store(state)
-    try:
-        task=store.get(target['id']);tasks=store.list()
-    finally:store.close()
-    if task['state']!='ready' or task['role']!='leader':return False
-    if any(t['id']!=task['id'] and t['team']==task['team'] and t['state'] in ACTIVE for t in tasks):
-        job['needs_you']=False
-        set_phase(state,job,'pending','같은 팀의 진행 작업이 끝나면 대기 팀장을 인계합니다.')
-        return True
-    terminals=_call('ls','--json')['terminals']
-    descendants={target['terminal']}
-    while True:
-        updated=descendants|{t['address'] for t in terminals if t.get('parent') in descendants}
-        if updated==descendants:break
-        descendants=updated
-    if any(t['address']!=target['terminal'] and t['address'] in descendants and t.get('status') in ('working','blocked') for t in terminals):
-        set_phase(state,job,'pending','진행 중인 하위 담당을 보존하고 인계를 기다립니다.')
-        return True
-    text=subprocess.run(['hc','read','--lines','100',target['terminal']],capture_output=True,text=True,timeout=5,check=True).stdout
-    if re.search(r'\b[1-9][0-9]*\s+(?:shells?|background tasks?)\b','\n'.join(text.splitlines()[-10:]),re.I):
-        job['needs_you']=True
-        set_phase(state,job,'pending','백그라운드 작업 종료를 확인해 주세요.')
-        return True
-    lines=text.splitlines();starts=[i for i,line in enumerate(lines) if re.match(r'^[•⏺]\s',line)]
-    if not starts:
-        job['needs_you']=True
-        set_phase(state,job,'pending','대기 팀장의 마지막 기록을 확인해 주세요.')
-        return True
-    kept=[]
-    for line in lines[starts[-1]:]:
-        if re.match(r'^[ \t]*[›❯✻]',line):break
-        kept.append(line)
-    note=directory(state)/(job['id']+'-standby.txt')
-    note.write_text('\n'.join(kept)[:12000]+'\n')
-    evidence={'verification':['Host observed official ready/park state, idle native process, no active team task or managed descendant.',
-                              'No model checkpoint turn was started on the exhausted account.'],
-              'next':'The previous leader was parked. Read its last reply in '+str(note)+
-                     ' and current durable work records. Restore the pending task IDs and approvals, then park; do not automatically resume product work.',
-              'pending_approvals':[], 'background_writers_stopped':True}
-    job['target']['was_ready']=True
-    save_checkpoint(config,state,job,evidence,'host-parked-leader')
-    return True

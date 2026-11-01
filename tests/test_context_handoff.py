@@ -106,7 +106,7 @@ class ContextHandoffTests(unittest.TestCase):
         job=context.request(self.config,self.state,target,self.observation)
         context.set_phase(self.state,job,'requested')
         env={'HC_TERMINAL_ID':'t1','TEAMKIT_GUI_COORDINATOR':'owner-1'}
-        with patch.object(context,'load',return_value=self.config),patch.object(context,'current_target',return_value=target),patch.object(context,'native'),patch.object(context,'observe',return_value=None),patch.dict(os.environ,env):
+        with patch.object(context,'load',return_value=self.config),patch.object(context,'current_target',return_value=target),patch.object(context,'native'),patch.object(context,'observe',return_value={'session_id':'session-1'}),patch.dict(os.environ,env):
             with self.assertRaises(ValueError):context.checkpoint(self.config_path,self.state,job['id'],str(self.root/'outside.json'),True)
             p=context.directory(self.state)/(job['id']+'-evidence.json')
             context.write(p,{'verification':['test passed'],'next':'continue approved step','pending_approvals':[], 'background_writers_stopped':False})
@@ -157,7 +157,7 @@ class ActualHandoffFlowTests(Fixture):
 
     def test_checkpoint_exit_official_handoff_dispatch_and_receipt(self):
         self.save_checkpoint()
-        with patch.object(context,'native',return_value={}),patch.object(context,'clean_prompt',return_value=True),patch.object(context,'_call') as call:
+        with patch.object(context,'exit_session_matches',return_value=True),patch.object(context,'native',return_value={}),patch.object(context,'clean_prompt',return_value=True),patch.object(context,'_call') as call:
             context.advance(self.config,self.state,self.job)
             self.assertEqual(call.call_args.args,('send','t1','/exit'))
         with patch.object(context,'_call',return_value={'state':'finished','exit_code':0,'signal':None,'pid':123,'labels':{'teamkit.owner':'old-owner'}}):
@@ -195,6 +195,18 @@ class ActualHandoffFlowTests(Fixture):
         self.assertIsNone(context.request(config,self.state,self.target,
             {'metric':'five_hour','used':97,'observed_at':time.time(),'source':'codex-native-quota'}))
         self.assertEqual(len(context.jobs(self.state)),1)
+
+    def test_new_session_after_checkpoint_never_exits_or_releases_owner(self):
+        self.save_checkpoint()
+        context.save_registration(self.state,self.target,'new-session-after-checkpoint')
+        with patch.object(context,'native',return_value={}),patch.object(context,'clean_prompt',return_value=True),patch.object(context,'_call') as call:
+            context.advance(self.config,self.state,self.job)
+            self.assertFalse(any(c.args==('send','t1','/exit') for c in call.call_args_list))
+        saved=context.read(context.job_path(self.state,self.job['id']))
+        self.assertEqual(saved['phase'],'uncertain')
+        store=Store(self.state)
+        try:self.assertEqual(store.get('T1')['owner'],'old-owner')
+        finally:store.close()
 
     def test_changed_worktree_after_checkpoint_does_not_release_owner(self):
         self.save_checkpoint()
@@ -268,21 +280,19 @@ class ParkedBudgetHandoffTests(Fixture):
         self.job=context.request(load(self.config),self.state,self.target,
             {'metric':'weekly','used':100,'observed_at':time.time(),'source':'codex-native-quota'})
 
-    def test_exhausted_parked_leader_uses_saved_standby_without_new_model_turn(self):
+    def test_exhausted_parked_leader_cannot_infer_writer_ack_or_start_model_turn(self):
         result=type('Result',(),{'stdout':'• Received and parked. No product work started.\n\n› Ask Codex to do anything\n'})()
         original=context.subprocess.run
         def native_read(args,**kwargs):
             return result if args[:2]==['hc','read'] else original(args,**kwargs)
         with patch.object(context,'native',return_value={}),patch.object(context,'clean_prompt',return_value=True),patch.object(context,'_call',return_value={'terminals':[]}) as call,patch.object(context.subprocess,'run',side_effect=native_read):
             context.advance(self.config,self.state,self.job)
-            self.assertTrue(all(c.args==('ls','--json') for c in call.call_args_list))
+            self.assertFalse(any(c.args[0]=='send' for c in call.call_args_list))
         saved=context.read(context.job_path(self.state,self.job['id']))
-        self.assertEqual(saved['phase'],'checkpoint_ready')
-        self.assertEqual(saved['checkpoint_source'],'host-parked-leader')
-        self.assertTrue(context.read(context.directory(self.state)/(self.job['id']+'-handoff.json'))['context_continuation']['was_ready'])
-        store=Store(self.state)
-        try:self.assertEqual(store.get('L1')['state'],'ready')
-        finally:store.close()
+        self.assertEqual(saved['phase'],'pending')
+        self.assertTrue(saved['needs_you'])
+        self.assertNotIn('checkpoint',saved)
+        self.assertFalse((context.directory(self.state)/(self.job['id']+'-handoff.json')).exists())
 
     def test_active_descendant_prevents_host_checkpoint(self):
         rows=[{'address':'child','parent':'t1','status':'working'}]
@@ -290,4 +300,24 @@ class ParkedBudgetHandoffTests(Fixture):
             context.advance(self.config,self.state,self.job)
         saved=context.read(context.job_path(self.state,self.job['id']))
         self.assertEqual(saved['phase'],'pending')
-        self.assertIn('하위 담당',saved['reason'])
+        self.assertTrue(saved['needs_you'])
+        self.assertNotIn('checkpoint',saved)
+
+
+class ExitSessionEvidenceTests(unittest.TestCase):
+    def test_native_status_requires_new_matching_output_and_current_registration(self):
+        session='00000000-0000-0000-0000-000000000001'
+        target={'provider':'codex','session_id':session,'terminal':'t1'}
+        job={'target':target,'checkpoint_session_id':session}
+        cases=[('old response','old response\nSession: '+session,True),
+               ('Session: '+session,'Session: '+session,False),
+               ('old response','Session: 00000000-0000-0000-0000-000000000002',False)]
+        for before,after,expected in cases:
+            with self.subTest(expected=expected,after=after),patch.object(context,'current_target',return_value=target),patch.object(context,'_call'),patch.object(context.subprocess,'run',side_effect=[type('R',(),{'stdout':before})(),type('R',(),{'stdout':after})()]):
+                self.assertEqual(context.exit_session_matches({},None,job),expected)
+
+    def test_claude_changed_or_unavailable_session_cannot_exit(self):
+        target={'provider':'claude'};job={'target':target,'checkpoint_session_id':'old-session'}
+        for packet in (None,{'session_id':'new-session'},{'session_id':'old-session','unavailable':True}):
+            with patch.object(context,'current_target',return_value=target),patch.object(context,'observe',return_value=packet),patch.object(context,'_call') as call:
+                self.assertFalse(context.exit_session_matches({},None,job));call.assert_not_called()
