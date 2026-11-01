@@ -146,20 +146,25 @@ export default class TeamOperations extends View {
   async saveAnswer(cx) {
     const card = this.cardData;
     if (this.answerBusy || this.cardBusy || this.cardError || !card?.can_answer || !this.answerChoice) return;
-    if (this.answerDirty && this.answerRevision !== card.revision) {
+    if (this.answerRevision !== card.revision) {
       this.answerMessage = "카드 내용이 바뀌었습니다. 최신 내용을 확인하고 답변을 다시 작성해 주세요."; cx.notify(); return;
     }
     const text = this.answerInput?.value() ?? "";
     if (text.length > 4000 || (this.answerChoice !== "confirmed" && !text.trim())) {
       this.answerMessage = "수정 필요·보류 사유를 입력해 주세요. 답변은 4,000자까지 저장할 수 있습니다."; cx.notify(); return;
     }
+    const submittedChoice = this.answerChoice;
     this.answerBusy = true; this.answerMessage = null; cx.notify();
     try {
-      const result = await this.args("card-answer", ["--kind", card.kind, "--work", String(card.id), "--card-revision", card.revision, "--choice", this.answerChoice, "--answer-text", text]);
+      const result = await this.args("card-answer", ["--kind", card.kind, "--work", String(card.id), "--card-revision", card.revision, "--choice", submittedChoice, "--answer-text", text]);
       if (result.code !== 0) throw new Error(result.stderr || "답변을 저장하지 못했습니다.");
       const response = JSON.parse(result.stdout);
-      this.answerDirty = false;
-      this.answerMessage = response.message ?? "답변을 저장했습니다. 총괄 확인 대기입니다.";
+      const sameCard = this.cardData?.revision === card.revision && this.answerRevision === card.revision;
+      const sameDraft = this.answerChoice === submittedChoice && this.answerInput?.value() === text;
+      if (sameCard && sameDraft) this.answerDirty = false;
+      this.answerMessage = !sameCard ? "이전 카드 내용에 대한 답변은 저장됐습니다. 현재 내용을 확인하고 다시 답변해 주세요."
+        : !sameDraft ? "이전 입력은 저장됐습니다. 추가로 작성한 내용은 아직 저장되지 않았습니다."
+          : response.message ?? "답변을 저장했습니다. 총괄 확인 대기입니다.";
       await this.loadCard(cx);
     } catch (e) { this.answerMessage = `⚠ ${String(e)}`; }
     finally { this.answerBusy = false; cx.notify(); }
@@ -461,7 +466,7 @@ export default class TeamOperations extends View {
       const answerSection = v_flex().flex_none().gap(6).p(10).rounded(7).bg(t.surface)
         .child(div().text_size(12).font_semibold().child("내 확인 결과"))
         .child(words(card?.prompt ?? "확인 결과와 필요한 조치를 적어 주세요.").text_size(12))
-        .when(this.answerDirty && this.answerRevision !== card?.revision, x => x.child(v_flex().gap(5)
+        .when(this.answerRevision != null && this.answerRevision !== card?.revision, x => x.child(v_flex().gap(5)
           .child(words("카드 내용이 바뀌었습니다. 최신 내용을 확인한 뒤 답변을 다시 작성해 주세요.").text_color(t.blocked))
           .child(button("reset-card-answer", "최신 내용으로 다시 작성", cx => {
             this.answerDirty = false; this.answerRevision = this.cardData?.revision; this.answerChoice = null; this.answerInput?.set_value(""); this.answerMessage = null; cx.notify();
@@ -470,7 +475,7 @@ export default class TeamOperations extends View {
         .when(Boolean(this.answerInput), x => x.child(Textarea.new(this.answerInput).h(76).px(8).py(5).rounded(6).border_1().border_color(t.border).bg(t.background).text_size(12).text_color(t.foreground)))
         .child(h_flex().gap(8).items_center()
           .child(div().flex_1().text_size(10).text_color(t.muted).child("저장한 답변은 총괄 확인 대기입니다. 작업 완료·설계 승인으로 자동 처리하지 않습니다."))
-          .child(button("save-card-answer", this.answerBusy ? "저장 중" : "답변 저장", cx => cx.spawn(async cx => this.saveAnswer(cx)), this.answerBusy || this.cardBusy || Boolean(this.cardError) || !this.answerChoice || this.answerDirty && this.answerRevision !== card?.revision).text_size(11)));
+          .child(button("save-card-answer", this.answerBusy ? "저장 중" : "답변 저장", cx => cx.spawn(async cx => this.saveAnswer(cx)), this.answerBusy || this.cardBusy || Boolean(this.cardError) || !this.answerChoice || this.answerRevision != null && this.answerRevision !== card?.revision).text_size(11)));
       const body = v_flex().flex_1().min_h(0).gap(9).overflow_y_scrollbar()
         .when(this.detailBusy || this.cardBusy && !card, x => x.child(div().p(8).text_color(t.dim).child("카드 정보를 읽는 중입니다.")))
         .when(Boolean(this.detailError || this.cardError), x => x.child(words(`정보를 읽지 못했습니다 · ${this.detailError ?? this.cardError}`).text_color(t.blocked)))
