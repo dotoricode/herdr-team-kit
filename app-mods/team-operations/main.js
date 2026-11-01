@@ -43,15 +43,25 @@ const OVERVIEW = { height: 166, rail: 98, card: 94 };
 const STATUS_TEXT = { unknown: "미확인", working: "실행 중", running: "실행 중", blocked: "사용자 답변 필요", done: "응답 완료", idle: "대기 중", pending: "대기 중", failed: "실패", error: "오류", success: "성공", healthy: "정상", not_measured: "측정 전", not_available: "미제공", unavailable: "미제공", missing: "미확인", current: "최신 기록", stale: "지난 기록" };
 function statusText(status) { return STATUS_TEXT[status] ?? (status == null ? "미확인" : display(status)); }
 function statusColor(status, t) { return status === "working" ? t.working : status === "blocked" ? t.blocked : status === "done" ? t.done : status === "idle" ? t.idle : t.unknown; }
-function teamPresence(status, taskState) {
+const PRESENCE_TITLES = {
+  working: ["업무 중", "집중 모드 켰어요", "한창 몰입 중", "열일 중이에요", "착착 진행 중", "잠시만요, 집중 중"],
+  blocked: ["확인 부탁드려요", "여기 확인 한 번만요", "답변을 기다리고 있어요", "확인해 주시면 이어갈게요"],
+  done: ["답변을 남겼어요", "새 답변 도착했어요", "대화에 답변 두고 왔어요", "답변 확인해 주세요"],
+  idle: ["다음 업무 대기", "다음 일 받을 준비됐어요", "다음 타자 주세요", "부르면 바로 여기요", "새 요청 기다리는 중", "준비됐어요, 말씀하세요"]
+};
+function teamPresence(status, taskState, teamId = "", observedAt = 0) {
+  const titles = PRESENCE_TITLES[status];
+  const offset = Array.from(String(teamId)).reduce((value, char) => (value * 31 + char.charCodeAt(0)) >>> 0, 0);
+  const slot = Number.isFinite(observedAt) ? Math.floor(observedAt / 45) : 0;
+  const title = titles?.[(offset + slot) % titles.length];
   if (status === "working") return {
-    title: "업무 중",
+    title,
     detail: ({ launching: "업무를 시작할 준비 중이에요", submitted: "전달된 요청을 확인하고 있어요", running: "맡은 업무를 진행하고 있어요" })[taskState] ?? "대화에서 응답을 준비하고 있어요"
   };
-  if (status === "blocked") return { title: "확인 부탁드려요", detail: "입력이나 승인을 기다리고 있어요" };
-  if (status === "done") return { title: "답변을 남겼어요", detail: "대화를 열어 확인해 주세요" };
+  if (status === "blocked") return { title, detail: "입력이나 승인을 기다리고 있어요" };
+  if (status === "done") return { title, detail: "대화를 열어 확인해 주세요" };
   if (status === "idle") return {
-    title: "다음 업무 대기",
+    title,
     detail: taskState === "awaiting_review" ? "검토 의견을 기다리고 있어요" : taskState === "queued" ? "배정된 요청이 대기 중이에요" : "다음 요청을 기다리고 있어요"
   };
   return { title: "상태 확인 필요", detail: "지금은 상태를 확인할 수 없어요" };
@@ -360,7 +370,7 @@ export default class TeamOperations extends View {
               run("agent.focus", { terminal: team.terminal });
             })
             .child(div().whitespace_nowrap().font_semibold().text_size(14).child(display(team.label)))
-            .child(div().whitespace_nowrap().text_size(11).text_color(t.muted).child(teamPresence(status, team.ledger_state).title))))
+            .child(div().whitespace_nowrap().text_size(11).text_color(t.muted).child(teamPresence(status, team.ledger_state, team.id, data?.observed_at).title))))
           .when(matches.length === 0, el => el.child(div().p(10).text_size(12).text_color(t.muted).child("해당 상태의 팀장이 없습니다."))));
       return Popover.new(`status-popover-${status}`).open(open).anchor("top_left").overlay_closable(true)
         .on_open_change((next, cx) => this.setStatusOpen(status, next, cx))
@@ -372,7 +382,7 @@ export default class TeamOperations extends View {
     const summary = `업무 중 ${appCounts.working} · 확인 필요 ${appCounts.blocked}`;
     const coordinator = data?.coordinator;
     const teamCard = team => {
-      const live = liveFor(team), status = live.status, presence = teamPresence(status, team.ledger_state);
+      const live = liveFor(team), status = live.status, presence = teamPresence(status, team.ledger_state, team.id, data?.observed_at);
       const activate = cx => run("agent.focus", { terminal: team.terminal });
       return v_flex().id(`rail-${team.id}`).flex_1().min_w(210).h(OVERVIEW.card).gap(3).p(8).rounded(7).hover(s => s.bg(t.raised))
         .when(live.present, el => el.cursor_pointer().on_click((_e, cx) => activate(cx)))
