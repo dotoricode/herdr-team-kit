@@ -240,7 +240,11 @@ export default class TeamOperations extends View {
     this.restoring = false;
     this.sendRequestId = null;
     const prefix = `${this.config?.state ?? ""}|${card.kind}|${card.id}|`;
-    this.preservedKeys = [...DRAFTS.keys()].filter(k => k.startsWith(prefix) && k !== key && (DRAFTS.get(k).comment?.trim() || DRAFTS.get(k).other?.trim())).slice(-3);
+    this.preservedKeys = [...DRAFTS.keys()].filter(k => {
+      if (!k.startsWith(prefix) || k === key) return false;
+      const draft = DRAFTS.get(k);
+      return Boolean(draft && (draft.comment.trim() || draft.other.trim()));
+    }).slice(-3);
   }
 
   editedAfterSend() {
