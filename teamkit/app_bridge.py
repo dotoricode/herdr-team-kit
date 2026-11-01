@@ -1,6 +1,7 @@
 """Local app boundary: independent GUI ledger, read-only views, explicit actions."""
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -463,15 +464,20 @@ def card_send(config_path, state, binding_path, send_json):
         journal(state, payload['client_request_id'], 'not_sent', {'reason': refusal})
         return {'message': '보내지 않았습니다. ' + refusal, 'request': summary(folder)}
     try:
-        created = subprocess.run(['hc', 'run', '--json', '--bg', '--no-parent', '--no-notify', '--name', 'card-send-' + payload['client_request_id'][:12],
+        created = subprocess.run(['hc', 'run', '--json', '--bg', '--no-parent', '--no-notify', '--name', 'card-send-' + hashlib.sha256(payload['client_request_id'].encode()).hexdigest()[:16],
                                   '--', sys.executable, str(Path(__file__).resolve().parent.parent / 'teamkit_app.py'),
                                   '--config', str(Path(config_path).resolve()), '--state', str(Path(state).resolve()),
                                   '--bindings', str(Path(binding_path).resolve()), 'card-send-job', '--request', str(folder / 'request.json')],
                                  capture_output=True, text=True, timeout=10, check=True)
         if not re.fullmatch(r't[0-9a-z]+', json.loads(created.stdout).get('address', '')):
             raise ValueError('controller identity unavailable')
-    except (OSError, ValueError, subprocess.SubprocessError):
-        journal(state, payload['client_request_id'], 'unknown', {'reason': '전송 제어 프로세스 시작 결과를 확인하지 못했습니다. 자동으로 다시 보내지 않습니다.'})
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        reason = '전송 제어 프로세스 시작 결과를 확인하지 못했습니다. 자동으로 다시 보내지 않습니다.'
+        if isinstance(error, subprocess.CalledProcessError) and isinstance(error.stderr, str):
+            detail = clean(error.stderr)[:300]
+            if detail:
+                reason += ' hc: ' + detail
+        journal(state, payload['client_request_id'], 'unknown', {'reason': reason})
         return {'message': '전송 시작 결과가 불명입니다. 확인 전에는 다시 보내지 않습니다.', 'request': summary(folder)}
     return {'message': '전송 요청을 접수했습니다. 전송 확인은 승인·실행·완료와 별개입니다.', 'request': summary(folder)}
 

@@ -327,6 +327,43 @@ class DeliveryBridgeTests(FeedbackFixture):
         self.assertEqual(out['request']['state'],'not_sent');self.assertIn('공식 담당 작업 연결',out['request']['reason'])
         self.assertEqual(self.runs,[])
 
+    def strict_controller(self):
+        """Apply the installed hc's own name rule (1-32 of a-z 0-9 - _, starting alphanumeric, not shaped like an address)."""
+        import re
+        self.runs=[]
+        def fake(command,*args,**kwargs):
+            if command and command[0]=='hc':
+                self.runs.append(command)
+                name=command[command.index('--name')+1]
+                if not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,31}',name) or re.fullmatch(r't[0-9a-z]+',name):
+                    raise subprocess.CalledProcessError(2,command,stderr='{"error":{"kind":"invalid_params","message":"bad name \\"'+name+'\\""}}')
+                return subprocess.CompletedProcess(command,0,stdout='{"address":"t7"}',stderr='')
+            return REAL_RUN(command,*args,**kwargs)
+        return patch('teamkit.app_bridge.subprocess.run',side_effect=fake)
+
+    def test_controller_name_follows_hc_rule_for_every_allowed_request_id(self):
+        from teamkit.app_bridge import card_send
+        names=set()
+        # Uppercase is a valid request ID; the first 12 characters of two IDs may also be identical.
+        for rid in ('GUI-TEST-20261101-A1','gui-mo7k2x9a-abcd1234','gui-mo7k2x9a-efgh5678'):
+            with self.hc(),self.strict_controller():
+                out=card_send(self.config,self.state,self.links,json.dumps(self.fields(client_request_id=rid,comment='이름 규칙 '+rid)))
+            self.assertEqual(out['request']['state'],'pending',rid)
+            names.add(self.runs[0][self.runs[0].index('--name')+1])
+            self.assertEqual(self.sent,[])
+        self.assertEqual(len(names),3)
+
+    def test_controller_start_failure_keeps_a_bounded_hc_reason_and_never_resends(self):
+        error=subprocess.CalledProcessError(2,['hc'],stderr='bad name '+'x'*5000)
+        with self.hc(),self.controller(error):
+            from teamkit.app_bridge import card_send
+            out=card_send(self.config,self.state,self.links,json.dumps(self.fields()))
+        self.assertEqual(out['request']['state'],'unknown');self.assertEqual(self.sent,[])
+        reason=out['request']['reason'];self.assertIn('bad name',reason);self.assertLess(len(reason),600)
+        with self.hc(),self.controller():
+            again=card_send(self.config,self.state,self.links,json.dumps(self.fields()))
+        self.assertEqual(again['request']['state'],'unknown');self.assertEqual(self.runs,[]);self.assertEqual(self.sent,[])
+
     def test_stale_card_is_rejected_before_any_record_exists(self):
         fields=self.fields();(self.root/'private-plans/W1/r1/plan.md').write_text('설계가 바뀌었습니다')
         from teamkit.app_bridge import card_send
