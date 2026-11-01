@@ -472,7 +472,7 @@ export default class TeamOperations extends View {
             .child(div().whitespace_nowrap().child(`사용자 답변 필요 ${appCounts.blocked}`))
             .child(div().whitespace_nowrap().text_color(t.muted).child(`미확인 ${unknownTeams}개`))
             .child(div().whitespace_nowrap().text_color(coordinator?.state === "recovering" ? t.working : t.muted).child(`총괄 · ${coordinatorStateText}`)))
-          .when(coordinator?.state !== "live" && Boolean(coordinator?.reason), el => el.child(words(`총괄 상태 · ${display(coordinator.reason)}`).text_size(11).text_color(t.muted))))
+          .when(Boolean(coordinator?.reason) && !(coordinator?.state === "live" && ["GUI 체크포인트에서 새 총괄 대화를 열었습니다. 제품 업무는 자동 재개하지 않았습니다.", "GUI 체크포인트를 사용하는 총괄입니다."].includes(coordinator.reason)), el => el.child(words(`총괄 상태 · ${display(coordinator.reason)}`).text_size(11).text_color(t.muted))))
         .when(waiting.length > 0, el => el.child(v_flex().w_full().flex_none().gap(2)
           .child(div().whitespace_nowrap().text_size(11).font_semibold().text_color(t.muted).child("대기 이유"))
           .children(waiting.map((reason, index) => words(`⚠ ${index + 1} · ${reason}`).text_size(11).text_color(t.dim)))))
