@@ -139,7 +139,7 @@ export default class TeamOperations extends View {
     try {
       const args = pending.kind === "approve"
         ? ["--work", String(doc.id), "--revision", String(doc.revision), "--digest", String(doc.digest), "--confirmed"]
-        : ["--task", String(pending.value.id), "--owner", String(pending.value.owner), "--work", String(doc.id), "--revision", String(doc.revision), "--digest", String(doc.digest), "--confirmed"];
+        : ["--task", String(pending.value.id), "--owner", String(pending.value.owner), "--attempt", String(pending.value.attempt), "--work", String(doc.id), "--revision", String(doc.revision), "--digest", String(doc.digest), "--confirmed"];
       const r = await this.args(pending.kind, args);
       if (r.code !== 0) throw new Error(r.stderr || `요청한 작업이 실패했습니다 (종료 코드 ${r.code}).`);
       const out = JSON.parse(r.stdout); this.message = String(out.message ?? "처리가 끝났습니다.");
@@ -175,11 +175,13 @@ export default class TeamOperations extends View {
         .child(div().truncate().text_size(11).text_color(t.muted).child(`장부 · ${display(team.ledger_state)}`));
     };
     const overview = (getModProps()?.role ?? this.viewProps.role) === "overview";
-    if (overview) return v_flex().id("team-operations-overview").h(146).flex_none().gap(4).px(8).py(5).bg(t.background).text_color(t.foreground)
+    if (overview) return v_flex().id("team-operations-overview").w_full().h(146).flex_none().gap(4).px(8).py(5).bg(t.background).text_color(t.foreground)
+      .font_family(this.config?.overview_font || settings().font_family || "monospace").text_size(13)
       .child(h_flex().h(34).flex_none().items_center().gap(10)
         .child(div().font_semibold().child("팀 운영"))
         .child(div().flex_1().text_size(12).text_color(t.muted).child(summary))
-        .child(button("open-dashboard", "전체 현황", () => run("tab.select", { id: this.config?.dashboard_tab }), !this.config?.dashboard_tab)))
+        .child(button("open-coordinator", "총괄", () => run("agent.focus", { terminal: this.config?.coordinator_terminal }), !this.config?.coordinator_terminal).text_size(12))
+        .child(button("open-dashboard", "전체 현황", () => run("tab.select", { id: this.config?.dashboard_tab }), !this.config?.dashboard_tab).text_size(12)))
       .child(h_flex().id("team-operations-rail").w_full().h(98).min_w(0).gap(6).overflow_x_scrollbar().children(teams.map(teamCard)));
 
     const teamCards = teams.map(team => {

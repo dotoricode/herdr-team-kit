@@ -107,3 +107,19 @@ class AppBridgeTests(test_cli.Fixture):
             self.call('work','approve','W1','--user-approved','--approval-reference','selected old version',
                       '--expected-revision','2','--expected-digest','0'*64)
         self.assertEqual(self.call('work','show','W1')['phase'],'awaiting_approval')
+
+    def test_stale_owner_is_rejected_before_native_or_wake(self):
+        self.create();before=self.call('events','T1')
+        with patch('teamkit.core_runtime.require_managed') as native:
+            with self.assertRaises(ValueError):
+                self.call('tell','T1','--message-file',str(self.root/'goal.txt'),'--expected-owner','previous')
+            native.assert_not_called()
+        self.assertEqual(before,self.call('events','T1'))
+
+    def test_stale_attempt_is_rejected_before_dispatch_admission(self):
+        self.create();before=self.call('events','T1')
+        with patch('teamkit.providers.identity') as identity:
+            with self.assertRaises(ValueError):
+                self.call('dispatch','T1','--expected-attempt','7')
+            identity.assert_not_called()
+        self.assertEqual(before,self.call('events','T1'))

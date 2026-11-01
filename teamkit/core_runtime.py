@@ -100,7 +100,7 @@ class CoreRuntime:
             raise RuntimeError('Core terminal owner/process changed; preserve it and inspect')
         status = native.get('status') or {}
         word = status.get('state', 'unknown')
-        if ready and (word != 'idle' or status.get('app') != self.task.get('provider')):
+        if ready and (word not in ('idle','done') or status.get('app') != self.task.get('provider')):
             raise RuntimeError('Core agent is not idle and ready; inspect before sending')
         return native
 
@@ -150,7 +150,7 @@ class CoreRuntime:
         status = native.get('status') or {}
         cwd = foreground.get('cwd') or native.get('cwd')
         if (native.get('address') != address or native.get('state') != 'live'
-                or status.get('state') != 'idle' or status.get('app') != spec['kind']
+                or status.get('state') not in ('idle','done') or status.get('app') != spec['kind']
                 or foreground.get('name') != spec['kind']
                 or type(foreground.get('pid')) is not int or foreground['pid'] <= 0
                 or any(key in labels for key in ('teamkit.owner','teamkit.task','teamkit.name'))
@@ -204,13 +204,16 @@ class CoreRuntime:
         reported = native.get('status') or {}
         status = reported.get('state', 'unknown') if reported.get('app') == self.task.get('provider') else 'unknown'
         return {'agent':{'name':args[2], 'agent_status':status, 'pane_id':native['address'],
-                         'interactive_ready':status == 'idle', 'completion_seq':native.get('turn')}}
+                         'interactive_ready':status in ('idle','done'), 'completion_seq':native.get('turn')}}
 
     def prompt(self, name, text):
         require_managed()
         native = self._native(name, ready=True)
         address = native['address']
-        sent = _call('send', '--json', '--if', 'idle', '--wait', '--timeout', '30', address, text)
+        # hc has an atomic --if idle guard, but no --if done. For a checked,
+        # settled done agent use ordinary send; never force a blocked program.
+        condition = ['--if','idle'] if native['status']['state']=='idle' else []
+        sent = _call('send', '--json', *condition, '--wait', '--timeout', '30', address, text)
         waited = sent.get('wait') or {}
         if (sent.get('started') is not True or waited.get('terminal') != address
                 or waited.get('ended') is not True or waited.get('reason') != 'status'

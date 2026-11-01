@@ -49,3 +49,8 @@ herdr-app shot /tmp/team-operations.png
 ## 검증 한계
 
 단위 검사의 subprocess 대역은 argv/상태·소유권 계약을 확인합니다. 실제 프로필·core·모델·receipt·앱 렌더는 별도 통합 검증이 필요합니다. `hc label`에는 compare-and-set이 없으므로 협력 controller의 로컬 잠금과 변경 후 identity 대조를 사용하며 외부 직접 label 변경과의 원자성을 보장하지 않습니다. 장부 밖의 직접 실행 작업과 다른 실행 환경의 활성 작업은 이 admission이 통합 제어하지 않습니다.
+
+
+상단 운영 바는 같은 소스를 `team-overview`라는 별도 mod 이름으로 설치하고 `props.role: "overview"`로 배치할 수 있습니다. 전체 현황은 `team-operations`를 사용해 명령 수신 범위를 분리합니다. `local.json`의 `dashboard_tab`, `coordinator_terminal`, `overview_font`로 이동 대상과 운영 바 폰트를 지정합니다. 전체 현황의 별도 입력 설정은 pane의 `props.local` 경로로 선택할 수 있습니다.
+
+재개 요청은 선택한 owner와 attempt를 controller의 CLI까지 전달합니다. `tell --expected-owner ... --expected-attempt ...`와 `dispatch --expected-attempt ...`는 바뀐 선택을 장부 변경 전에 거절합니다. core의 정상 `done`은 대기 상태로 허용합니다. 설치된 hc에는 `--if done`이 없어 이 경우 identity/상태 대조 뒤 일반 send를 사용하며, blocked를 강제로 통과시키거나 전송 실패를 반복하지 않습니다. 외부 직접 입력과의 원자성은 제공하지 않습니다.

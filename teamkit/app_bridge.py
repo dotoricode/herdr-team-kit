@@ -133,11 +133,11 @@ def document_view(config_path, state, ident):
     # A second committed snapshot detects revisions changed while reading.
     if next((w for w in readonly_snapshot(state)['works'] if w['id'] == ident), None) != work:
         raise ValueError('문서가 바뀌었습니다. 다시 읽어 주세요.')
-    resumable = [{'id':t['id'], 'owner':t['owner']} for t in data['tasks']
+    resumable = [{'id':t['id'], 'owner':t['owner'], 'attempt':t.get('attempt_count',0)} for t in data['tasks']
                  if t.get('work_id') == ident and t['state'] == 'ready' and t.get('owner')
                  and t.get('runtime', {}).get('backend') == 'core' and t['role'] == 'leader']
     if work.get('approval'):
-        resumable += [{'id':t['id'], 'owner':'-'} for t in data['tasks']
+        resumable += [{'id':t['id'], 'owner':'-', 'attempt':t.get('attempt_count',0)} for t in data['tasks']
                       if t.get('work_id') == ident and t['state'] == 'handed_off' and not t.get('owner')
                       and t.get('runtime',{}).get('backend') == 'core' and t.get('checkpoint')
                       and t['role'] != 'leader']
@@ -166,11 +166,11 @@ def approve(config_path, state, binding_path, ident, revision, digest, confirmed
     return {'message':'설계 v'+str(result['revision'])+' 승인 기록을 저장했습니다. 작업을 자동 배정하지 않습니다.'}
 
 
-def resume(config_path, state, binding_path, ident, revision, digest, task, owner, confirmed):
+def resume(config_path, state, binding_path, ident, revision, digest, task, owner, confirmed, attempt=None):
     shown = selected(config_path, state, binding_path, ident, revision, digest, confirmed)
-    if {'id':task, 'owner':owner} not in shown['resumable']:
+    if {'id':task, 'owner':owner, 'attempt':attempt} not in shown['resumable']:
         raise ValueError('재개할 GUI 작업과 현재 소유권을 다시 확인하세요.')
-    return start_resume(config_path, state, binding_path, ident, revision, digest, task, owner)
+    return start_resume(config_path, state, binding_path, ident, revision, digest, task, owner, attempt)
 
 
 def private_json(path, value):
@@ -179,7 +179,7 @@ def private_json(path, value):
         json.dump(value, out, ensure_ascii=False, indent=2)
 
 
-def start_resume(config_path, state, binding_path, ident, revision, digest, task, owner):
+def start_resume(config_path, state, binding_path, ident, revision, digest, task, owner, attempt=None):
     folder = Path(state).resolve().parent/'app-actions'
     folder.mkdir(mode=0o700, exist_ok=True)
     lock = os.open(folder/'.enqueue.lock', os.O_CREAT | os.O_WRONLY, 0o600)
@@ -190,19 +190,19 @@ def start_resume(config_path, state, binding_path, ident, revision, digest, task
             if previous.is_dir() and request.exists() and not (previous/'result.json').exists():
                 if json.loads(request.read_text()).get('task') == task:
                     raise ValueError('이전 재개 결과를 확인한 뒤 진행하세요.')
-        return enqueue_resume(folder, config_path, state, binding_path, ident, revision, digest, task, owner)
+        return enqueue_resume(folder, config_path, state, binding_path, ident, revision, digest, task, owner, attempt)
     except BlockingIOError as error:
         raise ValueError('다른 재개 요청을 기록 중입니다. 상태를 먼저 확인하세요.') from error
     finally:
         os.close(lock)
 
 
-def enqueue_resume(folder, config_path, state, binding_path, ident, revision, digest, task, owner):
+def enqueue_resume(folder, config_path, state, binding_path, ident, revision, digest, task, owner, attempt):
     job = folder/uuid.uuid4().hex
     job.mkdir(mode=0o700)
     packet = {'config':str(Path(config_path).resolve()), 'state':str(Path(state).resolve()),
               'bindings':str(Path(binding_path).resolve()), 'work':ident, 'revision':revision,
-              'digest':digest, 'task':task, 'owner':owner}
+              'digest':digest, 'task':task, 'owner':owner, 'attempt':attempt}
     request = job/'request.json'
     private_json(request, packet)
     script = str(Path(__file__).resolve().parent.parent/'teamkit_app.py')
@@ -229,13 +229,14 @@ def resume_job(path):
         packet = json.loads(path.read_text())
         resume_check = selected(packet['config'], packet['state'], packet['bindings'],
                                 packet['work'], packet['revision'], packet['digest'], True)
-        if {'id':packet['task'], 'owner':packet['owner']} not in resume_check['resumable']:
+        if {'id':packet['task'], 'owner':packet['owner'], 'attempt':packet['attempt']} not in resume_check['resumable']:
             raise ValueError('재개 소유권이 바뀌었습니다.')
         from .__main__ import parser, run
         message = path.parent/'message.txt'
         message.write_text('사용자가 확인한 동일 설계의 허용 범위에서 작업을 이어가세요. 새 계약 변경이나 구현 승인을 추정하지 마세요. 기존 owner와 체크포인트를 유지하세요.')
         message.chmod(0o600)
-        command = ['dispatch',packet['task']] if packet['owner'] == '-' else ['tell',packet['task'],'--message-file',str(message)]
+        command = ['dispatch',packet['task']] if packet['owner'] == '-' else ['tell',packet['task'],'--message-file',str(message),'--expected-owner',packet['owner']]
+        command += ['--expected-attempt',str(packet['attempt'])]
         result = run(parser().parse_args(['--config',packet['config'],'--state',packet['state'], *command]))
         private_json(path.parent/'result.json', {'state':result['state'], 'at':time.time()})
     except Exception as error:
@@ -251,13 +252,14 @@ def main():
     parser.add_argument('action', choices=('view','document','approve','resume','resume-job'))
     parser.add_argument('--work'); parser.add_argument('--revision', type=int); parser.add_argument('--digest')
     parser.add_argument('--task'); parser.add_argument('--owner'); parser.add_argument('--request')
+    parser.add_argument('--attempt',type=int)
     parser.add_argument('--confirmed', action='store_true')
     args = parser.parse_args()
     try:
         if args.action == 'view': result = view(args.config, args.state, args.bindings)
         elif args.action == 'document': result = document_view(args.config, args.state, args.work)
         elif args.action == 'approve': result = approve(args.config, args.state, args.bindings, args.work, args.revision, args.digest, args.confirmed)
-        elif args.action == 'resume': result = resume(args.config, args.state, args.bindings, args.work, args.revision, args.digest, args.task, args.owner, args.confirmed)
+        elif args.action == 'resume': result = resume(args.config, args.state, args.bindings, args.work, args.revision, args.digest, args.task, args.owner, args.confirmed, args.attempt)
         else: resume_job(args.request); result = {'message':'재개 확인을 마쳤습니다.'}
         print(json.dumps(result, ensure_ascii=False))
     except Exception as error:

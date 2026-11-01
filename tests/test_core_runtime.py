@@ -82,6 +82,14 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(sends),1)
         self.assertIn('t8',sends[0]);self.assertEqual(sends[0][-1],'one task; $(never shell)')
         self.assertIn('--if',sends[0]);self.assertEqual(result['wait']['reason'],'status')
+    def test_done_is_a_settled_state_and_sends_once_without_force(self):
+        self.hc.agent=terminal(status='done')
+        CoreRuntime(self.task).prompt('tk-owner','next bounded task')
+        sends=[a for a,_ in self.hc.calls if a[:2]==['hc','send']]
+        self.assertEqual(len(sends),1)
+        self.assertNotIn('--force',sends[0])
+        self.assertNotIn('--if',sends[0])
+
     def test_send_timeout_not_started_and_blocked_are_not_success(self):
         for result in ({'started':False,'wait':{**self.hc.wait,'reason':'not_started'}},
                        {'started':True,'wait':{**self.hc.wait,'ended':False,'reason':'timeout'}},

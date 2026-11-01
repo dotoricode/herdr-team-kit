@@ -75,6 +75,7 @@ def parser():
     x.add_argument('--work', help='parent product work ID; binds the exact design revision')
     x = commands.add_parser('dispatch')
     x.add_argument('task')
+    x.add_argument('--expected-attempt',type=int)
     x.add_argument('--terminal',help='adopt an unowned idle core leader terminal without restarting it')
     for cmd in ('show', 'events', 'plan'):
         x = commands.add_parser(cmd); x.add_argument('task')
@@ -84,6 +85,8 @@ def parser():
     x = commands.add_parser('retire');x.add_argument('task');x.add_argument('--owner',required=True)
     x.add_argument('--writer-stopped',action='store_true',required=True);x.add_argument('--evidence-file',required=True)
     x = commands.add_parser('tell'); x.add_argument('task'); x.add_argument('--message-file', required=True)
+    x.add_argument('--expected-owner')
+    x.add_argument('--expected-attempt',type=int)
     for cmd in ('handoff', 'complete'):
         x = commands.add_parser(cmd); x.add_argument('task'); x.add_argument('--owner', required=True)
         x.add_argument('--evidence-file', required=True)
@@ -196,6 +199,11 @@ def run(args):
                 revision=work['revision']
             return store.create(args.task, args.team, args.role, str(root), base, Path(args.goal_file).read_text(), kind, classification(args.role, args.work_kind, args.risk),args.work,digest,revision)
         task = store.get(args.task)
+        if args.command in ('dispatch','tell'):
+            if args.expected_attempt is not None and task.get('attempt_count',0)!=args.expected_attempt:
+                raise ValueError('selected task attempt changed; inspect before sending')
+            if args.command=='tell' and args.expected_owner is not None and task.get('owner')!=args.expected_owner:
+                raise ValueError('selected task owner changed; inspect before sending')
         if args.command == 'plan':
             return execution_policy(config, task)
         if args.command == 'authorize':
@@ -328,7 +336,7 @@ def run(args):
             check_task(config,store,task)
             status = runtime.call('agent','get',task['runtime']['name'])
             agent = status.get('agent', status)
-            allowed = ('idle',) if backend == 'core' else ('idle','done')
+            allowed = ('idle','done')
             if agent.get('agent_status') not in allowed:
                 raise KitError('leader is not idle; inspect before sending')
             store.wake(args.task, task['owner'], approval_config=config)
