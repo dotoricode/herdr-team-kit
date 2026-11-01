@@ -244,7 +244,7 @@ export default class TeamOperations extends View {
       return { agent, terminal, status, present: Boolean(team.terminal && (agent || terminal)) };
     };
     const appCounts = teams.reduce((n, team) => { const s = liveFor(team).status; if (s === "working") n.working++; if (s === "blocked") n.blocked++; return n; }, { working: 0, blocked: 0 });
-    const unknownTeams = teams.filter(team => !STATUS_TEXT[liveFor(team).status]).length;
+    const unknownTeams = teams.filter(team => { const status = liveFor(team).status; return status === "unknown" || status === "missing" || !STATUS_TEXT[status]; }).length;
     const waiting = [...new Set([...teams.map(x => x.reason), ...works.map(x => x.reason), ...(data?.holds ?? []).map(x => x.reason)]
       .filter(Boolean).map(display))];
     const summary = `실행 ${appCounts.working} · 사용자 답변 필요 ${appCounts.blocked}`;
