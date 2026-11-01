@@ -13,7 +13,7 @@ import uuid
 from .config import load
 from .dashboard import model, clean
 from .workflow import document, snapshot
-from .app_feedback import card_detail, card_answer, decorate_feedback
+from .app_feedback import card_detail, card_answer, decorate_feedback, question_set, validate_send
 
 
 def core_read():
@@ -314,6 +314,216 @@ def resume_job(path):
         raise
 
 
+class Refusal(ValueError):
+    """A known refusal before anything reached the terminal: recorded as not_sent."""
+
+
+# RuntimeError texts raised by tell/CoreRuntime strictly before `hc send`; anything else is unknown.
+PRE_SEND = ('leader is not idle', 'Core agent is not idle and ready', 'Core terminal owner/process changed',
+            'no matching terminal identity', 'requires a genuine HC_TERMINAL_ID', 'Core controller terminal is unavailable',
+            'task runtime differs from configured backend')
+
+
+def leader_binding(linked, data, team):
+    """The one current GUI-ledger leader task bound to the team's official terminal."""
+    setting = linked['teams'].get(team)
+    if not isinstance(setting, dict) or not setting.get('terminal'):
+        raise Refusal('담당 팀의 공식 터미널 연결이 없습니다.')
+    found = [t for t in data['tasks'] if t.get('team') == team and t.get('role') == 'leader' and t.get('owner')
+             and t.get('runtime', {}).get('backend') == 'core' and t['runtime'].get('terminal') == setting['terminal']]
+    if len(found) != 1:
+        raise Refusal('공식 담당 터미널과 일치하는 현재 담당 팀장 작업이 하나가 아닙니다(' + str(len(found)) + '건). 목적지를 추정하지 않습니다.')
+    return setting, found[0]
+
+
+def _card_team(data, kind, ident, task=None):
+    if kind == 'work':
+        work = next((w for w in data['works'] if w['id'] == ident), None)
+        if work is None:
+            raise Refusal('GUI 작업 기록에 없는 작업입니다.')
+        return work['team']
+    if task is None:
+        raise Refusal('운영 환경 카드는 공식 담당 작업 연결이 없어 보내지 않습니다.')
+    return task['team']
+
+
+def destination(config_path, state, binding_path, kind, ident):
+    """Resolve and verify the single official recipient right now, or refuse."""
+    config = load(config_path)
+    linked = bindings(binding_path, config)
+    if linked.get('actions_enabled') is not True:
+        raise Refusal('답변·전달 권한이 꺼져 있습니다.')
+    data = readonly_snapshot(state)
+    team = _card_team(data, kind, ident)
+    setting, task = leader_binding(linked, data, team)
+    runtime = task['runtime']
+    if task['state'] != 'ready' or runtime.get('retire_requested') or runtime.get('identity_checked') is not True:
+        raise Refusal('담당 팀장이 수신 가능한 대기 상태가 아닙니다(작업 상태: ' + str(task['state']) + '). 새 요청이나 강제 전달은 하지 않습니다.')
+    from .core_runtime import CoreRuntime
+    from .runtime import RuntimeError as KitError
+    try:
+        CoreRuntime(task)._native(runtime.get('name'), ready=True)
+    except (KitError, OSError, ValueError) as error:
+        raise Refusal('담당 팀장의 실행 신원이나 대기 상태를 확인하지 못했습니다: ' + str(error)) from error
+    return {'team': team, 'label': setting.get('label', team), 'task': task['id'], 'owner': task['owner'],
+            'attempt': task.get('attempt_count', 0), 'terminal': runtime['terminal'], 'name': runtime.get('name'),
+            'native_pid': runtime.get('native_pid')}
+
+
+def verify_author(config_path, state, binding_path, kind, ident, task_id, owner, attempt):
+    """Only the current official leader, running in its own genuine managed terminal, may write a question."""
+    config = load(config_path)
+    linked = bindings(binding_path, config)
+    data = readonly_snapshot(state)
+    task = next((t for t in data['tasks'] if t['id'] == task_id), None)
+    if task is None:
+        raise ValueError('작성자 작업을 GUI 작업 기록에서 찾지 못했습니다.')
+    team = _card_team(data, kind, ident, task)
+    _, leader = leader_binding(linked, data, team)
+    if (leader['id'], leader['owner'], leader.get('attempt_count', 0)) != (task_id, owner, attempt) or leader['state'] not in ('ready', 'running'):
+        raise ValueError('질문은 현재 담당 팀장 작업의 소유자·시도 번호로만 작성할 수 있습니다.')
+    from .core_runtime import CoreRuntime, require_managed
+    if require_managed() != leader['runtime']['terminal']:
+        raise ValueError('질문은 담당 팀장 자신의 관리 터미널에서만 작성할 수 있습니다.')
+    CoreRuntime(leader)._native(leader['runtime'].get('name'))
+    return {'task': task_id, 'owner': owner, 'attempt': attempt, 'terminal': leader['runtime']['terminal']}
+
+
+def card_question_set(config_path, state, binding_path, kind, ident, task, owner, attempt, question_file, expected):
+    if not all((task, owner)) or attempt is None or not question_file:
+        raise ValueError('작성 task·owner·attempt와 질문 파일이 필요합니다.')
+    path = Path(question_file)
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > 16384:
+        raise ValueError('질문 파일은 16KB 이하의 일반 파일이어야 합니다.')
+    author = verify_author(config_path, state, binding_path, kind, ident, task, owner, attempt)
+    return question_set(config_path, state, binding_path, kind, ident, author, json.loads(path.read_text()), expected)
+
+
+def _message(request, shown, question):
+    payload = request['payload']
+    lines = ['GUI 사용자 의견 전달입니다. 요청 ID ' + request['client_request_id'],
+             '이 메시지는 사용자가 화면에서 남긴 수정 의견이며 설계 승인이나 구현 허가가 아닙니다.',
+             '카드 ' + payload['kind'] + ':' + payload['work_id'] + ' · 표시 버전 ' + payload['card_revision'][:12]
+             + ' · 문서 v' + str(payload['document_revision']) + ' ' + str(payload['document_digest'])[:12]]
+    if question:
+        option = next((o for o in question['options'] if o['option_id'] == payload['option_id']), None)
+        lines += ['질문 ' + question['question_id'] + ' v' + str(question['question_revision']) + ': ' + question['prompt'],
+                  '선택: ' + (option['label'] + ' (' + option['option_id'] + ')' if option else '직접 입력')]
+        if payload['other_text']:
+            lines.append('직접 입력: ' + payload['other_text'])
+    else:
+        lines.append('의견 유형: ' + {'changes': '수정이 필요합니다', 'defer': '나중에 확인합니다'}[payload['choice']])
+    if payload['comment']:
+        lines.append('의견: ' + payload['comment'])
+    lines.append('이 요청은 한 번만 전달됩니다. 자동 재전송은 없습니다.')
+    return '\n'.join(lines)
+
+
+def _stored_matches(stored, request):
+    """Same-ID lookup: every supplied field must equal the stored normalized payload."""
+    for key, value in request.items():
+        have = stored.get(key)
+        if isinstance(value, str) and key in ('other_text', 'comment'):
+            value = value.strip()
+        if (have or None) != (value or None):
+            return False
+    return True
+
+
+def card_send(config_path, state, binding_path, send_json):
+    from .app_delivery import digest, record as journal, request_dir, read_request, submit, summary
+    try:
+        request = json.loads(send_json)
+    except ValueError as error:
+        raise ValueError('전송 요청 형식을 확인하세요.') from error
+    rid = request.get('client_request_id') if isinstance(request, dict) else None
+    try:
+        existing = request_dir(state, rid)
+    except ValueError:
+        existing = None
+    if existing is not None:
+        stored = read_request(existing)
+        if not _stored_matches(stored['payload'], request):
+            raise ValueError('같은 요청 ID에 다른 내용이 들어왔습니다. 다시 보내지 않았습니다.')
+        return {'message': '이미 접수된 요청입니다. 다시 보내지 않고 기록된 결과를 보여 줍니다.', 'request': summary(existing)}
+    payload, _, _ = validate_send(config_path, state, binding_path, request)
+    refusal, dest = None, None
+    try:
+        dest = destination(config_path, state, binding_path, payload['kind'], payload['work_id'])
+    except Refusal as error:
+        refusal = str(error)
+    content = {k: v for k, v in payload.items() if k != 'client_request_id'}
+    seen, created = submit(state, {'schema_version': 1, 'client_request_id': payload['client_request_id'], 'payload': payload,
+                                    'payload_hash': digest(payload), 'content_hash': digest(content), 'destination': dest,
+                                    'created_at': time.time()})
+    if not created:
+        return {'message': '이미 접수된 요청입니다. 다시 보내지 않았습니다.', 'request': seen}
+    folder = request_dir(state, payload['client_request_id'])
+    if refusal:
+        journal(state, payload['client_request_id'], 'not_sent', {'reason': refusal})
+        return {'message': '보내지 않았습니다. ' + refusal, 'request': summary(folder)}
+    try:
+        created = subprocess.run(['hc', 'run', '--json', '--bg', '--no-parent', '--no-notify', '--name', 'card-send-' + payload['client_request_id'][:12],
+                                  '--', sys.executable, str(Path(__file__).resolve().parent.parent / 'teamkit_app.py'),
+                                  '--config', str(Path(config_path).resolve()), '--state', str(Path(state).resolve()),
+                                  '--bindings', str(Path(binding_path).resolve()), 'card-send-job', '--request', str(folder / 'request.json')],
+                                 capture_output=True, text=True, timeout=10, check=True)
+        if not re.fullmatch(r't[0-9a-z]+', json.loads(created.stdout).get('address', '')):
+            raise ValueError('controller identity unavailable')
+    except (OSError, ValueError, subprocess.SubprocessError):
+        journal(state, payload['client_request_id'], 'unknown', {'reason': '전송 제어 프로세스 시작 결과를 확인하지 못했습니다. 자동으로 다시 보내지 않습니다.'})
+        return {'message': '전송 시작 결과가 불명입니다. 확인 전에는 다시 보내지 않습니다.', 'request': summary(folder)}
+    return {'message': '전송 요청을 접수했습니다. 전송 확인은 승인·실행·완료와 별개입니다.', 'request': summary(folder)}
+
+
+def card_send_status(state, rid):
+    from .app_delivery import request_dir, summary
+    return {'request': summary(request_dir(state, rid))}
+
+
+def card_send_job(config_path, state, binding_path, request):
+    from .app_delivery import claim, digest, record as journal, request_dir
+    path = Path(request).resolve()
+    rid = path.parent.name
+    if path.name != 'request.json' or request_dir(state, rid) / 'request.json' != path:
+        raise ValueError('전송 요청 위치가 기록과 다릅니다.')
+    stored = claim(state, rid, os.environ.get('HC_TERMINAL_ID', ''))
+    folder = path.parent
+    try:
+        payload, shown, question = validate_send(config_path, state, binding_path, stored['payload'])
+        if digest(payload) != stored['payload_hash']:
+            raise Refusal('보내기 직전 카드나 질문이 달라졌습니다.')
+        dest = destination(config_path, state, binding_path, payload['kind'], payload['work_id'])
+        if dest != stored['destination']:
+            raise Refusal('보내기 직전 담당 팀장·소유자·시도·터미널 연결이 달라졌습니다.')
+        message = folder / 'message.txt'
+        fd = os.open(message, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'w') as out:
+            out.write(_message(stored, shown, question))
+    except ValueError as error:
+        journal(state, rid, 'not_sent', {'reason': str(error)})
+        return
+    except BaseException as error:
+        journal(state, rid, 'unknown', {'reason': '전송 전 확인 중 예외가 발생했습니다: ' + type(error).__name__})
+        raise
+    from .__main__ import parser, run
+    from .runtime import RuntimeError as KitError
+    try:
+        result = run(parser().parse_args(['--config', str(config_path), '--state', str(state), 'tell', dest['task'], '--message-file', str(message),
+                                          '--expected-owner', dest['owner'], '--expected-attempt', str(dest['attempt'])]))
+    except KitError as error:
+        known = any(text in str(error) for text in PRE_SEND)
+        journal(state, rid, 'not_sent' if known else 'unknown',
+                {'reason': '전송 전에 거절되었습니다: ' + str(error) if known else '호출 뒤 결과를 확인하지 못했습니다: ' + str(error)})
+    except ValueError as error:
+        journal(state, rid, 'not_sent', {'reason': '기존 전달 조건이 거절했습니다: ' + str(error)})
+    except BaseException as error:
+        journal(state, rid, 'unknown', {'reason': '호출 뒤 결과를 확인하지 못했습니다: ' + type(error).__name__})
+        raise
+    else:
+        journal(state, rid, 'sent', {'reason': 'tell 전송 턴이 확인되었습니다. 내용 수신·실행·승인·완료는 별도로 확인해야 합니다.', 'task_state': result.get('state')})
+
+
 def start_usage_refresh(config_path,state,binding_path):
     config=load(config_path);bindings(binding_path,config)
     state=Path(state).resolve();target=state.with_name('usage-refresh.json')
@@ -380,12 +590,14 @@ def main():
     parser.add_argument('--config', default=str(Path.home()/'.config/herdr-team-kit-app/config.json'))
     parser.add_argument('--state', default=str(Path.home()/'.local/state/herdr-team-kit-app/state.sqlite'))
     parser.add_argument('--bindings', default=str(Path.home()/'.config/herdr-team-kit-app/bindings.json'))
-    parser.add_argument('action', choices=('view','document','work-detail','approve','resume','resume-job','recover-coordinator','coordinator-job','refresh-usage','usage-job','card-detail','card-answer'))
+    parser.add_argument('action', choices=('view','document','work-detail','approve','resume','resume-job','recover-coordinator','coordinator-job','refresh-usage','usage-job','card-detail','card-answer','card-question-set','card-send','card-send-job','card-send-status'))
     parser.add_argument('--work'); parser.add_argument('--revision', type=int); parser.add_argument('--digest')
     parser.add_argument('--task'); parser.add_argument('--owner'); parser.add_argument('--request')
     parser.add_argument('--attempt',type=int)
     parser.add_argument('--kind',choices=('inventory','work'))
     parser.add_argument('--card-revision');parser.add_argument('--choice');parser.add_argument('--answer-text',default='')
+    parser.add_argument('--question-file');parser.add_argument('--expected-question-revision',type=int,default=0)
+    parser.add_argument('--send-json');parser.add_argument('--request-id')
     parser.add_argument('--confirmed', action='store_true')
     args = parser.parse_args()
     try:
@@ -394,6 +606,10 @@ def main():
         elif args.action == 'work-detail': result = work_detail(args.config,args.state,args.bindings,args.work)
         elif args.action == 'card-detail':result=card_detail(args.config,args.state,args.bindings,args.kind,args.work)
         elif args.action == 'card-answer':result=card_answer(args.config,args.state,args.bindings,args.kind,args.work,args.card_revision,args.choice,args.answer_text)
+        elif args.action == 'card-question-set':result=card_question_set(args.config,args.state,args.bindings,args.kind,args.work,args.task,args.owner,args.attempt,args.question_file,args.expected_question_revision)
+        elif args.action == 'card-send':result=card_send(args.config,args.state,args.bindings,args.send_json)
+        elif args.action == 'card-send-status':result=card_send_status(args.state,args.request_id)
+        elif args.action == 'card-send-job':card_send_job(args.config,args.state,args.bindings,args.request);result={'message':'전송 확인을 마쳤습니다.'}
         elif args.action == 'approve': result = approve(args.config, args.state, args.bindings, args.work, args.revision, args.digest, args.confirmed)
         elif args.action == 'resume': result = resume(args.config, args.state, args.bindings, args.work, args.revision, args.digest, args.task, args.owner, args.confirmed, args.attempt)
         elif args.action == 'recover-coordinator':

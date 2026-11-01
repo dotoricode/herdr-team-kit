@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from test_cli import Fixture
 import test_workflow
-from teamkit.app_feedback import card_detail, card_answer, feedback_summaries
+from teamkit.app_feedback import card_detail, card_answer, feedback_summaries, question_set, validate_send
 
 
 class FeedbackFixture(Fixture):
@@ -219,3 +219,122 @@ class FeedbackBridgeTests(FeedbackFixture):
         with patch('sys.argv',args+['approve','--work','W1','--revision','1','--digest',doc['digest'],'--confirmed']),contextlib.redirect_stdout(output):
             self.assertEqual(main(),0)
         self.assertEqual(self.call('work','show','W1')['phase'],'approved')
+
+
+AUTHOR={'task':'L1','owner':'leader-owner','attempt':1,'terminal':'t1'}
+OPTIONS=[{'option_id':'proceed','label':'이대로 진행','description':'현재 범위로 진행합니다.'},{'option_id':'narrow','label':'범위 줄이기'}]
+
+
+class QuestionTests(FeedbackFixture):
+    def ask(self,ident='W47',kind='inventory',expected=0,options=None,prompt='이 화면의 저장 결과가 맞나요?',**extra):
+        return question_set(self.config,self.state,self.links,kind,ident,AUTHOR,{'prompt':prompt,'options':OPTIONS if options is None else options,**extra},expected)
+    def send(self,**fields):
+        card=self.detail(fields.pop('ident','W47'),fields.pop('kind','inventory'))
+        base={'client_request_id':'req-0001-aaaa','kind':card['kind'],'work_id':card['id'],'card_revision':card['revision'],
+              'document_revision':card['document_revision'],'document_digest':card['document_digest']}
+        return validate_send(self.config,self.state,self.links,{**base,**fields})
+    def qfields(self,option='proceed',**extra):
+        q=self.detail()['question']
+        return {'question_id':q['question_id'],'question_revision':q['question_revision'],'option_id':option,**extra}
+
+    def test_no_question_by_default_and_nothing_is_invented(self):
+        value=self.detail()
+        self.assertIsNone(value['question']);self.assertEqual(value['question_state']['state'],'missing')
+        self.assertIn('준비하지 않았습니다',value['question_state']['reason'])
+        self.assertFalse((self.feedback_root/'questions.jsonl').exists())
+        with self.assertRaisesRegex(ValueError,'준비하지 않았습니다'):self.send(question_id='q-whatever',question_revision=1,option_id='proceed')
+
+    def test_typed_question_is_bound_to_card_and_document_and_keeps_legacy_prompt(self):
+        saved=self.ask()['question'];value=self.detail()
+        self.assertEqual(value['question'],saved);self.assertEqual(value['question_state']['state'],'ready')
+        self.assertEqual(saved['question_revision'],1);self.assertTrue(saved['other_allowed'])
+        self.assertEqual((saved['card_revision'],saved['document_digest']),(value['revision'],value['document_digest']))
+        self.assertEqual(value['prompt'],'화면에서 확인한 결과를 알려 주세요.')
+        self.assertEqual((self.feedback_root/'questions.jsonl').stat().st_mode&0o777,0o600)
+
+    def test_question_shape_is_validated_without_partial_write(self):
+        bad=[[],[{'option_id':'o'+str(i),'label':str(i)} for i in range(5)],[{'option_id':'a','label':'x'},{'option_id':'a','label':'y'}],
+             [{'option_id':'other','label':'x'}],[{'option_id':'Bad Id','label':'x'}],[{'option_id':'a','label':' '}],
+             [{'option_id':'a','label':'x','extra':1}]]
+        for options in bad:
+            with self.subTest(options=options),self.assertRaises(ValueError):self.ask(options=options)
+        for prompt in ('',' ','x'*1001):
+            with self.subTest(prompt=len(prompt)),self.assertRaises(ValueError):self.ask(prompt=prompt)
+        with self.assertRaises(ValueError):self.ask(unknown=True)
+        self.assertFalse((self.feedback_root/'questions.jsonl').exists())
+
+    def test_question_versions_need_expected_revision_and_keep_the_same_id(self):
+        first=self.ask()['question']
+        with self.assertRaises(ValueError):self.ask(expected=0,prompt='다른 질문')
+        replay=question_set(self.config,self.state,self.links,'inventory','W47',AUTHOR,{'prompt':first['prompt'],'options':OPTIONS},1)
+        self.assertEqual(replay['question'],first);self.assertEqual(len((self.feedback_root/'questions.jsonl').read_text().splitlines()),1)
+        second=self.ask(expected=1,prompt='범위를 바꿀까요?')['question']
+        self.assertEqual((second['question_id'],second['question_revision']),(first['question_id'],2))
+        with self.assertRaises(ValueError):self.ask(expected=2,question_id='q-another-card-id')
+
+    def test_card_change_makes_question_stale_and_blocks_answer(self):
+        self.ask();fields=self.qfields();self.inventory.write_text(self.inventory.read_text().replace('실제 화면 필요','화면 재확인 필요'))
+        value=self.detail()
+        self.assertIsNone(value['question']);self.assertEqual(value['question_state']['state'],'stale');self.assertIsNotNone(value['previous_question'])
+        with self.assertRaises(ValueError):self.send(**fields)
+
+    def test_answer_selects_one_existing_option_or_non_empty_other(self):
+        self.ask()
+        payload,_,question=self.send(**self.qfields('narrow'))
+        self.assertEqual(payload['option_id'],'narrow');self.assertEqual(question['question_revision'],1)
+        for fields in (self.qfields('missing'),self.qfields('other'),self.qfields('other',other_text='  '),self.qfields('proceed',other_text='추가'),
+                       self.qfields('proceed',choice='changes')):
+            with self.subTest(fields=fields),self.assertRaises(ValueError):self.send(**fields)
+        other,_,_=self.send(**self.qfields('other',other_text='  직접 정한 방향  '))
+        self.assertEqual(other['other_text'],'직접 정한 방향')
+
+    def test_new_question_revision_is_never_inherited_by_number_or_option(self):
+        self.ask();old=self.qfields('proceed');self.ask(expected=1,prompt='다시 묻습니다',options=[{'option_id':'proceed','label':'다른 뜻'}])
+        with self.assertRaisesRegex(ValueError,'질문이 바뀌었습니다'):self.send(**old)
+        self.assertEqual(self.send(**self.qfields('proceed'))[0]['question_revision'],2)
+
+    def test_general_feedback_is_separate_from_typed_answers(self):
+        payload,_,question=self.send(choice='changes',comment='문구를 고쳐 주세요.')
+        self.assertIsNone(question);self.assertIsNone(payload['question_id']);self.assertEqual(payload['choice'],'changes')
+        for fields in ({'choice':'changes'},{'choice':'defer','comment':' '},{'choice':'confirmed','comment':'x'},{'comment':'x'},
+                       {'choice':'changes','comment':'x'*4001},{'choice':'changes','comment':'x','option_id':'proceed'},
+                       {'choice':'changes','comment':'x','unknown':1}):
+            with self.subTest(fields=fields),self.assertRaises(ValueError):self.send(**fields)
+
+    def test_stale_card_or_disabled_actions_never_validate(self):
+        card=self.detail()
+        base={'client_request_id':'req-0001-aaaa','kind':'inventory','work_id':'W47','card_revision':card['revision'],
+              'document_revision':0,'document_digest':card['document_digest'],'choice':'changes','comment':'x'}
+        self.inventory.write_text(self.inventory.read_text().replace('실제 화면 필요','화면 재확인 필요'))
+        with self.assertRaisesRegex(ValueError,'카드나 문서가 바뀌었습니다'):validate_send(self.config,self.state,self.links,base)
+        self.linked['actions_enabled']=False;self.links.write_text(json.dumps(self.linked))
+        with self.assertRaises(ValueError):validate_send(self.config,self.state,self.links,base)
+
+    def test_work_question_needs_readable_document_and_follows_document_digest(self):
+        self.setup_work();self.call('work','submit','W1')
+        first=self.ask('W1','work',prompt='설계 범위가 맞나요?')['question']
+        self.assertEqual(first['document_revision'],1);self.assertEqual(self.detail('W1','work')['question_state']['state'],'ready')
+        (self.root/'private-plans/W1/r1/plan.md').write_text('changed design')
+        changed=self.detail('W1','work')
+        self.assertEqual(changed['question_state']['state'],'stale');self.assertIsNone(changed['question'])
+        (self.root/'private-plans/W1/r1/plan.md').unlink()
+        value=self.detail('W1','work');self.assertEqual(value['question_state']['state'],'document_unavailable')
+        with self.assertRaisesRegex(ValueError,'설계 문서'):self.ask('W1','work',expected=1,prompt='문서가 없을 때')
+
+    def test_unreadable_question_journal_is_reported_and_never_repaired(self):
+        self.ask();path=self.feedback_root/'questions.jsonl';path.write_bytes(path.read_bytes()+b'{"partial"')
+        before=path.read_bytes();value=self.detail()
+        self.assertEqual(value['question_state']['state'],'invalid');self.assertIsNone(value['question'])
+        with self.assertRaises(ValueError):self.ask(expected=1,prompt='새 질문')
+        self.assertEqual(before,path.read_bytes())
+
+    def test_complete_but_unterminated_last_line_is_still_a_damaged_journal(self):
+        first=self.ask()['question'];path=self.feedback_root/'questions.jsonl'
+        extra=dict(first,question_revision=2,prompt='끝 줄바꿈이 없는 완전한 JSON');path.write_bytes(path.read_bytes()+json.dumps(extra,ensure_ascii=False).encode())
+        before=path.read_bytes();self.assertEqual(self.detail()['question_state']['state'],'invalid')
+        with self.assertRaises(ValueError):self.ask(expected=1,prompt='새 질문')
+        self.assertEqual(before,path.read_bytes())
+
+    def test_recorded_answers_remain_compatible_and_not_delivered(self):
+        self.ask();result=self.answer('changes','기록만 합니다.');self.assertEqual(result['answer']['delivery'],'recorded')
+        self.assertEqual(self.detail()['deliveries'],[])
