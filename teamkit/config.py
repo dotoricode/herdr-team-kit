@@ -1,8 +1,9 @@
 import json
+import time
 from pathlib import Path
 
 from .runtime import launch_spec
-from .policy import CLAUDE_QUOTA_SOURCE, CLAUDE_NATIVE_QUOTA_SOURCE, number
+from .policy import CLAUDE_QUOTA_SOURCE, CLAUDE_NATIVE_QUOTA_SOURCE, number, eligible
 
 
 def load(path):
@@ -81,11 +82,9 @@ def cached_quota(config, store, provider, account):
     if value is None or not number(value.get('observed_at')) or native['observed_at'] > value['observed_at']:
         return native
     if native['observed_at'] == value['observed_at']:
+        if not eligible(value, time.time(), config.get('quota_ttl_seconds', 120)):
+            return value
         for key in ('five_hour', 'weekly'):
-            window = value.get(key)
-            used = window.get('used') if isinstance(window, dict) else None
-            if not number(used) or not 0 <= used <= 100:
-                return value
-            native[key]['used'] = max(native[key]['used'], used)
+            native[key]['used'] = max(native[key]['used'], value[key]['used'])
         return native
     return value

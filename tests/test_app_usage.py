@@ -345,3 +345,34 @@ class NativeAdmissionTests(UsageFixture):
                 'binding':binding(self.value['profiles']['claude']['team']), 'observed_at':at,
                 'five_hour':None, 'weekly':None})
         self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+
+
+    def test_tied_response_reset_failure_or_unavailability_is_not_erased(self):
+        from teamkit.policy import CLAUDE_QUOTA_SOURCE
+        self.probe()
+        at = json.loads(self.attempt_path().read_text())['observed_at']
+        base = {'source':CLAUDE_QUOTA_SOURCE,
+                'binding':binding(self.value['profiles']['claude']['team']), 'observed_at':at,
+                'five_hour':{'used':1, 'resets_at':at+300}, 'weekly':{'used':2, 'resets_at':at+600}}
+        import copy
+        for variant in ('expired_reset', 'missing_reset', 'unavailable'):
+            value = copy.deepcopy(base)
+            if variant == 'expired_reset': value['five_hour']['resets_at'] = at-1
+            elif variant == 'missing_reset': value['weekly'].pop('resets_at')
+            else: value['unavailable'] = True
+            with self.subTest(variant=variant):
+                with StoreContext(self.state) as db: db.quota('claude/team', value)
+                self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+
+    def test_failed_identity_recheck_invalidates_previous_native_success(self):
+        from teamkit.app_usage import refresh_native_usage, UsageUnavailable
+        for reason in ('query_failed', 'profile_mismatch'):
+            with self.subTest(reason=reason):
+                self.probe()
+                observation = Path(str(self.state) + '.usage-observations.json').read_bytes()
+                with patch('teamkit.app_usage.claude_identity', side_effect=UsageUnavailable(reason)):
+                    with self.assertRaisesRegex(UsageUnavailable, reason):
+                        refresh_native_usage(self.value, self.state, 'team')
+                self.assertEqual(json.loads(self.attempt_path().read_text())['error'], reason)
+                self.assertEqual(Path(str(self.state) + '.usage-observations.json').read_bytes(), observation)
+                self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')

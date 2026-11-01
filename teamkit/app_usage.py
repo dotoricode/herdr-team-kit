@@ -380,7 +380,11 @@ def refresh_native_usage(config,state,account):
         previous=_read(path)
         if previous and not previous.get('cleaned'):
             raise UsageUnavailable('native_outcome_unknown')
-        claude_identity(pr)
+        try:claude_identity(pr)
+        except UsageUnavailable as error:
+            _write(path,{'attempt_at':time.time(),'binding':binding(pr),'cleaned':True,
+                         'terminal':None,'error':str(error)})
+            raise
         nonce=uuid.uuid4().hex;labels={'teamkit.usage':nonce,'teamkit.usage-account':'claude/'+account,
                                       'teamkit.usage-profile':binding(pr)}
         record={'attempt_at':time.time(),'binding':binding(pr),'nonce':nonce,'cleaned':False,'terminal':None}
