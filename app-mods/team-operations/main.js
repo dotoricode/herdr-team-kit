@@ -376,7 +376,7 @@ export default class TeamOperations extends View {
     });
     const inventoryCards = inventory.map(item => {
       const complete = categoryForInventory(item) === "complete";
-      return { id: item.id, category: categoryForInventory(item), kind: "inventory", label: display(item.category ?? "구축"), title: item.name, state: statusText(item.status), reason: item.condition, reasonLabel: complete ? "조건" : "대기 이유", percent: complete ? "|██████████| 100% 1/1 · 완료 조건 확인 · 전체 진척률 아님" : null, raw: item };
+      return { id: item.id, category: categoryForInventory(item), kind: "inventory", label: display(item.category ?? "구축"), title: item.name, state: statusText(item.status), reason: item.condition, reasonLabel: "완료 조건", percent: complete ? "|██████████| 100% 1/1 · 완료 조건 확인 · 전체 진척률 아님" : null, raw: item };
     });
     const allCards = [...workCards, ...inventoryCards];
     const completedCount = allCards.filter(card => card.category === "complete").length;
