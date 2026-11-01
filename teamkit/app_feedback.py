@@ -31,6 +31,11 @@ def _digest(value):
     return hashlib.sha256(json.dumps(value,ensure_ascii=False,sort_keys=True,allow_nan=False).encode()).hexdigest()
 
 
+def _work_view_signature(row):
+    return _digest({key:value for key,value in row.items()
+                    if key not in ('native_state','feedback','previous_feedback')})
+
+
 def _current(config_path,state,binding_path,kind,ident):
     _key(kind,ident)
     from .app_bridge import bindings,inventory,readonly_snapshot
@@ -60,7 +65,8 @@ def _current(config_path,state,binding_path,kind,ident):
         question=work.get('question')
         value={'id':ident,'kind':kind,'title':row['title'],'status':row['phase'],
                'status_label':LABELS.get(row['phase'],row['phase']),'team_label':setting.get('label',row['team']),
-               'team':row['team'],'work_revision':work['revision'],'leader':leader,'reason':reason,'condition':condition,
+               'team':row['team'],'work_revision':work['revision'],'_view_signature':_work_view_signature(row),
+               'leader':leader,'reason':reason,'condition':condition,
                'prompt':question if isinstance(question,str) and question.strip() else PROMPT}
         try:doc={'state':'available','digest':document(config,work)[2]}
         except FileNotFoundError:doc={'state':'missing'}
@@ -148,6 +154,7 @@ def card_detail(config_path,state,binding_path,kind,ident):
     current=saved is not None and saved['revision']==value['revision']
     value['answer']=saved['answer'] if current else None
     value['previous_answer']=saved['answer'] if saved and not current else None
+    value.pop('_view_signature',None)
     return value
 
 
@@ -224,6 +231,6 @@ def decorate_feedback(config_path,state,binding_path,inventory_rows,work_rows):
             try:current=_current(config_path,state,binding_path,kind,row['id'])
             except (OSError,ValueError):
                 row['previous_feedback']=saved['answer'];continue
-            displayed=(row.get('name')==current['title'] and row.get('status')==current['status'] and row.get('condition')==current['condition']) if kind=='inventory' else (row.get('title')==current['title'] and row.get('phase')==current['status'] and row.get('revision')==current['work_revision'] and row.get('team')==current['team'])
+            displayed=(row.get('name')==current['title'] and row.get('status')==current['status'] and row.get('condition')==current['condition']) if kind=='inventory' else (_work_view_signature(row)==current['_view_signature'])
             field='feedback' if displayed and saved['revision']==current['revision'] else 'previous_feedback'
             row[field]=saved['answer']

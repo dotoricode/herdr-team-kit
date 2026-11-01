@@ -164,6 +164,34 @@ class FeedbackBridgeTests(FeedbackFixture):
         row=next(r for r in old_rows if r['id']=='W47')
         self.assertNotIn('feedback',row);self.assertEqual(row['previous_feedback'],saved)
 
+    def test_work_progress_snapshot_does_not_inherit_a_newer_reply(self):
+        from test_cli import StoreContext
+        from teamkit.dashboard import model
+        from teamkit.workflow import snapshot
+        from teamkit.app_feedback import decorate_feedback
+        self.setup_work()
+        contract=self.root/'private-plans/W1/r1/contract.json'
+        value=json.loads(contract.read_text())
+        value['steps']=[{'id':'first','title':'First check','weight':50},{'id':'second','title':'Second check','weight':50}]
+        contract.write_text(json.dumps(value))
+        self.call('work','submit','W1')
+        self.call('work','approve','W1','--user-approved','--approval-reference','Fixture selected design')
+        self.call('create','TW','--team','alpha','--role','implementer','--root',str(self.repo),'--goal-file',str(self.root/'goal.txt'),'--work','W1')
+        with StoreContext(self.state) as store:
+            store.claim('TW','fixture-owner','codex','team','fixture','high',approval_config=self.value)
+        old_rows=model(snapshot(self.state),self.value)['rows']
+        self.assertEqual(old_rows[0]['percent'],0)
+        evidence=self.root/'step.json';evidence.write_text(json.dumps({'verification':['Fixture step assertion']}))
+        self.call('work','record','W1','--step','first','--evidence-file',str(evidence))
+        current_rows=model(snapshot(self.state),self.value)['rows']
+        self.assertEqual(current_rows[0]['percent'],50)
+        self.assertEqual(current_rows[0]['phase'],old_rows[0]['phase'])
+        saved=self.answer(kind='work',ident='W1')['answer']
+        decorate_feedback(self.config,self.state,self.links,[],old_rows)
+        self.assertNotIn('feedback',old_rows[0]);self.assertEqual(old_rows[0]['previous_feedback'],saved)
+        decorate_feedback(self.config,self.state,self.links,[],current_rows)
+        self.assertEqual(current_rows[0]['feedback'],saved)
+
     def test_card_cli_accepts_opaque_revision_and_preserves_existing_revision_parser(self):
         import contextlib,io
         from teamkit.app_bridge import main
