@@ -1,5 +1,5 @@
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
+import { v_flex, h_flex, Popover, Editor, EditorState } from "gpui-base";
 import { appHome, readTextFile, exec, agents, terminals, theme, settings, run, nextCommand, props as getModProps, openOverlay, closeOverlay } from "herdr";
 
 const LOCAL = "/mods/team-operations/local.json";
@@ -53,6 +53,7 @@ export default class TeamOperations extends View {
     this.confirm = null; this.actionBusy = false; this.message = null;
     this.showCompleted = false; this.coordinatorConfirm = false; this.coordinatorBusy = false; this.coordinatorMessage = null;
     this.usageBusy = false; this.usageMessage = null;
+    this.statusOpen = null; this.statusRevealed = false; this.statusEpoch = 0;
     this.detailData = null; this.detailError = null; this.detailBusy = false;
     this.config = null; this.configError = null;
     cx.spawn(async cx => {
@@ -74,6 +75,11 @@ export default class TeamOperations extends View {
       for (;;) {
         const command = await nextCommand();
         if (command === "refresh") cx.spawn(async cx => this.refresh(cx));
+        else if (command.startsWith("status-") && ["blocked", "working", "done", "idle"].includes(command.slice(7))) {
+          const status = command.slice(7);
+          this.setStatusOpen(status, this.statusOpen !== status, cx);
+        }
+        else if (command === "close-status") this.setStatusOpen(this.statusOpen, false, cx);
         else if (this.viewProps.role === "overview") continue;
         else if (command === "expand-all") {
           this.showCompleted = true;
@@ -124,6 +130,20 @@ export default class TeamOperations extends View {
   openDetail(kind, item, readDocument = false) {
     this.selectedWorkId = item.id;
     this.detailOverlay = openOverlay({ mod: "team-operations", props: { role: "detail", kind, workId: item.id, linkedWorkId: item.work_id, item, local: this.viewProps.local, readDocument }, kind: "dialog", modal: true, width: kind === "inventory" && !item.work_id ? 0.7 : 0.82, height: kind === "inventory" && !item.work_id ? 0.38 : 0.84 });
+  }
+
+  setStatusOpen(status, open, cx) {
+    if (!open && this.statusOpen !== status) return;
+    this.statusOpen = open ? status : null;
+    this.statusRevealed = false;
+    const epoch = ++this.statusEpoch;
+    cx.notify();
+    if (open) cx.timer.after(32, cx => {
+      if (this.statusOpen === status && this.statusEpoch === epoch) {
+        this.statusRevealed = true;
+        cx.notify();
+      }
+    });
   }
 
   args(action, fields = []) {
@@ -248,6 +268,35 @@ export default class TeamOperations extends View {
     const appStates = ["blocked", "working", "done", "idle"];
     const appCounts = teams.reduce((n, team) => { const status = liveFor(team).status; if (appStates.includes(status)) n[status]++; return n; }, { blocked: 0, working: 0, done: 0, idle: 0 });
     const unknownTeams = teams.filter(team => !appStates.includes(liveFor(team).status)).length;
+    const statusLabels = { blocked: "Needs you", working: "Working", done: "Done", idle: "Idle" };
+    const statusControl = status => {
+      const matches = teams.filter(team => liveFor(team).status === status);
+      const open = this.statusOpen === status;
+      const panelHeight = matches.length ? Math.min(320, 44 + matches.length * 52) : 88;
+      const panel = v_flex().id(`status-panel-${status}-${this.statusEpoch}`).w(320).h(open && this.statusRevealed ? panelHeight : 0)
+        .opacity(open && this.statusRevealed ? 1 : 0).overflow_hidden()
+        .transition("height", { duration: 220, easing: "ease-out" })
+        .transition("opacity", { duration: 150, easing: "ease-out" })
+        .rounded(8).border_1().border_color(t[status]).bg(t.surface).text_color(t.foreground)
+        .font_family(settings().ui_font || "Geist").text_size(12)
+        .child(h_flex().h(36).flex_none().px(10).items_center().justify_between()
+          .child(div().font_semibold().text_color(t[status]).child(`${statusLabels[status]} · ${matches.length}`))
+          .child(button(`close-status-${status}`, "닫기", cx => this.setStatusOpen(status, false, cx)).text_size(10)))
+        .child(v_flex().flex_1().min_h(0).gap(4).px(6).pb(6).overflow_y_scrollbar()
+          .children(matches.map(team => v_flex().id(`status-team-${team.id}`).h(48).flex_none().px(8).justify_center().rounded(6)
+            .cursor_pointer().hover(el => el.bg(t.raised))
+            .on_click((_e, cx) => {
+              this.setStatusOpen(status, false, cx);
+              run("agent.focus", { terminal: team.terminal });
+            })
+            .child(div().whitespace_nowrap().font_semibold().text_size(14).child(display(team.label)))
+            .child(div().whitespace_nowrap().text_size(11).text_color(t.muted).child(status === "done" ? "새 응답 · 확인 전" : statusText(status)))))
+          .when(matches.length === 0, el => el.child(div().p(10).text_size(12).text_color(t.muted).child("해당 상태의 팀장이 없습니다."))));
+      return Popover.new(`status-popover-${status}`).open(open).anchor("top_left").overlay_closable(true)
+        .on_open_change((next, cx) => this.setStatusOpen(status, next, cx))
+        .trigger(statusBadge(`${statusLabels[status]} ${appCounts[status]}`, status).cursor_pointer())
+        .content(panel);
+    };
     const waiting = [...new Set([...teams.map(x => x.reason), ...works.map(x => x.reason)]
       .filter(Boolean).map(display))];
     const summary = `실행 ${appCounts.working} · 사용자 답변 필요 ${appCounts.blocked}`;
@@ -471,10 +520,10 @@ export default class TeamOperations extends View {
       .child(v_flex().id("operations-content").w_full().flex_1().min_h(0).gap(6).p(8)
         .child(v_flex().w_full().flex_none().gap(3)
           .child(h_flex().flex_wrap().gap(12).text_size(12).font_semibold()
-            .child(statusBadge(`Needs you ${appCounts.blocked}`, "blocked"))
-            .child(statusBadge(`Working ${appCounts.working}`, "working"))
-            .child(statusBadge(`Done ${appCounts.done}`, "done"))
-            .child(statusBadge(`Idle ${appCounts.idle}`, "idle"))
+            .child(statusControl("blocked"))
+            .child(statusControl("working"))
+            .child(statusControl("done"))
+            .child(statusControl("idle"))
             .when(unknownTeams > 0, el => el.child(badge(`? 미확인 ${unknownTeams}`, t.unknown)))
             .child(badge(`총괄 · ${coordinatorStateText}`, coordinator?.state === "live" ? t.muted : coordinator?.state === "recovering" ? t.working : t.blocked)))
           .when(Boolean(coordinator?.reason) && !(coordinator?.state === "live" && ["GUI 체크포인트에서 새 총괄 대화를 열었습니다. 제품 업무는 자동 재개하지 않았습니다.", "GUI 체크포인트를 사용하는 총괄입니다."].includes(coordinator.reason)), el => el.child(words(`총괄 상태 · ${display(coordinator.reason)}`).text_size(11).text_color(t.muted))))

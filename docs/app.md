@@ -92,3 +92,7 @@ GUI Claude 실행은 프로세스별 `--settings`로 GUI statusline 수집기를
 팀장 이름 앞 상태 점은 표시하지 않습니다. 실행 중 네이티브 애니메이션은 상태 뱃지 안에서만 표시합니다. 상단 글꼴은 로컬 `overview_font`로 지정하며 전체 운영 보드의 글꼴과 별도로 적용합니다.
 
 요약의 Needs you는 앱 blocked, Working은 working, Done은 읽기 전 done, Idle은 idle입니다. 색은 현재 테마의 blocked/working/done/idle을 따르고, 총괄 연결 상태는 이 집계에 포함하지 않습니다. 이 개수는 연결된 제품 팀장만 대상으로 하며 제품 업무 완료 건수와 다릅니다.
+
+상태 요약 뱃지는 네이티브 Popover로 팀장 목록을 엽니다. 현재 앱 상태로 필터링하며 항목 선택은 해당 팀장으로 초점만 이동합니다. 다시 누르기/바깥 클릭/Esc/닫기로 닫습니다. 0개는 빈 목록 안내를 표시합니다. 펼침은 32ms 단발 준비 후 높이220ms/투명도150ms 네이티브 전환이며 반복 JS 애니메이션 타이머는 없습니다. `team-operations.status-idle` 등 네 상태 명령도 같은 열기 경로를 사용하고 `team-operations.close-status`는 닫습니다.
+
+상태 팝오버 전체는 Herdr UI 글꼴(settings().ui_font, 미지정 시 Geist)을 명시해 제목·목록·빈 상태의 글꼴 계열을 통일합니다. 상단의 overview_font 설정은 별도로 유지합니다.
