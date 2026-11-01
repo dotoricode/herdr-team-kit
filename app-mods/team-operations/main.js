@@ -40,7 +40,7 @@ function phaseText(phase) { return WORK_PHASES[phase]?.text ?? display(phase); }
 const TASK_STATES = { queued: "배정 대기", claimed: "담당자 지정", launching: "시작 준비", submitted: "수신 확인 중", running: "요청 수신됨", ready: "대기", uncertain: "결과 확인 필요", handed_off: "인계됨", awaiting_review: "검토 대기", done: "완료" };
 function taskStateText(state) { return TASK_STATES[state] ?? display(state); }
 const OVERVIEW = { height: 166, rail: 98, card: 94 };
-const STATUS_TEXT = { unknown: "미확인", working: "실행 중", running: "실행 중", blocked: "사용자 답변 필요", done: "완료 보고됨", idle: "대기 중", pending: "대기 중", failed: "실패", error: "오류", success: "성공", healthy: "정상", not_measured: "측정 전", not_available: "미제공", unavailable: "미제공", missing: "미확인", current: "최신 기록", stale: "지난 기록" };
+const STATUS_TEXT = { unknown: "미확인", working: "실행 중", running: "실행 중", blocked: "사용자 답변 필요", done: "응답 완료", idle: "대기 중", pending: "대기 중", failed: "실패", error: "오류", success: "성공", healthy: "정상", not_measured: "측정 전", not_available: "미제공", unavailable: "미제공", missing: "미확인", current: "최신 기록", stale: "지난 기록" };
 function statusText(status) { return STATUS_TEXT[status] ?? (status == null ? "미확인" : display(status)); }
 function statusColor(status, t) { return status === "working" ? t.working : status === "blocked" ? t.blocked : status === "done" ? t.done : status === "idle" ? t.idle : t.unknown; }
 
@@ -236,9 +236,12 @@ export default class TeamOperations extends View {
       .child(scroll ? div().flex_1().min_w(0).overflow_x_scrollbar().whitespace_nowrap().child(display(b)) : words(b).flex_1().min_w(0));
     const liveAgents = agents(), liveTerminals = terminals(), teams = data?.teams ?? [], works = data?.works ?? [], inventory = data?.inventory ?? [], accounts = data?.accounts ?? [];
     const liveFor = team => {
-      const agent = liveAgents.find(a => a.address === team.terminal || a.pane === team.terminal || a.space === team.space);
-      const terminal = liveTerminals.find(x => x.address === team.terminal || x.name === team.terminal);
-      return { agent, terminal, status: team.app_state ?? agent?.status ?? terminal?.status ?? null, present: Boolean(team.terminal && (agent || terminal)) };
+      const agent = liveAgents.find(a => a.address === team.terminal || a.pane === team.terminal);
+      const terminal = liveTerminals.find(x => x.address === team.terminal);
+      // Core done is a turn result; agents().status also tracks whether this screen saw it.
+      const raw = team.app_state ?? terminal?.status ?? null;
+      const status = agent?.status ?? (raw === "done" ? "unknown" : raw);
+      return { agent, terminal, status, present: Boolean(team.terminal && (agent || terminal)) };
     };
     const appCounts = teams.reduce((n, team) => { const s = liveFor(team).status; if (s === "working") n.working++; if (s === "blocked") n.blocked++; return n; }, { working: 0, blocked: 0 });
     const unknownTeams = teams.filter(team => !STATUS_TEXT[liveFor(team).status]).length;
@@ -255,7 +258,7 @@ export default class TeamOperations extends View {
         .child(h_flex().h(28).flex_none().gap(6).items_center()
           .child(div().w(10).line_height("28px").flex_none().text_color(statusColor(status, t)).when(status === "working" && live.present && !this.error && !data?.native_error, el => el.frames(["●", "◉", "●", "◉"], 180)).child(status === "working" ? "●" : "·"))
           .child(div().h(28).line_height("28px").truncate().font_semibold().text_size(19).child(display(team.label))))
-        .child(div().h(20).flex_none().line_height("20px").truncate().text_size(12).text_color(statusColor(status, t)).child(statusText(status)))
+        .child(div().h(20).flex_none().line_height("20px").truncate().text_size(12).text_color(statusColor(status, t)).child(status === "done" ? "새 응답 · 확인 전" : statusText(status)))
         .child(div().h(20).flex_none().line_height("20px").truncate().text_size(12).text_color(t.muted).child(`작업 상태 · ${taskStateText(team.ledger_state)}`));
     };
     const coordinatorStateText = { live: "연결됨", missing: "총괄 종료", recovering: "복구 중", unknown: "상태 미확인" }[coordinator?.state] ?? "상태 미확인";
