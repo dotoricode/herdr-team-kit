@@ -15,6 +15,60 @@ class AppBridgeTests(test_cli.Fixture):
         p.write_text(json.dumps({'version':1,'actions_enabled':True,'teams':{'alpha':{'label':'Alpha','terminal':'t1','space':'s1','legacy_task':'L1'}},'inventory':None}))
         return p
 
+    def detail_task(self):
+        self.setup_work();self.task()
+        with test_cli.StoreContext(self.state) as store:
+            task=store.get('T1')
+            task.update(state='running',owner='owner',provider='codex',account='team',
+                        model='fixture',effort='high',attempt_count=1,
+                        runtime={'backend':'core','terminal':'t8','name':'tk-owner','native_pid':88})
+            with store.transaction():store._save(task,'fixture_session')
+        return {'address':'t8','state':'live','name':'tk-owner','status':{'app':'codex','state':'working'},
+                'labels':{'teamkit.owner':'owner','teamkit.task':'T1','teamkit.name':'tk-owner'},
+                'foreground':{'name':'codex','pid':88}}
+
+    def test_work_detail_is_read_only_and_only_focuses_a_verified_session(self):
+        native=self.detail_task();linked=self.binding_file()
+        from teamkit.app_bridge import work_detail
+        before=self.state.read_bytes()
+        with patch('teamkit.app_bridge.core_read',return_value={'terminals':[{'address':'t8','state':'live','status':'working','name':'tk-owner','where':'Alpha / worker'}]}),patch('teamkit.app_bridge.session_read',return_value=native),patch('teamkit.providers.identity') as provider:
+            result=work_detail(self.config,self.state,linked,'W1')
+        self.assertEqual(result['tasks'][0]['goal'],(self.root/'goal.txt').read_text())
+        self.assertEqual(result['tasks'][0]['native_state'],'working')
+        self.assertTrue(result['tasks'][0]['can_focus'])
+        self.assertEqual(result['tasks'][0]['session_location'],'Alpha / worker')
+        self.assertEqual(before,self.state.read_bytes());provider.assert_not_called()
+
+    def test_work_detail_rejects_replaced_native_owner_or_pid(self):
+        native=self.detail_task();linked=self.binding_file()
+        from teamkit.app_bridge import work_detail
+        for change in ('owner','pid'):
+            with self.subTest(change=change):
+                import copy
+                altered=copy.deepcopy(native)
+                if change=='owner':altered['labels']['teamkit.owner']='replacement'
+                else:altered['foreground']['pid']=99
+                with patch('teamkit.app_bridge.core_read',return_value={'terminals':[{'address':'t8','state':'live','status':'working'}]}),patch('teamkit.app_bridge.session_read',return_value=altered):
+                    result=work_detail(self.config,self.state,linked,'W1')
+                self.assertFalse(result['tasks'][0]['can_focus'])
+                self.assertEqual(result['tasks'][0]['native_state'],'unknown')
+
+    def test_work_detail_native_failure_is_unknown_and_not_a_missing_session(self):
+        self.detail_task();linked=self.binding_file()
+        from teamkit.app_bridge import work_detail
+        with patch('teamkit.app_bridge.core_read',side_effect=OSError('offline')):
+            result=work_detail(self.config,self.state,linked,'W1')
+        self.assertIsNone(result['tasks'][0]['session_present'])
+        self.assertFalse(result['tasks'][0]['can_focus'])
+        self.assertTrue(result['native_error'])
+
+    def test_work_detail_does_not_guess_an_unregistered_work_or_use_tui(self):
+        self.setup_work();linked=self.binding_file()
+        from teamkit.app_bridge import work_detail
+        with self.assertRaises(ValueError):work_detail(self.config,self.state,linked,'missing')
+        self.value['runtime_backend']='tui';self.config.write_text(json.dumps(self.value))
+        with self.assertRaises(ValueError):work_detail(self.config,self.state,linked,'W1')
+
     def test_view_is_read_only_and_never_calls_a_provider(self):
         self.setup_work();self.call('work','submit','W1')
         from teamkit.app_bridge import view
