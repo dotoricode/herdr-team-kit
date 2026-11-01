@@ -19,6 +19,7 @@ from .store import Store
 def namespace(config):
     value={'session':config.get('herdr_session'),'teams':config.get('dashboard_workspaces',{}),
            'profiles':{p+'/'+a:binding(pr) for p,accounts in config['profiles'].items() for a,pr in accounts.items()}}
+    if config.get('runtime_backend','tui') != 'tui':value['backend']=config['runtime_backend']
     return hashlib.sha256(json.dumps(value,sort_keys=True).encode()).hexdigest()
 
 
@@ -39,6 +40,20 @@ def write_cache(state, value):
 
 
 def read_native(config):
+    if config.get('runtime_backend') == 'core':
+        from .app_bridge import core_read
+        from .core_runtime import _call
+        agents=[]
+        for terminal in core_read()['terminals']:
+            if terminal.get('state') != 'live':continue
+            a=_call('get',terminal['address'])
+            if a.get('state') != 'live':continue
+            label=a.get('labels',{})
+            if not all(label.get(k) for k in ('teamkit.owner','teamkit.task','teamkit.name')):continue
+            agents.append({'name':label['teamkit.name'],
+                           'agent_status':(a.get('status') or {}).get('state','unknown'),
+                           'pane_id':a['address'],'workspace_id':None,'completion_seq':a.get('turn')})
+        return agents
     prefix=['--session',config['herdr_session']] if config.get('herdr_session') else []
     result=Herdr().call(*prefix,'agent','list')
     agents=result.get('agents')

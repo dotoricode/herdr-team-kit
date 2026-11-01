@@ -7,6 +7,8 @@ from .runtime import Herdr
 
 def retire(store,config,task,owner,evidence,stopped):
     value=store.get(task);runtime=value.get('runtime',{})
+    if runtime.get('backend') == 'core':
+        raise ValueError('core retirement requires native terminal evidence; never use TUI retirement')
     if not stopped or not isinstance(evidence,dict) or not isinstance(evidence.get('verification'),list) or not evidence['verification'] or not all(isinstance(x,str) and x.strip() for x in evidence['verification']):
         raise ValueError('retirement requires stopped-writer verification evidence')
     if value.get('owner')!=owner or value['state'] not in ('ready','awaiting_review'):
