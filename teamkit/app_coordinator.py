@@ -154,7 +154,7 @@ def run_job(request):
         checkpoint=checkpoints/(packet['nonce']+'.md')
         linked=json.loads(Path(packet['bindings']).read_text())
         inventory=Path(linked['inventory'])
-        content=('# GUI 총괄 복구 체크포인트\n\nGUI 장부: '+str(state)+
+        content=('# GUI 총괄 복구 체크포인트\n\nGUI 작업 기록: '+str(state)+
             '\n고정 작업 정본: '+str(inventory)+'\n실행 코드: '+str(Path(__file__).resolve().parent.parent)+
             '\n\nTUI의 작업·승인·소유권을 가져오지 않습니다. 기존 GUI 기록·현재 소스·검증 근거가 재개의 정본입니다. '
             '승인 범위를 새로 추정하거나 제품 업무를 자동 재개하지 마세요. 종료된 대화 전문을 복원했다는 뜻은 아닙니다.\n')
