@@ -13,6 +13,7 @@ import uuid
 from .config import load
 from .dashboard import model, clean
 from .workflow import document, snapshot
+from .app_feedback import card_detail, card_answer, decorate_feedback
 
 
 def core_read():
@@ -87,6 +88,9 @@ def view(config_path, state, binding_path):
                       'binding_status':'GUI 작업 기록 연결됨' if bound else '앱 대화 확인 · 작업 소유권 미등록',
                       'reason':error or ('' if bound else 'TUI 작업·소유권을 가져오지 않습니다.')})
     rows, holds = inventory(linked.get('inventory'))
+    feedback_error=''
+    try:decorate_feedback(config_path,state,binding_path,rows,value['rows'])
+    except (OSError,ValueError):feedback_error='답변 기록을 읽지 못했습니다. 저장 이력을 확인해 주세요.'
     from .app_usage import read_coverage
     coverage=read_coverage(config,state).get('accounts',{})
     for account in value['accounts']:
@@ -115,7 +119,7 @@ def view(config_path, state, binding_path):
     from .app_coordinator import status as coordinator_status
     return {'observed_at':time.time(), 'teams':teams, 'accounts':value['accounts'],
             'works':value['rows'], 'inventory':rows, 'holds':holds,
-            'actions':actions,
+            'actions':actions,'feedback_error':feedback_error,
             'usage_refreshing':refresh.get('phase') in ('queued','running'),
             'usage_message':refresh.get('message',''),
             'actions_enabled':linked.get('actions_enabled') is True and not error,
@@ -376,16 +380,20 @@ def main():
     parser.add_argument('--config', default=str(Path.home()/'.config/herdr-team-kit-app/config.json'))
     parser.add_argument('--state', default=str(Path.home()/'.local/state/herdr-team-kit-app/state.sqlite'))
     parser.add_argument('--bindings', default=str(Path.home()/'.config/herdr-team-kit-app/bindings.json'))
-    parser.add_argument('action', choices=('view','document','work-detail','approve','resume','resume-job','recover-coordinator','coordinator-job','refresh-usage','usage-job'))
+    parser.add_argument('action', choices=('view','document','work-detail','approve','resume','resume-job','recover-coordinator','coordinator-job','refresh-usage','usage-job','card-detail','card-answer'))
     parser.add_argument('--work'); parser.add_argument('--revision', type=int); parser.add_argument('--digest')
     parser.add_argument('--task'); parser.add_argument('--owner'); parser.add_argument('--request')
     parser.add_argument('--attempt',type=int)
+    parser.add_argument('--kind',choices=('inventory','work'))
+    parser.add_argument('--card-revision');parser.add_argument('--choice');parser.add_argument('--answer-text',default='')
     parser.add_argument('--confirmed', action='store_true')
     args = parser.parse_args()
     try:
         if args.action == 'view': result = view(args.config, args.state, args.bindings)
         elif args.action == 'document': result = document_view(args.config, args.state, args.work)
         elif args.action == 'work-detail': result = work_detail(args.config,args.state,args.bindings,args.work)
+        elif args.action == 'card-detail':result=card_detail(args.config,args.state,args.bindings,args.kind,args.work)
+        elif args.action == 'card-answer':result=card_answer(args.config,args.state,args.bindings,args.kind,args.work,args.card_revision,args.choice,args.answer_text)
         elif args.action == 'approve': result = approve(args.config, args.state, args.bindings, args.work, args.revision, args.digest, args.confirmed)
         elif args.action == 'resume': result = resume(args.config, args.state, args.bindings, args.work, args.revision, args.digest, args.task, args.owner, args.confirmed, args.attempt)
         elif args.action == 'recover-coordinator':

@@ -7,3 +7,4 @@
 - The installed CLI is the syntax authority. Test adapters with fake processes, then disclose the real runtime boundary still unverified.
 - Read `docs/operations.md` for account changes, handoff, shared manuals and PR gates. Keep implementation and review independent; bind reviews to the current head.
 - Preserve user changes and person-only commit authorship.
+- App dialogs and popovers must close on Escape and outside press as well as an explicit close button. Closing never submits an answer or authorizes work.
