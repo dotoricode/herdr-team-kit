@@ -192,6 +192,16 @@ class FeedbackBridgeTests(FeedbackFixture):
         decorate_feedback(self.config,self.state,self.links,[],current_rows)
         self.assertEqual(current_rows[0]['feedback'],saved)
 
+    def test_cli_saves_free_text_that_starts_with_option_prefix(self):
+        import contextlib,io
+        from teamkit.app_bridge import main
+        selected=self.detail();output=io.StringIO()
+        args=['teamkit_app.py','--config',str(self.config),'--state',str(self.state),'--bindings',str(self.links),
+              'card-answer','--kind','inventory','--work','W47','--card-revision',selected['revision'],
+              '--choice','changes','--answer-text=--no-daemon']
+        with patch('sys.argv',args),contextlib.redirect_stdout(output):self.assertEqual(main(),0)
+        self.assertEqual(self.detail()['answer']['text'],'--no-daemon')
+
     def test_card_cli_accepts_opaque_revision_and_preserves_existing_revision_parser(self):
         import contextlib,io
         from teamkit.app_bridge import main
