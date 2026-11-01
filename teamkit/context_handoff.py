@@ -315,8 +315,8 @@ def exit_session_matches(config,state,job):
         return False
     if target['provider']=='claude':
         packet=observe(config,state,target)
-        return bool(packet and packet.get('session_id')==expected and not packet.get('unavailable'))
-    if target.get('session_id')!=expected:return False
+        if not packet or packet.get('session_id')!=expected or packet.get('unavailable'):return False
+    elif target.get('session_id')!=expected:return False
     # Native /status is local UI state; it cannot start a model turn.
     def screen():
         return subprocess.run(['hc','read','--lines','60',target['terminal']],capture_output=True,text=True,timeout=5,check=True).stdout.splitlines()
@@ -326,10 +326,15 @@ def exit_session_matches(config,state,job):
     changed=[]
     for tag,_,__,start,end in difflib.SequenceMatcher(a=before,b=after,autojunk=False).get_opcodes():
         if tag in ('insert','replace'):changed.extend(after[start:end])
-    found=re.findall(r'^\s*Session:\s+([a-f0-9-]{36})\s*$','\n'.join(changed),re.M)
+    label='Session ID' if target['provider']=='claude' else 'Session'
+    found=re.findall(r'^\s*'+label+r':\s+([a-f0-9-]{36})\s*$','\n'.join(changed),re.M)
+    if target['provider']=='claude':
+        full='\n'.join(after)
+        if not re.search(r'^\s*Settings\s+Status\s+Config',full,re.M) or 'Esc to cancel' not in full:return False
+        _call('keys',target['terminal'],'escape')
     if not found or found[-1]!=expected:return False
     latest=current_target(config,state,target)
-    return bool(latest and latest.get('session_id')==expected)
+    return bool(latest and (target['provider']=='claude' or latest.get('session_id')==expected))
 
 
 def save_checkpoint(config,state,job,evidence,source):

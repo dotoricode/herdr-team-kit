@@ -321,3 +321,21 @@ class ExitSessionEvidenceTests(unittest.TestCase):
         for packet in (None,{'session_id':'new-session'},{'session_id':'old-session','unavailable':True}):
             with patch.object(context,'current_target',return_value=target),patch.object(context,'observe',return_value=packet),patch.object(context,'_call') as call:
                 self.assertFalse(context.exit_session_matches({},None,job));call.assert_not_called()
+
+
+class ClaudeNativeExitTests(unittest.TestCase):
+    def test_old_observation_alone_cannot_prove_current_session(self):
+        target={'provider':'claude','terminal':'t1'}
+        job={'target':target,'checkpoint_session_id':'00000000-0000-0000-0000-000000000001'}
+        old={'session_id':job['checkpoint_session_id'],'observed_at':0}
+        with patch.object(context,'current_target',return_value=target),patch.object(context,'observe',return_value=old),patch.object(context,'_call'),patch.object(context.subprocess,'run',return_value=type('R',(),{'stdout':'unchanged old screen'})()):
+            self.assertFalse(context.exit_session_matches({},None,job))
+
+    def test_fresh_status_session_must_match_and_own_status_dialog_is_closed(self):
+        session='00000000-0000-0000-0000-000000000001'
+        target={'provider':'claude','terminal':'t1'};job={'target':target,'checkpoint_session_id':session}
+        for actual,expected in ((session,True),('00000000-0000-0000-0000-000000000002',False)):
+            after='Settings  Status  Config  Usage\nSession ID: '+actual+'\nEsc to cancel'
+            with self.subTest(actual=actual),patch.object(context,'current_target',return_value=target),patch.object(context,'observe',return_value={'session_id':session,'observed_at':0}),patch.object(context,'_call') as call,patch.object(context.subprocess,'run',side_effect=[type('R',(),{'stdout':'old response'})(),type('R',(),{'stdout':after})()]):
+                self.assertEqual(context.exit_session_matches({},None,job),expected)
+                self.assertIn(unittest.mock.call('keys','t1','escape'),call.call_args_list)
