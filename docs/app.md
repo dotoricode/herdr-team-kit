@@ -101,6 +101,8 @@ GUI Claude 실행은 프로세스별 `--settings`로 GUI statusline 수집기를
 
 설계 읽기는 `TextView.markdown`의 서식 보기로 시작합니다. 본문은13px·22px 줄 높이·최대880px 폭이며 모달의 스크롤 영역 안에서 흐릅니다. 원문의 일반 줄 구분은 보기용 hard break로 보존하되 fenced/indented code는 그대로 둡니다. 원문·버전·digest는 바꾸지 않습니다. 원문 보기 버튼만300px 읽기 전용 코드 뷰로 전환합니다. 링크는 명시적 HTTP(S) 클릭만 시스템으로 넘기고 다른 scheme은 열지 않습니다. Orca의 React 기반 편집기 코드는 이 mod에 포함하지 않습니다.
 
+문서 영역은 Pretendard Regular(400)를 기본으로 사용하고 구역 제목은 Semibold(600), Markdown 제목과 강조는 렌더러의 기본 계층을 따릅니다. 원문 코드 보기에는 D2Coding12px을 적용합니다. 로컬 `document_font`·`document_code_font`로 문서 글꼴만 바꿀 수 있으며 상단 보드의 D2Coding과 팝오버 UI 글꼴은 독립적으로 유지합니다.
+
 요약의 Needs you는 앱 blocked, Working은 working, Done은 읽기 전 done, Idle은 idle입니다. 색은 현재 테마의 blocked/working/done/idle을 따르고, 총괄 연결 상태는 이 집계에 포함하지 않습니다. 이 개수는 연결된 제품 팀장만 대상으로 하며 제품 업무 완료 건수와 다릅니다.
 
 상태 요약 뱃지는 네이티브 Popover로 팀장 목록을 엽니다. 현재 앱 상태로 필터링하며 항목 선택은 해당 팀장으로 초점만 이동합니다. 다시 누르기/바깥 클릭/Esc/닫기로 닫습니다. 0개는 빈 목록 안내를 표시합니다. 펼침은 32ms 단발 준비 후 높이220ms/투명도150ms 네이티브 전환이며 반복 JS 애니메이션 타이머는 없습니다. `team-operations.status-idle` 등 네 상태 명령도 같은 열기 경로를 사용하고 `team-operations.close-status`는 닫습니다.

@@ -280,7 +280,7 @@ export default class TeamOperations extends View {
       if (d.id !== id) throw new Error("backend가 요청한 작업과 다른 문서를 반환했습니다.");
       this.doc = d;
       const t = theme();
-      this.docEditor = EditorState.new({ language: "markdown", readonly: true, value: String(d.body ?? ""), font_family: settings().font_family, font_size: 12, line_numbers: false, folding: false, soft_wrap: true,
+      this.docEditor = EditorState.new({ language: "markdown", readonly: true, value: String(d.body ?? ""), font_family: this.config?.document_code_font || "D2Coding", font_size: 12, line_numbers: false, folding: false, soft_wrap: true,
         syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 } });
     } catch (e) { this.message = String(e); }
     finally { this.docBusy = false; cx.notify(); }
@@ -476,7 +476,7 @@ export default class TeamOperations extends View {
       const approvalButtons = h_flex().flex_none().gap(6)
         .when(Boolean(doc?.can_approve), el => el.child(button("detail-approve", "이 설계 승인", cx => this.begin("approve", null, cx), !doc.can_approve)))
         .children((doc?.resumable ?? []).map(task => button(`detail-resume-${task.id}`, `재개 · ${task.id}`, cx => this.begin("resume", task, cx))));
-      const documentSection = v_flex().id("detail-document").min_h(0).gap(6).pt(4)
+      const documentSection = v_flex().id("detail-document").min_h(0).gap(6).pt(4).font_family(this.config?.document_font || "Pretendard").font_normal()
         .when(this.docBusy || this.docSource && this.docEditor != null, x => x.h(300).flex_none())
         .when(!this.docBusy && !this.docSource, x => x.flex_none())
         .child(h_flex().flex_none().items_center().justify_between().gap(8)
@@ -488,7 +488,7 @@ export default class TeamOperations extends View {
           ])))
         .when(Boolean(this.message), x => x.child(div().flex_none().text_color(/실패|오류|fail|error/i.test(this.message) ? t.blocked : t.muted).child(this.message)))
         .when(this.docBusy, x => x.child(div().flex_none().text_color(t.dim).child("설계를 읽는 중입니다.")))
-        .when(Boolean(doc) && !this.docSource, x => x.child(TextView.markdown(`design-preview-${doc.id}-${doc.revision}-${doc.digest}`, documentPreview(doc.body)).selectable(true).scrollable(false).w_full().max_w(880).flex_none().px(10).text_size(13).line_height("22px")
+        .when(Boolean(doc) && !this.docSource, x => x.child(TextView.markdown(`design-preview-${doc.id}-${doc.revision}-${doc.digest}`, documentPreview(doc.body)).selectable(true).scrollable(false).w_full().max_w(880).flex_none().px(10).font_family(this.config?.document_font || "Pretendard").font_normal().text_size(13).line_height("22px")
           .on_link_click((url, cx) => {
             try {
               const target = new URL(url);
