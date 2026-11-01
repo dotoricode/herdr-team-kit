@@ -228,6 +228,7 @@ export default class TeamOperations extends View {
   render(cx) {
     const t = theme(), data = this.data;
     const button = (id, text, fn, disabled = false) => div().id(id).px(10).py(6).rounded(6).cursor_pointer().bg(disabled ? t.chrome : t.raised).text_color(disabled ? t.dim : t.foreground).on_click((_e, cx) => { if (!disabled) fn(cx); }).child(text);
+    const badge = (text, color = t.muted) => div().flex_none().whitespace_nowrap().h(20).line_height("20px").px(7).rounded(5).bg(t.raised).text_size(11).font_semibold().text_color(color).child(text);
     const words = value => v_flex().min_w(0).gap(2).children(display(value).replaceAll("장부", "작업 기록").split("\n").map(line =>
       h_flex().min_w(0).flex_wrap().items_start().gap_x(4).gap_y(2).children(line.split(/\s+/).filter(Boolean).map(word =>
         div().max_w_full().whitespace_nowrap().truncate().child(word)))));
@@ -258,7 +259,7 @@ export default class TeamOperations extends View {
         .child(h_flex().h(28).flex_none().gap(6).items_center()
           .child(div().w(10).line_height("28px").flex_none().text_color(statusColor(status, t)).when(status === "working" && live.present && !this.error && !data?.native_error, el => el.frames(["●", "◉", "●", "◉"], 180)).child(status === "working" ? "●" : "·"))
           .child(div().h(28).line_height("28px").truncate().font_semibold().text_size(19).child(display(team.label))))
-        .child(div().h(20).flex_none().line_height("20px").truncate().text_size(12).text_color(statusColor(status, t)).child(status === "done" ? "새 응답 · 확인 전" : statusText(status)))
+        .child(h_flex().h(20).flex_none().child(badge(status === "done" ? "새 응답 · 확인 전" : statusText(status), statusColor(status, t))))
         .child(div().h(20).flex_none().line_height("20px").truncate().text_size(12).text_color(t.muted).child(`작업 상태 · ${taskStateText(team.ledger_state)}`));
     };
     const coordinatorStateText = { live: "연결됨", missing: "총괄 종료", recovering: "복구 중", unknown: "상태 미확인" }[coordinator?.state] ?? "상태 미확인";
@@ -405,7 +406,7 @@ export default class TeamOperations extends View {
         .child(words(hold.reason).text_size(11).text_color(t.blocked))) : [];
       return v_flex().id(`kanban-${definition.id}`).w(270).h_full().flex_none().min_h(0).gap(6).p(7).rounded(8).bg(t.chrome)
         .child(h_flex().flex_none().items_center().justify_between().gap(6)
-          .child(h_flex().items_center().gap(6).child(div().w(8).h(8).rounded_full().bg(definition.color)).child(div().whitespace_nowrap().font_semibold().child(definition.title)).child(div().whitespace_nowrap().text_size(11).text_color(t.dim).child(String(cards.length))))
+          .child(h_flex().items_center().gap(6).child(div().w(8).h(8).rounded_full().bg(definition.color)).child(div().whitespace_nowrap().font_semibold().child(definition.title)).child(badge(String(cards.length), cards.length > 0 ? definition.color : t.dim)))
           .when(definition.id === "complete", x => x.child(button("toggle-completed", this.showCompleted ? "접기" : "펼치기", cx => { this.showCompleted = !this.showCompleted; cx.notify(); }).text_size(10))))
         .child(v_flex().flex_1().min_h(0).gap(6).overflow_y_scrollbar().children([...holds, ...visible.map(boardCard)]))
         .when(cards.length === 0 && holds.length === 0, x => x.child(div().flex_none().px(4).py(8).text_size(11).text_color(t.dim).child("항목 없음")))
@@ -468,10 +469,10 @@ export default class TeamOperations extends View {
       .child(v_flex().id("operations-content").w_full().flex_1().min_h(0).gap(6).p(8)
         .child(v_flex().w_full().flex_none().gap(3)
           .child(h_flex().flex_wrap().gap(12).text_size(12).font_semibold()
-            .child(div().whitespace_nowrap().child(`실행 ${appCounts.working}`))
-            .child(div().whitespace_nowrap().child(`사용자 답변 필요 ${appCounts.blocked}`))
-            .child(div().whitespace_nowrap().text_color(t.muted).child(`미확인 ${unknownTeams}개`))
-            .child(div().whitespace_nowrap().text_color(coordinator?.state === "recovering" ? t.working : t.muted).child(`총괄 · ${coordinatorStateText}`)))
+            .child(badge(`● 실행 ${appCounts.working}`, appCounts.working > 0 ? t.working : t.muted))
+            .child(badge(`! 답변 필요 ${appCounts.blocked}`, appCounts.blocked > 0 ? t.blocked : t.muted))
+            .child(badge(`? 미확인 ${unknownTeams}`, unknownTeams > 0 ? t.blocked : t.muted))
+            .child(badge(`총괄 · ${coordinatorStateText}`, coordinator?.state === "live" ? t.done : coordinator?.state === "recovering" ? t.working : t.blocked)))
           .when(Boolean(coordinator?.reason) && !(coordinator?.state === "live" && ["GUI 체크포인트에서 새 총괄 대화를 열었습니다. 제품 업무는 자동 재개하지 않았습니다.", "GUI 체크포인트를 사용하는 총괄입니다."].includes(coordinator.reason)), el => el.child(words(`총괄 상태 · ${display(coordinator.reason)}`).text_size(11).text_color(t.muted))))
         .when(waiting.length > 0, el => el.child(v_flex().w_full().flex_none().gap(2)
           .child(div().whitespace_nowrap().text_size(11).font_semibold().text_color(t.muted).child("대기 이유"))
