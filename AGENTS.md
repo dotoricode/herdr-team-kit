@@ -8,3 +8,4 @@
 - Read `docs/operations.md` for account changes, handoff, shared manuals and PR gates. Keep implementation and review independent; bind reviews to the current head.
 - Preserve user changes and person-only commit authorship.
 - App dialogs and popovers must close on Escape and outside press as well as an explicit close button. Closing never submits an answer or authorizes work.
+- Background refresh preserves the displayed content, expanded sections and user drafts. Show loading for initial reads; notify only when visible data or errors change. Review cards put the requested decision and its next action before implementation details.

@@ -4,6 +4,7 @@ import { appHome, readTextFile, exec, agents, terminals, theme, settings, run, n
 
 const LOCAL = "/mods/team-operations/local.json";
 const DUMMY = "—";
+const visibleSnapshot = value => JSON.stringify(value, (key, item) => key === "observed_at" ? undefined : key === "age" && typeof item === "number" ? Math.floor(item / 60) : item);
 const display = value => value == null ? "미확인" : typeof value === "string" ? value : typeof value === "number" ? String(value) : Array.isArray(value) ? value.map(display).join(" / ") : typeof value === "boolean" ? (value ? "예" : "아니요") : JSON.stringify(value);
 const clock = value => {
   if (value == null) return DUMMY;
@@ -77,7 +78,8 @@ export default class TeamOperations extends View {
     this.showCompleted = false; this.coordinatorConfirm = false; this.coordinatorBusy = false; this.coordinatorMessage = null;
     this.usageBusy = false; this.usageMessage = null;
     this.statusOpen = null; this.statusRevealed = false; this.statusEpoch = 0;
-    this.detailData = null; this.detailError = null; this.detailBusy = false; this.detailHeight = null;
+    this.detailData = null; this.detailError = null; this.detailBusy = false; this.detailFetching = false; this.detailHeight = null;
+    this.showReviewFeedback = false;
     this.cardData = null; this.cardError = null; this.cardBusy = false;
     this.answerChoice = null; this.answerRevision = null; this.answerDirty = false; this.answerBusy = false; this.answerMessage = null;
     if (this.role === "detail") {
@@ -149,6 +151,8 @@ export default class TeamOperations extends View {
   async loadCard(cx) {
     if (this.cardBusy || !this.viewProps.workId) return;
     this.cardBusy = true;
+    const previous = visibleSnapshot(this.cardData), previousError = this.cardError;
+    if (!this.cardData && !this.cardError) cx.notify();
     try {
       const result = await this.args("card-detail", ["--kind", this.viewProps.kind === "inventory" ? "inventory" : "work", "--work", String(this.viewProps.workId)]);
       if (result.code !== 0) throw new Error(result.stderr || "카드 정보를 읽지 못했습니다.");
@@ -163,12 +167,12 @@ export default class TeamOperations extends View {
       }
       this.cardError = null;
     } catch (e) { this.cardError = String(e); }
-    finally { this.cardBusy = false; cx.notify(); }
+    finally { this.cardBusy = false; if (previous !== visibleSnapshot(this.cardData) || previousError !== this.cardError) cx.notify(); }
   }
 
   async saveAnswer(cx) {
     const card = this.cardData;
-    if (this.answerBusy || this.cardBusy || this.cardError || !card?.can_answer || !this.answerChoice) return;
+    if (this.answerBusy || this.cardBusy && !card || this.cardError || !card?.can_answer || !this.answerChoice) return;
     if (this.answerRevision !== card.revision) {
       this.answerMessage = "카드 내용이 바뀌었습니다. 최신 내용을 확인하고 답변을 다시 작성해 주세요."; cx.notify(); return;
     }
@@ -194,8 +198,10 @@ export default class TeamOperations extends View {
   }
 
   async loadDetail(cx) {
-    if (this.detailBusy || !this.viewProps.workId) return;
-    this.detailBusy = true; this.detailError = null; cx.notify();
+    if (this.detailFetching || !this.viewProps.workId) return;
+    this.detailFetching = true; this.detailBusy = !this.detailData && !this.detailError;
+    const previous = visibleSnapshot(this.detailData), previousError = this.detailError;
+    if (this.detailBusy) cx.notify();
     try {
       const workId = this.viewProps.linkedWorkId ?? this.viewProps.workId;
       const r = await this.args("work-detail", ["--work", String(workId)]);
@@ -203,8 +209,9 @@ export default class TeamOperations extends View {
       const detail = JSON.parse(r.stdout);
       if (String(detail.id) !== String(workId)) throw new Error("요청한 작업과 다른 정보를 받았습니다.");
       this.detailData = detail;
+      this.detailError = null;
     } catch (e) { this.detailError = String(e); }
-    finally { this.detailBusy = false; cx.notify(); }
+    finally { this.detailFetching = false; this.detailBusy = false; if (previous !== visibleSnapshot(this.detailData) || previousError !== this.detailError) cx.notify(); }
   }
 
   openDetail(kind, item, readDocument = false) {
@@ -233,8 +240,9 @@ export default class TeamOperations extends View {
   }
 
   async refresh(cx) {
-    if (this.busy) return;
-    this.busy = true; const seq = ++this.seq;
+    if (this.refreshing) return;
+    this.refreshing = true; this.busy = !this.data && !this.error; const seq = ++this.seq;
+    const previous = visibleSnapshot(this.data), previousError = this.error, previousConfirm = this.confirm;
     try {
       const result = await this.args("view");
       if (result.code !== 0) throw new Error(result.stderr || `현황 조회 명령이 실패했습니다 (종료 코드 ${result.code}).`);
@@ -245,7 +253,7 @@ export default class TeamOperations extends View {
         if (this.confirm && (!this.doc || this.doc.id !== this.confirm.id || this.doc.revision !== this.confirm.revision || this.doc.digest !== this.confirm.digest || this.doc.phase !== this.confirm.phase || latest?.revision !== this.confirm.revision || latest?.phase !== this.confirm.phase || (latest?.digest != null && latest.digest !== this.confirm.digest))) this.confirm = null;
       }
     } catch (e) { if (seq === this.seq) this.error = String(e); }
-    finally { this.busy = false; cx.notify(); }
+    finally { this.refreshing = false; this.busy = false; if (previous !== visibleSnapshot(this.data) || previousError !== this.error || previousConfirm !== this.confirm) cx.notify(); }
   }
 
   async document(work, cx) {
@@ -422,6 +430,7 @@ export default class TeamOperations extends View {
       const detail = this.detailData;
       const card = this.cardData;
       const detailWork = detail ?? card ?? this.viewProps.item ?? { id: this.viewProps.workId };
+      const designReview = this.viewProps.kind === "work" && (card?.status ?? detail?.phase ?? detailWork.phase) === "awaiting_approval";
       const tasks = detail?.tasks ?? [];
       const leader = detail?.leader ?? card?.leader;
       const doc = this.doc;
@@ -483,13 +492,13 @@ export default class TeamOperations extends View {
         || liveTerminals.some(terminal => terminal.address === leader.terminal || terminal.name === leader.terminal)));
       const answer = card?.answer;
       const answerChoices = h_flex().flex_wrap().gap(6).children((card?.choices ?? []).map(choice =>
-        button(`answer-${choice.id}`, `${this.answerChoice === choice.id ? "● " : ""}${choice.label}`, cx => {
+        button(`answer-${choice.id}`, `${this.answerChoice === choice.id ? "● " : ""}${designReview && choice.id === "confirmed" ? "읽었습니다 · 승인 아님" : choice.label}`, cx => {
           if (!this.answerDirty) this.answerRevision = card?.revision;
           this.answerChoice = choice.id; this.answerDirty = true; this.answerMessage = null; cx.notify();
         }, this.answerBusy).border_1().border_color(this.answerChoice === choice.id ? t.accent : t.border).text_size(12)));
       const answerSection = v_flex().flex_none().gap(6).p(10).rounded(7).bg(t.surface)
-        .child(div().text_size(12).font_semibold().child("내 확인 결과"))
-        .child(words(card?.prompt ?? "확인 결과와 필요한 조치를 적어 주세요.").text_size(12))
+        .child(div().text_size(12).font_semibold().child(designReview ? "설계에 대한 의견" : "내 확인 결과"))
+        .child(words(designReview ? "바꾸고 싶은 범위나 확인할 점을 적어 주세요. 저장한 의견은 총괄이 확인합니다." : card?.prompt ?? "확인 결과와 필요한 조치를 적어 주세요.").text_size(12))
         .when(this.answerRevision != null && this.answerRevision !== card?.revision, x => x.child(v_flex().gap(5)
           .child(words("카드 내용이 바뀌었습니다. 최신 내용을 확인한 뒤 답변을 다시 작성해 주세요.").text_color(t.blocked))
           .child(button("reset-card-answer", "최신 내용으로 다시 작성", cx => {
@@ -499,12 +508,23 @@ export default class TeamOperations extends View {
         .when(Boolean(this.answerInput), x => x.child(Textarea.new(this.answerInput).h(76).px(8).py(5).rounded(6).border_1().border_color(t.border).bg(t.background).text_size(12).text_color(t.foreground)))
         .child(h_flex().gap(8).items_center()
           .child(div().flex_1().text_size(10).text_color(t.muted).child("저장한 답변은 총괄 확인 대기입니다. 작업 완료·설계 승인으로 자동 처리하지 않습니다."))
-          .child(button("save-card-answer", this.answerBusy ? "저장 중" : "답변 저장", cx => cx.spawn(async cx => this.saveAnswer(cx)), this.answerBusy || this.cardBusy || Boolean(this.cardError) || !this.answerChoice || this.answerRevision != null && this.answerRevision !== card?.revision).text_size(11)));
+          .child(button("save-card-answer", this.answerBusy ? "저장 중" : designReview ? "의견 저장" : "답변 저장", cx => cx.spawn(async cx => this.saveAnswer(cx)), this.answerBusy || this.cardBusy && !card || Boolean(this.cardError) || !this.answerChoice || this.answerRevision != null && this.answerRevision !== card?.revision).text_size(11)));
+      const reviewGuide = v_flex().flex_none().gap(6).p(10).rounded(7).bg(t.surface)
+        .child(div().text_size(12).font_semibold().child("설계를 읽고 진행 여부를 결정해 주세요"))
+        .child(words("담당 팀장이 이 설계의 진행 허락을 기다리고 있습니다.").text_size(12))
+        .when(Boolean(card?.prompt && card.prompt !== "무엇을 확인했고 어떤 조치가 필요한가요?"), x => x.child(words(card.prompt).text_size(12)))
+        .child(words("1. 설계 열기 → 2. 변경 범위와 검증 방법 확인 → 3. 동의하면 ‘이 설계 승인’ 선택").text_size(12))
+        .child(h_flex().flex_wrap().gap(6)
+          .child(button("review-open-design", this.docBusy ? "설계 읽는 중" : doc ? "설계 다시 읽기" : "설계 열고 검토하기", cx => cx.spawn(async cx => this.document(detailWork, cx)), this.docBusy || this.actionBusy || Boolean(this.cardError) || Boolean(card?.document_state && card.document_state !== "available")))
+          .when(Boolean(card?.can_answer), x => x.child(button("review-show-feedback", this.showReviewFeedback ? "의견 접기" : "수정 의견 남기기", cx => { this.showReviewFeedback = !this.showReviewFeedback; cx.notify(); }))))
+        .when(Boolean(card?.document_state && card.document_state !== "available"), x => x.child(words("설계 문서를 읽을 수 없습니다. 담당 팀장에게 문서를 확인해 주세요.").text_color(t.blocked)))
+        .when(!this.data?.actions_enabled, x => x.child(words("현재 승인은 비활성 상태입니다. 설계는 읽을 수 있습니다.").text_color(t.muted)));
       const body = v_flex().id("detail-body").size_full().min_h(0).gap(9).overflow_y_scroll()
-        .when(this.detailBusy || this.cardBusy && !card, x => x.child(div().p(8).text_color(t.dim).child("카드 정보를 읽는 중입니다.")))
+        .when(this.detailBusy || this.cardBusy && !card && !this.cardError, x => x.child(div().p(8).text_color(t.dim).child("카드 정보를 읽는 중입니다.")))
         .when(Boolean(this.detailError || this.cardError), x => x.child(words(`정보를 읽지 못했습니다 · ${this.detailError ?? this.cardError}`).text_color(t.blocked)))
+        .when(designReview, x => x.child(reviewGuide))
         .child(v_flex().flex_none().gap(4).p(9).rounded(7).bg(t.surface)
-          .child(div().text_size(12).font_semibold().child(this.viewProps.kind === "inventory" ? "이 카드에서 확인할 내용" : "작업 목적"))
+          .child(div().text_size(12).font_semibold().child(this.viewProps.kind === "inventory" ? "이 카드에서 확인할 내용" : designReview ? "검토할 작업 범위" : "작업 목적"))
           .child(words(card?.reason ?? detail?.reason ?? detail?.goal ?? detail?.purpose ?? detail?.description ?? detailWork.reason ?? detailWork.condition ?? detailWork.title).text_size(12)))
         .child(pair("담당", card?.team_label ?? leader?.label ?? "담당 팀장 미지정"))
         .when(Boolean(leader?.terminal), x => x.child(h_flex().gap(8).items_center()
@@ -514,9 +534,9 @@ export default class TeamOperations extends View {
         .when(tasks.length > 0, x => x.child(v_flex().flex_none().gap(5)
           .child(div().font_semibold().text_size(12).text_color(t.accent).child(`연결된 세션 · ${tasks.length}`))
           .children(detailSessions)))
-        .when(detail?.observed_at != null, x => x.child(div().text_size(10).text_color(t.dim).child(`세션 마지막 확인 · ${clock(detail.observed_at)}`)))
+        .when(detail?.native_error, x => x.child(words(detail.native_error).text_size(11).text_color(t.blocked)))
         .when(tasks.length === 0 && !this.detailBusy && !this.detailError, x => x.child(words(this.viewProps.kind === "inventory" && !this.viewProps.linkedWorkId ? "운영 환경 구축 카드입니다. 제품 구현 세션은 연결하지 않았습니다." : "현재 연결된 작업 세션이 없습니다.").text_size(11).text_color(t.muted)))
-        .when(Boolean(card?.can_answer), x => x.child(answerSection))
+        .when(Boolean(card?.can_answer) && (!designReview || this.showReviewFeedback), x => x.child(answerSection))
         .when(Boolean(answer), x => x.child(v_flex().flex_none().gap(3).p(8).rounded(6).bg(t.chrome)
           .child(div().text_size(11).font_semibold().text_color(t.accent).child(`저장된 답변 · ${(card?.choices ?? []).find(c => c.id === answer.choice)?.label ?? display(answer.choice)} · 총괄 확인 대기`))
           .when(Boolean(answer.text), x => x.child(words(answer.text).text_size(12)))
