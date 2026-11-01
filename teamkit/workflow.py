@@ -197,6 +197,9 @@ def run(args,config,store):
         if args.action=='approve':
             idle(store,work)
             path,contract,digest=document(config,work)
+            if (getattr(args,'expected_revision',None) is not None and args.expected_revision!=work['revision']
+                    or getattr(args,'expected_digest',None) is not None and args.expected_digest!=digest):
+                raise ValueError('selected approval revision/digest changed; read the design again')
             if work['phase']!='awaiting_approval' or work.get('submitted_digest')!=digest or not args.user_approved or not args.approval_reference.strip():
                 raise ValueError('explicit approval must match the submitted revision')
             with revision_guard(work['root']):

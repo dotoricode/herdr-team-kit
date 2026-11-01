@@ -39,6 +39,8 @@ def load(path):
     if type(ttl) is not int or not 1 <= ttl <= 300:
         raise ValueError('quota TTL must be 1..300 seconds')
     value['quota_ttl_seconds'] = ttl
+    if value.get('runtime_backend', 'tui') not in ('tui', 'core'):
+        raise ValueError('runtime_backend must be tui or core')
     if type(value.get('require_design_approval',False)) is not bool:
         raise ValueError('require_design_approval must be boolean')
     private=value.get('private_plan_root')

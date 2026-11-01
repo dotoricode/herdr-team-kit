@@ -75,6 +75,8 @@ def parser():
     x.add_argument('--work', help='parent product work ID; binds the exact design revision')
     x = commands.add_parser('dispatch')
     x.add_argument('task')
+    x.add_argument('--expected-attempt',type=int)
+    x.add_argument('--terminal',help='adopt an unowned idle core leader terminal without restarting it')
     for cmd in ('show', 'events', 'plan'):
         x = commands.add_parser(cmd); x.add_argument('task')
     commands.add_parser('list')
@@ -83,6 +85,8 @@ def parser():
     x = commands.add_parser('retire');x.add_argument('task');x.add_argument('--owner',required=True)
     x.add_argument('--writer-stopped',action='store_true',required=True);x.add_argument('--evidence-file',required=True)
     x = commands.add_parser('tell'); x.add_argument('task'); x.add_argument('--message-file', required=True)
+    x.add_argument('--expected-owner')
+    x.add_argument('--expected-attempt',type=int)
     for cmd in ('handoff', 'complete'):
         x = commands.add_parser(cmd); x.add_argument('task'); x.add_argument('--owner', required=True)
         x.add_argument('--evidence-file', required=True)
@@ -102,6 +106,8 @@ def parser():
         if action=='approve':
             x.add_argument('--user-approved',action='store_true',required=True)
             x.add_argument('--approval-reference',required=True)
+            x.add_argument('--expected-revision',type=int)
+            x.add_argument('--expected-digest')
         if action in ('checkpoint','record'):x.add_argument('--evidence-file',required=True)
         if action=='record':x.add_argument('--step',required=True)
         if action=='finish':x.add_argument('--review-task',required=True)
@@ -193,6 +199,11 @@ def run(args):
                 revision=work['revision']
             return store.create(args.task, args.team, args.role, str(root), base, Path(args.goal_file).read_text(), kind, classification(args.role, args.work_kind, args.risk),args.work,digest,revision)
         task = store.get(args.task)
+        if args.command in ('dispatch','tell'):
+            if args.expected_attempt is not None and task.get('attempt_count',0)!=args.expected_attempt:
+                raise ValueError('selected task attempt changed; inspect before sending')
+            if args.command=='tell' and args.expected_owner is not None and task.get('owner')!=args.expected_owner:
+                raise ValueError('selected task owner changed; inspect before sending')
         if args.command == 'plan':
             return execution_policy(config, task)
         if args.command == 'authorize':
@@ -204,8 +215,15 @@ def run(args):
             return store.authorize(args.task, decision, args.user_approved)
         if args.command == 'dispatch':
             # Refuse before claiming: outside Herdr is a known no-op, not an uncertain launch.
-            if os.environ.get('HERDR_ENV') != '1':
+            if config.get('runtime_backend', 'tui') == 'core':
+                from .core_runtime import require_managed
+                require_managed()
+            elif os.environ.get('HERDR_ENV') != '1':
                 raise KitError('dispatch must run inside Herdr')
+            if args.terminal and (config.get('runtime_backend', 'tui') != 'core'
+                    or task['role'] != 'leader' or task.get('work_id')
+                    or task.get('classification', {}).get('kind') == 'design'):
+                raise KitError('terminal adoption is limited to unlinked plain core leaders')
             from .workflow import check_task
             work=check_task(config,store,task)
             role = execution_policy(config, task)
@@ -233,6 +251,10 @@ def run(args):
             if checkpoint and checkpoint.get('worktree_fingerprint') != task_fingerprint(task, config):
                 raise ValueError('checkpoint worktree changed; reconcile before dispatch')
             spec = launch_spec(provider, pr, None)
+            if provider=='claude' and config.get('runtime_backend')=='core':
+                if args.terminal:raise KitError('existing Claude statusline scope cannot be changed by adoption; use a fresh GUI execution')
+                from .core_runtime import claude_gui_settings
+                spec=claude_gui_settings(spec,args.config,args.state,account,config.get('claude_display_commands',{}).get(account,''))
             spec['args'] += ['--add-dir', str(Path(args.state).parent)]
             launch_task=task
             designing=work and task['role']=='leader'
@@ -251,16 +273,29 @@ def run(args):
                 if paths_overlap(design_dir,Path(task['root'])) or paths_overlap(Path(args.state).parent,Path(task['root'])):
                     raise ValueError('design writable roots overlap product source')
                 launch_task={**task,'root':str(design_dir)}
+            if args.terminal:
+                from .core_runtime import CoreRuntime
+                CoreRuntime.validate_adoption(launch_task, spec, args.terminal)
             owner = uuid.uuid4().hex
             spec['env'].update(TEAMKIT_TASK=args.task, TEAMKIT_OWNER=owner,
                                TEAMKIT_CONFIG=str(Path(args.config).resolve()), TEAMKIT_STATE=str(Path(args.state).resolve()))
             store.claim(args.task, owner, provider, account, pr['model'], pr.get('effort','medium'), expected_task=task,approval_config=config)
-            runtime = Herdr()
+            if config.get('runtime_backend', 'tui') == 'core':
+                from .core_runtime import CoreRuntime
+                runtime = CoreRuntime()
+            else:
+                runtime = Herdr()
             name = 'tk-'+owner[:20]
             try:
-                store.update(args.task, owner, 'launching',
-                             {'receipt_protocol':'host-fresh-v1','profile_binding':binding(pr)} if provider=='codex' else {})
-                launched = runtime.launch(launch_task, spec, name, lambda detail: store.note(args.task, owner, detail))
+                launching = {'receipt_protocol':'host-fresh-v1','profile_binding':binding(pr)} if provider=='codex' else {}
+                if config.get('runtime_backend', 'tui') == 'core':
+                    launching['backend'] = 'core'
+                store.update(args.task, owner, 'launching', launching)
+                record = lambda detail: store.note(args.task, owner, detail)
+                if args.terminal:
+                    launched = runtime.adopt(launch_task, spec, name, args.terminal, record)
+                else:
+                    launched = runtime.launch(launch_task, spec, name, record)
                 store.update(args.task, owner, 'submitted', launched)
                 receipt = [sys.executable,str(Path(__file__).resolve().parent.parent/'teamkit_cli.py'),'--config',str(Path(args.config).resolve()),
                            '--state',str(Path(args.state).resolve()),'receipt',args.task,'--owner',owner]
@@ -290,18 +325,35 @@ def run(args):
         if args.command == 'park':
             return store.park(args.task, args.owner)
         if args.command == 'tell':
-            if os.environ.get('HERDR_ENV') != '1':
-                raise KitError('tell must run inside Herdr')
+            backend = config.get('runtime_backend', 'tui')
+            if task.get('runtime', {}).get('backend', 'tui') != backend:
+                raise KitError('task runtime differs from configured backend; inspect before sending')
+            if backend == 'core':
+                from .core_runtime import CoreRuntime, require_managed
+                require_managed()
+                runtime = CoreRuntime(task)
+            else:
+                if os.environ.get('HERDR_ENV') != '1':
+                    raise KitError('tell must run inside Herdr')
+                runtime = Herdr()
             from .workflow import check_task
             check_task(config,store,task)
-            status = Herdr().call('agent','get',task['runtime']['name'])
+            status = runtime.call('agent','get',task['runtime']['name'])
             agent = status.get('agent', status)
-            if agent.get('agent_status') not in ('idle','done'):
+            allowed = ('idle','done')
+            if agent.get('agent_status') not in allowed:
                 raise KitError('leader is not idle; inspect before sending')
             store.wake(args.task, task['owner'], approval_config=config)
             try:
-                Herdr().prompt(task['runtime']['name'], Path(args.message_file).read_text()+
-                               '\nAfter processing, park the leader through the task ledger.')
+                import shlex
+                park=[sys.executable,str(Path(__file__).resolve().parent.parent/'teamkit_cli.py'),
+                      '--config',args.config,'--state',args.state,'park',args.task,'--owner',task['owner']]
+                runtime.prompt(task['runtime']['name'],
+                               'CONTINUATION OF AN ALREADY RECEIPTED TASK. The same owner is now running. '
+                               'Do not execute the initial receipt command again; it only applies to a new submitted dispatch.\n'+
+                               'Task '+args.task+' / owner '+task['owner']+' / attempt '+str(task.get('attempt_count',0))+'\n'+
+                               Path(args.message_file).read_text()+
+                               '\nAfter processing and stopping task work, run this exact park command:\n'+shlex.join(park))
             except BaseException:
                 current = store.get(args.task)
                 if current['state'] == 'running':
