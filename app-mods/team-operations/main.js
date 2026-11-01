@@ -316,6 +316,11 @@ export default class TeamOperations extends View {
     const accountArea = v_flex().id("account-area").w_full().max_h(150).flex_none().min_h(0).gap(3).overflow_y_scrollbar()
       .child(h_flex().flex_none().justify_between().items_center()
         .child(div().font_semibold().text_size(12).text_color(t.accent).child("계정 · 보조 정보"))
+        .child(h_flex().flex_1().min_w(0).gap(10).px(12).text_size(10)
+          .child(div().text_color(t.ansi2).child("<70%"))
+          .child(div().text_color(t.ansi3).child("70–<90%"))
+          .child(div().text_color(t.ansi1).child("≥90%"))
+          .child(div().text_color(t.dim).child("지난 기록")))
         .child(button("refresh-usage", this.usageBusy || data?.usage_refreshing ? "사용량 갱신 중" : "사용량 갱신", cx => cx.spawn(async cx => this.refreshUsage(cx)), this.usageBusy || data?.usage_refreshing).text_size(11)))
       .when(Boolean(this.usageMessage), x => x.child(div().flex_none().text_size(10).text_color(/⚠|실패|오류/i.test(this.usageMessage) ? t.blocked : t.muted).child(this.usageMessage)))
       .children(accountRows);
