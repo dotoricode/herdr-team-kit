@@ -64,8 +64,9 @@ class ContextHandoffTests(unittest.TestCase):
         self.assertIn('입력',value['reason'])
 
     def test_checkpoint_message_is_sent_once_and_never_replayed_after_uncertain_send(self):
+        self.target['kind']='coordinator'
         job=self.request()
-        with patch.object(context,'load',return_value=self.config),patch.object(context,'current_target',return_value=self.target),patch.object(context,'native',return_value={}),patch.object(context,'clean_prompt',return_value=True),patch.object(context,'observe',return_value=self.observation),patch.object(context,'_call',side_effect=TimeoutError) as call:
+        with patch.object(context,'load',return_value=self.config),patch.object(context,'current_target',return_value=self.target),patch.object(context,'native',return_value={}),patch.object(context,'clean_prompt',return_value=True),patch.object(context,'observe',return_value=self.observation),patch.object(context,'capacity_available',return_value=True),patch.object(context,'_call',side_effect=TimeoutError) as call:
             context.advance(self.config_path,self.state,job)
             context.advance(self.config_path,self.state,job)
             self.assertEqual(call.call_count,1)
@@ -166,7 +167,7 @@ class ActualHandoffFlowTests(Fixture):
         quota={'binding':binding(self.value['profiles']['codex']['team']), 'observed_at':time.time(),
                'five_hour':{'used':1,'resets_at':time.time()+3600},'weekly':{'used':1,'resets_at':time.time()+86400}}
         store.quota('codex/team',quota);store.close()
-        with patch.object(context,'_call',return_value={'address':'t3'}) as call:
+        with patch.object(context,'capacity_available',return_value=True),patch.object(context,'_call',return_value={'address':'t3'}) as call:
             context.advance(self.config,self.state,self.job)
             self.assertIn('dispatch',call.call_args.args)
         store=Store(self.state)
@@ -178,6 +179,22 @@ class ActualHandoffFlowTests(Fixture):
             context.advance(self.config,self.state,self.job)
             self.assertEqual(attach.call_args.args[-1],'t2')
         self.assertEqual(context.read(context.job_path(self.state,self.job['id']))['phase'],'done')
+
+    def test_capacity_counts_unmanaged_models_and_reserves_pending_handoffs(self):
+        terminals=[{'address':'outside'+str(i),'agent':'codex','status':'working'} for i in range(2)]
+        with patch.object(context,'_call',return_value={'terminals':terminals}):
+            # Existing running T1 + two other model turns exhausts the limit.
+            self.assertFalse(context.capacity_available(self.state))
+            self.assertTrue(context.capacity_available(self.state,self.target))
+        context.set_phase(self.state,self.job,'dispatching')
+        with patch.object(context,'_call',return_value={'terminals':terminals}):
+            self.assertFalse(context.capacity_available(self.state))
+
+    def test_budget_and_context_crossing_cannot_create_two_jobs_for_one_owner(self):
+        config=load(self.config)
+        self.assertIsNone(context.request(config,self.state,self.target,
+            {'metric':'five_hour','used':97,'observed_at':time.time(),'source':'codex-native-quota'}))
+        self.assertEqual(len(context.jobs(self.state)),1)
 
     def test_changed_worktree_after_checkpoint_does_not_release_owner(self):
         self.save_checkpoint()
@@ -232,3 +249,45 @@ class NativePromptTests(unittest.TestCase):
                               ('response\n› Ask Codex to do anything\nContext',True)]:
             with self.subTest(text=text),patch.object(context.subprocess,'run',return_value=type('Result',(),{'stdout':text})()):
                 self.assertEqual(context.clean_prompt(value,target),expected)
+
+
+class ParkedBudgetHandoffTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        self.value['teams']['alpha']['roles']['leader']=self.value['teams']['alpha']['roles']['implementer']
+        self.value.update(runtime_backend='core',private_plan_root=str(self.root),
+            context_bindings=str(self.root/'bindings.json'),context_handoff={'enabled':True,'threshold':90,'interval':10})
+        self.config.write_text(json.dumps(self.value))
+        self.call('create','L1','--team','alpha','--role','leader','--root',str(self.repo),'--goal-file',str(self.root/'goal.txt'))
+        store=Store(self.state)
+        store.claim('L1','standby-owner','codex','personal','fixture','medium')
+        runtime={'backend':'core','name':'fixture-standby','native_pid':123,'terminal':'t1'}
+        store.update('L1','standby-owner','launching',runtime);store.update('L1','standby-owner','submitted',runtime)
+        store.receipt('L1','standby-owner');store.park('L1','standby-owner');store.close()
+        self.target=context.targets(load(self.config),self.state)[0]
+        self.job=context.request(load(self.config),self.state,self.target,
+            {'metric':'weekly','used':100,'observed_at':time.time(),'source':'codex-native-quota'})
+
+    def test_exhausted_parked_leader_uses_saved_standby_without_new_model_turn(self):
+        result=type('Result',(),{'stdout':'• Received and parked. No product work started.\n\n› Ask Codex to do anything\n'})()
+        original=context.subprocess.run
+        def native_read(args,**kwargs):
+            return result if args[:2]==['hc','read'] else original(args,**kwargs)
+        with patch.object(context,'native',return_value={}),patch.object(context,'clean_prompt',return_value=True),patch.object(context,'_call',return_value={'terminals':[]}) as call,patch.object(context.subprocess,'run',side_effect=native_read):
+            context.advance(self.config,self.state,self.job)
+            self.assertTrue(all(c.args==('ls','--json') for c in call.call_args_list))
+        saved=context.read(context.job_path(self.state,self.job['id']))
+        self.assertEqual(saved['phase'],'checkpoint_ready')
+        self.assertEqual(saved['checkpoint_source'],'host-parked-leader')
+        self.assertTrue(context.read(context.directory(self.state)/(self.job['id']+'-handoff.json'))['context_continuation']['was_ready'])
+        store=Store(self.state)
+        try:self.assertEqual(store.get('L1')['state'],'ready')
+        finally:store.close()
+
+    def test_active_descendant_prevents_host_checkpoint(self):
+        rows=[{'address':'child','parent':'t1','status':'working'}]
+        with patch.object(context,'native',return_value={}),patch.object(context,'clean_prompt',return_value=True),patch.object(context,'_call',return_value={'terminals':rows}):
+            context.advance(self.config,self.state,self.job)
+        saved=context.read(context.job_path(self.state,self.job['id']))
+        self.assertEqual(saved['phase'],'pending')
+        self.assertIn('하위 담당',saved['reason'])
