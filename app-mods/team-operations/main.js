@@ -229,6 +229,7 @@ export default class TeamOperations extends View {
     const t = theme(), data = this.data;
     const button = (id, text, fn, disabled = false) => div().id(id).px(10).py(6).rounded(6).cursor_pointer().bg(disabled ? t.chrome : t.raised).text_color(disabled ? t.dim : t.foreground).on_click((_e, cx) => { if (!disabled) fn(cx); }).child(text);
     const badge = (text, color = t.muted) => div().flex_none().whitespace_nowrap().h(20).line_height("20px").px(7).rounded(5).bg(t.raised).text_size(11).font_semibold().text_color(color).child(text);
+    const statusBadge = (label, status) => badge(label, t[status]).bg(t[status]).text_color("#000000");
     const words = value => v_flex().min_w(0).gap(2).children(display(value).replaceAll("장부", "작업 기록").split("\n").map(line =>
       h_flex().min_w(0).flex_wrap().items_start().gap_x(4).gap_y(2).children(line.split(/\s+/).filter(Boolean).map(word =>
         div().max_w_full().whitespace_nowrap().truncate().child(word)))));
@@ -244,8 +245,9 @@ export default class TeamOperations extends View {
       const status = agent?.status ?? (raw === "done" ? "unknown" : raw);
       return { agent, terminal, status, present: Boolean(team.terminal && (agent || terminal)) };
     };
-    const appCounts = teams.reduce((n, team) => { const s = liveFor(team).status; if (s === "working") n.working++; if (s === "blocked") n.blocked++; return n; }, { working: 0, blocked: 0 });
-    const unknownTeams = teams.filter(team => { const status = liveFor(team).status; return status === "unknown" || status === "missing" || !STATUS_TEXT[status]; }).length;
+    const appStates = ["blocked", "working", "done", "idle"];
+    const appCounts = teams.reduce((n, team) => { const status = liveFor(team).status; if (appStates.includes(status)) n[status]++; return n; }, { blocked: 0, working: 0, done: 0, idle: 0 });
+    const unknownTeams = teams.filter(team => !appStates.includes(liveFor(team).status)).length;
     const waiting = [...new Set([...teams.map(x => x.reason), ...works.map(x => x.reason)]
       .filter(Boolean).map(display))];
     const summary = `실행 ${appCounts.working} · 사용자 답변 필요 ${appCounts.blocked}`;
@@ -469,10 +471,12 @@ export default class TeamOperations extends View {
       .child(v_flex().id("operations-content").w_full().flex_1().min_h(0).gap(6).p(8)
         .child(v_flex().w_full().flex_none().gap(3)
           .child(h_flex().flex_wrap().gap(12).text_size(12).font_semibold()
-            .child(badge(`● 실행 ${appCounts.working}`, appCounts.working > 0 ? t.working : t.muted))
-            .child(badge(`! 답변 필요 ${appCounts.blocked}`, appCounts.blocked > 0 ? t.blocked : t.muted))
-            .child(badge(`? 미확인 ${unknownTeams}`, unknownTeams > 0 ? t.blocked : t.muted))
-            .child(badge(`총괄 · ${coordinatorStateText}`, coordinator?.state === "live" ? t.done : coordinator?.state === "recovering" ? t.working : t.blocked)))
+            .child(statusBadge(`Needs you ${appCounts.blocked}`, "blocked"))
+            .child(statusBadge(`Working ${appCounts.working}`, "working"))
+            .child(statusBadge(`Done ${appCounts.done}`, "done"))
+            .child(statusBadge(`Idle ${appCounts.idle}`, "idle"))
+            .when(unknownTeams > 0, el => el.child(badge(`? 미확인 ${unknownTeams}`, t.unknown)))
+            .child(badge(`총괄 · ${coordinatorStateText}`, coordinator?.state === "live" ? t.muted : coordinator?.state === "recovering" ? t.working : t.blocked)))
           .when(Boolean(coordinator?.reason) && !(coordinator?.state === "live" && ["GUI 체크포인트에서 새 총괄 대화를 열었습니다. 제품 업무는 자동 재개하지 않았습니다.", "GUI 체크포인트를 사용하는 총괄입니다."].includes(coordinator.reason)), el => el.child(words(`총괄 상태 · ${display(coordinator.reason)}`).text_size(11).text_color(t.muted))))
         .when(waiting.length > 0, el => el.child(v_flex().w_full().flex_none().gap(2)
           .child(div().whitespace_nowrap().text_size(11).font_semibold().text_color(t.muted).child("대기 이유"))
