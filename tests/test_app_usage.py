@@ -295,6 +295,42 @@ class NativeAdmissionTests(UsageFixture):
                 'five_hour':{'used':0, 'resets_at':at+300}, 'weekly':{'used':0, 'resets_at':at+600}})
         self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
 
+    def test_equal_timestamps_display_matches_the_routed_composition(self):
+        self.probe(weekly=95)
+        from teamkit.policy import CLAUDE_QUOTA_SOURCE
+        from teamkit.config import cached_quota
+        at = json.loads(self.attempt_path().read_text())['observed_at']
+        with StoreContext(self.state) as db:
+            db.quota('claude/team', {'source':CLAUDE_QUOTA_SOURCE,
+                'binding':binding(self.value['profiles']['claude']['team']), 'observed_at':at,
+                'five_hour':{'used':0, 'resets_at':at+300}, 'weekly':{'used':0, 'resets_at':at+600}})
+        self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+        with patch('teamkit.app_usage.providers.codex_quota', return_value=self.raw), patch('teamkit.app_usage.claude_identity'):
+            row = collect(self.value, self.state)['accounts']['claude/team']
+        with StoreContext(self.state) as db:
+            routed = cached_quota(self.value, db, 'claude', 'team')
+        self.assertFalse(row['display_only'])
+        self.assertEqual(row['source'], routed['source'])
+        self.assertEqual(row['windows']['weekly']['used'], routed['weekly']['used'])
+        self.assertEqual(row['windows']['weekly']['used'], 95)
+        self.assertEqual(row['windows']['five_hour']['used'], routed['five_hour']['used'])
+
+    def test_equal_timestamp_display_keeps_a_rejected_tied_response(self):
+        self.probe(weekly=95)
+        from teamkit.policy import CLAUDE_QUOTA_SOURCE
+        from teamkit.config import cached_quota
+        at = json.loads(self.attempt_path().read_text())['observed_at']
+        with StoreContext(self.state) as db:
+            db.quota('claude/team', {'source':CLAUDE_QUOTA_SOURCE, 'unavailable':True,
+                'binding':binding(self.value['profiles']['claude']['team']), 'observed_at':at,
+                'five_hour':{'used':1, 'resets_at':at+300}, 'weekly':{'used':2, 'resets_at':at+600}})
+        with patch('teamkit.app_usage.providers.codex_quota', return_value=self.raw), patch('teamkit.app_usage.claude_identity'):
+            row = collect(self.value, self.state)['accounts']['claude/team']
+        with StoreContext(self.state) as db:
+            routed = cached_quota(self.value, db, 'claude', 'team')
+        self.assertEqual(row['source'], routed['source'])
+        self.assertNotEqual(row['status'], 'query_succeeded')
+
     def test_private_probe_file_is_required_and_tui_does_not_consume_it(self):
         self.probe()
         path = self.attempt_path()

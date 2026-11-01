@@ -194,6 +194,15 @@ def collect(config,state):
                             verified=native_admission_quota(config,state,account)
                             if verified and verified['observed_at']==observation['observed_at']:
                                 value=verified;display=False
+                        elif (isinstance(observation,dict) and value and observation.get('binding')==binding(pr)
+                                and observation.get('source')=='native-cli-manual-observation'
+                                and observation.get('observed_at')==value.get('observed_at')):
+                            verified=native_admission_quota(config,state,account)
+                            if verified and verified['observed_at']==observation['observed_at']:
+                                from .config import cached_quota
+                                store=Store(state)
+                                try:value=cached_quota(config,store,provider,account) or value
+                                finally:store.close()
                         if value and number(value.get('observed_at')) and value['observed_at']<=now:
                             fresh=now-value['observed_at']<=config.get('quota_ttl_seconds',120) and not value.get('unavailable')
                             row=_measured(_entry(provider,account,pr,'query_succeeded' if fresh else 'stale',attempt),value,now,config.get('quota_ttl_seconds',120),display)
