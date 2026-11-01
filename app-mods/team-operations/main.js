@@ -255,12 +255,12 @@ export default class TeamOperations extends View {
       const usageCell = (label, value, name) => {
         const measured = typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100;
         const stale = account.windows?.[name]?.status === "stale";
-        const color = stale ? t.dim : value >= 90 ? t.blocked : t.accent;
+        const color = stale ? t.dim : value >= 90 ? t.ansi1 : value >= 70 ? t.ansi3 : t.ansi2;
         return h_flex().w(210).flex_none().gap(6).items_center()
           .child(div().w(36).flex_none().text_color(t.muted).child(label))
           .when(measured, el => el.child(div().w(92).h(10).flex_none().rounded(2).bg(t.raised)
             .child(div().w(92 * value / 100).h(10).rounded(2).bg(color))))
-          .child(div().flex_1().min_w(0).truncate().text_color(value >= 90 ? t.blocked : t.foreground).child(usage(value, name)));
+          .child(div().flex_1().min_w(0).truncate().text_color(measured ? color : t.foreground).child(usage(value, name)));
       };
       const meta = [account.coverage == null ? null : `측정 범위 · ${display(account.coverage)}`, account.reason == null ? null : `사유 · ${display(account.reason)}`, account.action == null ? null : `요청 · ${display(account.action)}`].filter(Boolean).join(" · ");
       return v_flex().id(key).gap(2).py(2).px(8).rounded(6).bg(t.surface).cursor_pointer()
