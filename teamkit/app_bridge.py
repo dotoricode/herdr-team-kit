@@ -25,7 +25,7 @@ def core_read():
 
 def bindings(path, config):
     if config.get('runtime_backend') != 'core':
-        raise ValueError('앱은 core 전용 설정과 GUI 전용 작업 기록를 사용해야 합니다.')
+        raise ValueError('앱은 core 전용 설정과 GUI 전용 작업 기록을 사용해야 합니다.')
     value = json.loads(Path(path).read_text())
     if value.get('version') != 1 or not isinstance(value.get('teams'), dict):
         raise ValueError('앱 팀장 연결 설정을 확인하세요.')
@@ -37,7 +37,7 @@ def bindings(path, config):
 def readonly_snapshot(state):
     path = Path(state)
     if not path.is_file():
-        raise ValueError('GUI 전용 작업 기록를 먼저 준비하세요.')
+        raise ValueError('GUI 전용 작업 기록을 먼저 준비하세요.')
     with path.open('rb') as source:
         header = source.read(20)
     if 2 in header[18:20] or Path(str(path)+'-wal').exists() or Path(str(path)+'-shm').exists():

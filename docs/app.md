@@ -30,7 +30,7 @@ python3 teamkit_cli.py --config ~/.config/herdr-team-kit-app/config.json --state
 
 bindings는 `version: 1`, `actions_enabled` boolean, 설정의 모든 팀을 포함한 `teams` 매핑, 선택적인 `inventory` Markdown 경로를 받습니다. 각 팀은 `label`, 실제 `terminal` 주소, 앱 `space` ID를 갖습니다. 고정 작업 표는 `ID | 이름 | 상태 | 완료 조건` 네 칸으로 읽습니다. 경로와 실데이터는 로컬에 둡니다.
 
-mod는 GUI 작업 기록 JSON을 조회하고 core 상태를 별도로 표시합니다. 조회는 모델을 호출하지 않으며 작업 기록를 생성하지 않습니다. 누락된 상태·한도를 idle이나 0%로 추정하지 않습니다. 제품 진행률은 기존 승인 단계의 가중치를 사용합니다. `monitor`도 GUI 설정/작업 기록를 명시해 별도로 실행합니다.
+mod는 GUI 작업 기록 JSON을 조회하고 core 상태를 별도로 표시합니다. 조회는 모델을 호출하지 않으며 작업 기록을 생성하지 않습니다. 누락된 상태·한도를 idle이나 0%로 추정하지 않습니다. 제품 진행률은 기존 승인 단계의 가중치를 사용합니다. `monitor`도 GUI 설정/작업 기록을 명시해 별도로 실행합니다.
 
 ```sh
 herdr-app check ~/.config/herdr-app/mods/team-operations
@@ -44,7 +44,7 @@ herdr-app shot /tmp/team-operations.png
 
 설계 읽기는 plan과 contract의 범위·필수 조건·완료 단계를 함께 표시합니다. 승인은 선택한 revision/digest와 현재 파일을 트랜잭션 안에서 대조하고 명시적인 확인을 요구합니다. 승인 버튼이 구현을 자동 배정하지는 않습니다.
 
-재개는 core 작업 기록의 동일 owner를 가진 parked leader, 또는 정지·체크포인트가 기록된 handed-off 실행만 대상으로 합니다. 확인 후 실제 core controller를 시작하며 요청 접수와 수신·실행 결과는 다릅니다. 중복·대기·결과 불명인 요청을 자동 재실행하지 않습니다. `app-actions`에 보존한 결과와 작업 기록를 먼저 대조합니다. TUI retire 경로는 core terminal을 종료하지 않습니다.
+재개는 core 작업 기록의 동일 owner를 가진 parked leader, 또는 정지·체크포인트가 기록된 handed-off 실행만 대상으로 합니다. 확인 후 실제 core controller를 시작하며 요청 접수와 수신·실행 결과는 다릅니다. 중복·대기·결과 불명인 요청을 자동 재실행하지 않습니다. `app-actions`에 보존한 결과와 작업 기록을 먼저 대조합니다. TUI retire 경로는 core terminal을 종료하지 않습니다.
 
 ## 검증 한계
 
