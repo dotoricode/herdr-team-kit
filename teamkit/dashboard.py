@@ -16,11 +16,27 @@ from .config import binding
 from .policy import number, CLAUDE_QUOTA_SOURCE
 from .monitor import namespace
 
-LABELS={'planning':'설계 중','awaiting_approval':'설계 검토 필요','approved':'배정 대기',
-        'in_progress':'진행 중','awaiting_review':'검증·리뷰 대기','complete':'검증 완료',
-        'inspect':'확인 필요','quota':'한도 대기','environment':'환경 대기'}
+LABELS={'planning':'설계 중','awaiting_approval':'설계 확인 필요','approved':'작업 요청 대기',
+        'in_progress':'진행 중','awaiting_review':'다른 담당자의 확인 대기','complete':'확인 완료',
+        'inspect':'확인 필요','quota':'사용 한도 확인 대기','environment':'실행 준비 필요'}
 COLORS={'planning':'34','awaiting_approval':'33','approved':'36','in_progress':'34',
         'awaiting_review':'33','complete':'32','inspect':'31','quota':'33','environment':'33'}
+
+
+STEP_LABELS={
+    '선택한 설계의 소스 연결 검증':'선택한 방식이 코드에 맞게 연결됐는지 확인',
+    'host 동등성·실패 회귀 검증':'개발 PC에서 바꾸기 전과 같은지, 오류 처리가 잘 되는지 확인',
+    '실제 ABI 빌드 검증':'지원하는 CPU 종류별로 빌드해 확인',
+    '앱·단말·관찰 동등성 및 측정':'앱과 실제 기기에서 바꾸기 전후 동작을 비교하고 측정',
+    '최신 독립 리뷰 및 미해결 확인':'다른 담당자가 최신 코드를 살펴보고 남은 문제 확인',
+}
+
+
+def display_text(value):
+    """Plain display aliases; stored documents and approval hashes stay original."""
+    value=str(value)
+    for original,label in STEP_LABELS.items():value=value.replace(original,label)
+    return value
 
 
 def clean(value):
@@ -48,9 +64,9 @@ def quota_rows(data, config):
                 if not isinstance(window,dict):window={}
                 used,reset=window.get('used'),window.get('resets_at')
                 values[key]=used if age is not None and number(used) and 0<=used<=100 and number(reset) and reset>now else None
-            status='최신' if fresh and all(v is not None for v in values.values()) else '이전 기록' if age is not None else '미수집'
-            if q.get('unavailable'):status='조회 실패'+(' · 이전 기록' if age is not None else '')
-            elif age is not None and any(v is None for v in values.values()):status='일부 한도 확인 불가' if fresh else '갱신 필요'
+            status='최신' if fresh and all(v is not None for v in values.values()) else '지난 기록' if age is not None else '아직 확인 못 함'
+            if q.get('unavailable'):status='사용량 읽기 실패'+(' · 지난 기록' if age is not None else '')
+            elif age is not None and any(v is None for v in values.values()):status='일부 사용량 알 수 없음' if fresh else '다시 확인 필요'
             display_only=False
             observation=data.get('usage_observations',{}).get(provider+'/'+account)
             if provider=='claude' and isinstance(observation,dict) and observation.get('binding')==binding(pr) and observation.get('source')=='native-cli-manual-observation':
@@ -59,7 +75,7 @@ def quota_rows(data, config):
                 if number(stamp) and 0<=now-stamp and (not number(at) or stamp>at) and all(number(v) and 0<=v<=100 for v in windows):
                     age=now-stamp;fresh=age<=config.get('quota_ttl_seconds',120)
                     values=dict(zip(('five_hour','weekly'),windows));display_only=True
-                    status='CLI 확인값' if fresh else 'CLI 이전 확인값'
+                    status='직접 확인한 값' if fresh else '전에 직접 확인한 값'
             rows.append({'provider':provider,'account':account,'label':('Codex' if provider=='codex' else 'Claude')+' '+('회사' if account=='team' else '개인'),
                          'age':age,'current':fresh,'status':status,'display_only':display_only,**values})
     return rows
@@ -80,12 +96,12 @@ def team_activity(team,tasks,agents,known,config):
     target=config.get('dashboard_workspaces',{}).get(team,{})
     names={t.get('runtime',{}).get('name') for t in tasks if t.get('team')==team and t['state'] in ACTIVE|{'ready','awaiting_review'} and not t.get('runtime',{}).get('workspace_closed')}
     observed=[a for name,a in agents.items() if name in names or a.get('workspace_id')==target.get('id')]
-    if not known:return {'label':'실행 상태 미확인','working':None,'blocked':None}
+    if not known:return {'label':'지금 상태 확인 안 됨','working':None,'blocked':None}
     working=sum(a.get('agent_status')=='working' for a in observed)
     blocked=sum(a.get('agent_status')=='blocked' for a in observed)
     missing=any(t['state'] in ACTIVE|{'ready','awaiting_review'} and not t.get('runtime',{}).get('workspace_closed') and t.get('runtime',{}).get('name') not in agents for t in tasks if t.get('team')==team)
     unknown=missing or bool(target.get('id') and not any(a.get('workspace_id')==target['id'] for a in observed)) or any(a.get('agent_status') not in ('working','blocked','idle','done') for a in observed)
-    label='작업 중' if working else '입력 요청 있음' if blocked else '실행 상태 미확인' if unknown else '대기 중'
+    label='작업 중' if working else '답변 필요' if blocked else '지금 상태 확인 안 됨' if unknown else '대기 중'
     return {'label':label,'working':working if not unknown or working else None,'blocked':blocked if not unknown or blocked else None}
 
 
@@ -121,11 +137,11 @@ def model(data,config,now=None):
         active=[t for t in tasks if t['state'] in ACTIVE]
         task=active[-1] if active else tasks[-1] if tasks else None
         phase='inspect' if any(t['state']=='uncertain' for t in active) else work.get('hold',{}).get('kind',work['phase'])
-        reason=work.get('hold',{}).get('reason','')
+        reason=display_text(work.get('hold',{}).get('reason',''))
         if task and task['state']=='handed_off':
             failure=task.get('checkpoint',{}).get('failure',{})
             if failure.get('kind')=='environment':
-                phase='environment';reason='환경 실패: '+failure.get('cause','unknown')
+                phase='environment';reason='실행 준비 문제: '+failure.get('cause','unknown')
         if work['phase']=='complete':
             phase='complete';reason=''
         approved=bool(work.get('approval'))
@@ -134,16 +150,16 @@ def model(data,config,now=None):
             percent=min(99,sum(s['weight'] for s in work.get('steps',[]) if s['id'] in work['milestones']))
             if work['phase']=='complete':percent=100
         observed=agents.get(task.get('runtime',{}).get('name')) if task else None
-        live='공간 정리됨' if task and task.get('runtime',{}).get('workspace_closed') else {'working':'작업 중','blocked':'입력 요청 있음','idle':'응답 종료·대기','done':'응답 종료·대기'}.get(observed.get('agent_status'),'실행 상태 미확인') if observed else '실행 상태 미확인'
+        live='작업 창 닫힘' if task and task.get('runtime',{}).get('workspace_closed') else {'working':'작업 중','blocked':'답변 필요','idle':'답변 마침 · 대기','done':'답변 마침 · 대기'}.get(observed.get('agent_status'),'지금 상태 확인 안 됨') if observed else '지금 상태 확인 안 됨'
         review_path=str(Path(work['private_root'])/work['id']/('r'+str(work['revision']))/'plan.md') if work.get('private_root') else ''
-        rows.append({'id':work['id'],'team':work['team'],'title':work['title'],'phase':phase,
+        rows.append({'id':work['id'],'team':work['team'],'title':display_text(work['title']),'phase':phase,
                      'percent':percent,'steps_done':len(work['milestones']),'steps_total':len(work.get('steps',[])),
-                     'remaining_steps':[step['title'] for step in work.get('steps',[]) if step['id'] not in work['milestones']],
+                     'remaining_steps':[display_text(step['title']) for step in work.get('steps',[]) if step['id'] not in work['milestones']],
                      'revision':work['revision'],'approved':approved,'updated_at':work['updated_at'],
                      'model_requested':task.get('model') if task else None,'effort_requested':task.get('effort') if task else None,
                      'execution_state':task['state'] if task else None,'attempts':sum(t.get('attempt_count',0) for t in tasks),
                      'reason':reason,'native_state':live,'review_path':review_path,
-                     'next':work.get('checkpoint',{}).get('next',''),
+                     'next':display_text(work.get('checkpoint',{}).get('next','')),
                      'active_model_attempts':len(active)})
     teams={team:dict(Counter(row['phase'] for row in rows if row['team']==team)) for team in config['teams']}
     return {'rows':rows,'teams':teams,'accounts':quota_rows(data,config),'activity':{team:team_activity(team,data['tasks'],agents,native_known,config) for team in teams},'native_known':native_known,'native_deadline':data['monitor']['observed_at']+data['monitor']['native_ttl'] if native_known else None,'team_labels':{team:config.get('dashboard_workspaces',{}).get(team,{}).get('label',team) for team in teams},'observed_at':data['observed_at'],'event_sequence':data['event_sequence']}
@@ -152,67 +168,67 @@ def model(data,config,now=None):
 def render(view,color=False,now=None,width=80):
     now=time.time() if now is None else now
     lines=['팀 운영 현황  ·  '+time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(now)),
-           '제품 작업 건수 기준 · 요청 모델/effort 표시 · 화면 갱신은 모델을 호출하지 않음','']
-    lines+=['계정 사용률  ·  5h / Weekly / 마지막 수집','']
+           '제품 업무 수 기준 · 요청한 모델과 생각 깊이 표시 · 화면을 새로 그릴 때 AI를 부르지 않음','']
+    lines+=['계정 사용률  ·  5h / Weekly / 마지막 확인','']
     for account in view.get('accounts',[]):
         first=usage_bar(account['five_hour'],account['current'],width)
         second=usage_bar(account['weekly'],account['current'],width)
         span=19 if width>=100 else 9
         lines.append(padded(account['label'],14)+padded('5h '+first,span+3)+padded('주간 '+second,span+5)+account['status']+' · '+age_text(account['age']))
-    lines+=['* 이전 사용률이며 현재 잔량을 뜻하지 않습니다. Claude는 실제 응답 때 수집합니다.','', '팀별 현재 실행 상태와 제품 업무']
+    lines+=['* 전에 확인한 사용량입니다. 지금 남은 양은 아닙니다. Claude는 답변할 때 사용량을 받습니다.','', '팀별 현재 실행 상태와 제품 업무']
     for team,counts in view['teams'].items():
         total=sum(counts.values());done=counts.get('complete',0);waiting=counts.get('awaiting_approval',0)
         blocked=sum(counts.get(x,0) for x in ('inspect','quota','environment'))
-        activity=view.get('activity',{}).get(team,{'label':'실행 상태 미확인','working':0,'blocked':0})
-        lines.append(f"{clean(view['team_labels'].get(team,team))}  현재: {activity['label']} · 실행 {count_text(activity['working'])} · 입력 요청 {count_text(activity['blocked'])}")
-        lines.append(f"  제품 업무 {total}건 · 제품 완료 {done} · 설계 검토 필요 {waiting} · 확인·차단 {blocked}")
-    if not view.get('native_known'):lines.append('실행 상태 관측이 없거나 오래됐습니다. monitor 갱신을 확인하세요.')
+        activity=view.get('activity',{}).get(team,{'label':'지금 상태 확인 안 됨','working':0,'blocked':0})
+        lines.append(f"{clean(view['team_labels'].get(team,team))}  현재: {activity['label']} · 실행 {count_text(activity['working'])} · 답변 필요 {count_text(activity['blocked'])}")
+        lines.append(f"  제품 업무 {total}건 · 제품 완료 {done} · 설계 확인 필요 {waiting} · 진행 확인 필요 {blocked}")
+    if not view.get('native_known'):lines.append('지금 작업 중인지 확인할 수 없습니다. 상태를 읽는 프로그램이 켜져 있는지 확인하세요.')
     remaining=sum(row['phase']!='complete' for row in view['rows'])
     lines.append(f'남은 작업 {remaining}건')
-    lines+=['','작업 / 단계 / 진행률 / 요청 모델·effort / 기록 갱신 경과','─'*66]
+    lines+=['','작업 / 단계 / 진행률 / 요청한 모델·생각 깊이 / 마지막 기록','─'*66]
     for row in view['rows']:
         label=LABELS.get(row['phase'],row['phase'])
         if color:label='\x1b['+COLORS.get(row['phase'],'37')+'m'+label+'\x1b[0m'
-        percent='미정' if row['percent'] is None else str(row['percent'])+'%'
+        percent='아직 정하지 않음' if row['percent'] is None else str(row['percent'])+'%'
         seconds=max(0,int(now-row['updated_at']))
         actor='—' if row['model_requested'] is None else clean(row['model_requested'])+'/'+clean(row['effort_requested'])
         lines.append(f"{clean(row['id'])}  {label}  {actor}  {age_text(seconds)}")
-        lines.append('  현재 실행: '+clean(row.get('native_state','실행 상태 미확인')))
+        lines.append('  현재 실행: '+clean(row.get('native_state','지금 상태 확인 안 됨')))
         if row['phase']=='awaiting_approval':
-            lines+=['  사용자에게 필요한 일: 설계 대안·적용 범위·검증 기준을 검토하고 총괄 대화에서 선택·승인',
-                    '  검토 문서: '+clean(row.get('review_path','')),'  [v] 검토 요청·문서 열기 · 권한 팝업이 아닌 설계 선택 요청입니다.']
+            lines+=['  해야 할 일: 어떤 방식으로 어디까지 바꿀지, 어떻게 확인할지 정하고 총괄 대화에서 허락해 주세요',
+                    '  설계 문서: '+clean(row.get('review_path','')),'  [v] 설계 문서 읽기 · 어떤 방식으로 작업할지 골라 주세요.']
         counts=f"{row['steps_done']}/{row['steps_total']}"
         if row['percent'] is None:
-            lines.append(f'  미정 · {counts}')
+            lines.append(f'  아직 정하지 않음 · {counts}')
         else:
             suffix=f'{percent:>4} {counts}'
             length=max(0,min(20,width-len(suffix)-5))
             filled=row['percent']*length//100
             bar='█'*filled+' '*(length-filled)
             lines.append(f'  [{bar}] {suffix}' if length else '  '+suffix)
-        lines.append('  '+clean(row['title'])+f"  [설계 v{row['revision']}, 구현·검증 단계 {row['steps_done']}/{row['steps_total']}]")
+        lines.append('  '+clean(row['title'])+f"  [설계 v{row['revision']}, 제품 수정·동작 확인 단계 {row['steps_done']}/{row['steps_total']}]")
         if row['phase']!='complete':
             pending=' / '.join(clean(title) for title in row.get('remaining_steps',[]))
-            lines.append('  남은 단계: '+(pending or '최종 검증·독립 리뷰·완료 확인'))
+            lines.append('  남은 단계: '+(pending or '마지막 동작 확인 · 다른 담당자의 코드 확인 · 완료 확인'))
         if row['execution_state']:
-            execution={'claimed':'배정 확정','launching':'시작 준비','submitted':'수신 확인 대기','running':'수신 확인됨','uncertain':'실행 결과 확인 필요','awaiting_review':'완료 근거 기록됨','handed_off':'인계됨','queued':'미배정','ready':'대기'}.get(row['execution_state'],row['execution_state'])
-            lines.append('  실행 기록: '+clean(execution)+f" · 배정 시도 {row['attempts']}회")
+            execution={'claimed':'담당자 정해짐','launching':'시작 준비','submitted':'요청을 받았는지 확인 중','running':'요청 받음','uncertain':'실행 결과 확인 필요','awaiting_review':'결과와 확인 내용 저장됨','handed_off':'다음 담당자에게 전달함','queued':'담당자 정하기 전','ready':'대기'}.get(row['execution_state'],row['execution_state'])
+            lines.append('  실행 기록: '+clean(execution)+f" · 작업 요청 {row['attempts']}회")
         if row['reason']:lines.append('  주의: '+clean(row['reason']))
         if row['next']:lines.append('  다음: '+clean(row['next']))
     if not view['rows']:lines.append('등록된 제품 작업 없음 · 팀장 대기 세션은 작업 건수에서 제외')
-    lines+=['','진행률은 승인된 단계의 완료 기록 기준입니다. 100%는 필수 단계와 최신 독립 리뷰 확인 후 표시합니다.',
-            '기록 갱신 경과는 마지막 업무 기록 시각이며, 프로세스 생존이나 작업 완료를 뜻하지 않습니다.',
+    lines+=['','진행률은 허락받은 작업 중 끝난 단계로 계산합니다. 필요한 확인과 다른 담당자의 최신 코드 확인이 끝나야 100%로 표시합니다.',
+            '마지막 기록은 업무 내용을 저장한 때입니다. 지금 작업 중인지, 끝났는지는 따로 확인해야 합니다.',
             '이동: ↑↓ / PgUp·PgDn · 종료: q / Ctrl+C · 업무 기록과 AI 세션은 유지됩니다.']
     return '\n'.join(lines)
 
 
 def review_lines(view,selected):
     rows=[r for r in view['rows'] if r['phase']=='awaiting_approval']
-    lines=['사용자 설계 검토 요청','↑↓ 선택 · Enter 문서 열기 · Esc/v 뒤로','선택·승인은 문서를 읽은 뒤 총괄 대화에서 전달합니다.','']
+    lines=['사용자가 확인할 설계','↑↓ 선택 · Enter 문서 열기 · Esc/v 뒤로','문서를 읽은 뒤 총괄 대화에서 원하는 방식과 작업 시작 여부를 알려 주세요.','']
     for index,row in enumerate(rows):
         lines.append(('▶ ' if index==selected else '  ')+clean(row['id'])+' · 설계 v'+str(row['revision']))
         lines.append('  '+clean(row['title']))
-    if not rows:lines.append('현재 사용자 설계 검토 요청이 없습니다.')
+    if not rows:lines.append('지금 확인할 설계가 없습니다.')
     return lines
 
 
@@ -221,11 +237,11 @@ def open_review(state,config,ident):
     from .workflow import document
     import subprocess
     work=next((w for w in snapshot(state)['works'] if w['id']==ident),None)
-    if not work or work['phase']!='awaiting_approval':raise ValueError('검토 요청이 변경됐습니다. 현황을 새로 확인하세요.')
+    if not work or work['phase']!='awaiting_approval':raise ValueError('확인할 설계가 바뀌었습니다. 목록을 다시 불러와 주세요.')
     path,contract,digest=document(config,work)
-    if work.get('submitted_digest')!=digest:raise ValueError('설계가 변경됐습니다. 현재 버전을 다시 제출해야 합니다.')
+    if work.get('submitted_digest')!=digest:raise ValueError('설계가 바뀌었습니다. 바뀐 문서로 다시 확인을 요청해야 합니다.')
     latest=next((w for w in snapshot(state)['works'] if w['id']==ident),None)
-    if latest!=work:raise ValueError('검토 요청이 변경됐습니다. 새 revision을 확인하세요.')
+    if latest!=work:raise ValueError('확인할 설계가 바뀌었습니다. 새 버전을 확인하세요.')
     command='open' if sys.platform=='darwin' else 'xdg-open'
     subprocess.run([command,str(path/'plan.md')],check=True,timeout=10,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 
@@ -246,15 +262,15 @@ def publish(view,config):
         total=sum(counts.values())
         now=time.time();deadline=view.get('native_deadline')
         fresh=number(deadline) and now<deadline
-        activity=view.get('activity',{}).get(team,{'label':'실행 상태 미확인','working':None}) if fresh else {'label':'실행 상태 미확인','working':None}
+        activity=view.get('activity',{}).get(team,{'label':'지금 상태 확인 안 됨','working':None}) if fresh else {'label':'지금 상태 확인 안 됨','working':None}
         ttl=min(30000,max(1,int((deadline-now)*1000))) if fresh else 30000
         summary=f"{activity['label']} · 실행 {count_text(activity['working'])} · 업무 {total} · 완료 {counts.get('complete',0)}"
         wait=counts.get('awaiting_approval',0)
         blocked=sum(counts.get(x,0) for x in ('inspect','quota','environment'))
         runtime.call(*prefix,'workspace','report-metadata',target['id'],'--source','teamkit-progress',
                      '--token','work_summary='+summary,
-                     '--token','approval_wait='+('사용자 설계 선택 '+str(wait)+' · 팀 운영 현황에서 v' if wait else ''),
-                     '--token','work_blocked='+('확인·차단 '+str(blocked) if blocked else ''),'--ttl-ms',str(ttl))
+                     '--token','approval_wait='+('설계 선택 필요 '+str(wait)+' · 팀 운영 현황에서 v' if wait else ''),
+                     '--token','work_blocked='+('진행 확인 필요 '+str(blocked) if blocked else ''),'--ttl-ms',str(ttl))
 
 
 def run(args,config):
@@ -286,15 +302,15 @@ def review_document(state,config,ident):
     """Read the submitted document without changing approval or launching an app."""
     from .workflow import document
     work=next((w for w in snapshot(state)['works'] if w['id']==ident),None)
-    if not work or work['phase']!='awaiting_approval':raise ValueError('검토 요청이 변경됐습니다.')
+    if not work or work['phase']!='awaiting_approval':raise ValueError('확인할 설계가 바뀌었습니다.')
     path,contract,digest=document(config,work)
-    if digest!=work.get('submitted_digest'):raise ValueError('현재 제출본과 문서가 다릅니다.')
+    if digest!=work.get('submitted_digest'):raise ValueError('확인해 달라고 올린 문서와 지금 파일이 다릅니다.')
     raw=(path/'plan.md').read_bytes()
     import hashlib
     check=hashlib.sha256(str(work['revision']).encode()+b'\0'+raw+b'\0'+json.dumps(contract,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
-    if check!=digest or len(raw)>1024*1024:raise ValueError('검토 문서가 변경됐거나 너무 큽니다.')
+    if check!=digest or len(raw)>1024*1024:raise ValueError('설계 문서가 바뀌었거나 너무 큽니다.')
     latest=next((w for w in snapshot(state)['works'] if w['id']==ident),None)
-    if latest!=work:raise ValueError('검토 요청이 변경됐습니다.')
+    if latest!=work:raise ValueError('확인할 설계가 바뀌었습니다.')
     # Keep Markdown line structure while stripping terminal control characters.
     body='\n'.join(clean(line) for line in raw.decode('utf-8').splitlines())
     return ident,work['title']+' · v'+str(work['revision']),body
@@ -320,7 +336,7 @@ def live(screen,args,config):
         dirty=True
         if action[0]=='review':
             try:ui.document=review_document(args.state,config,action[1]);ui.focus=('back',action[1]);offset=0;warning=''
-            except (OSError,ValueError,UnicodeError):warning='문서 확인 실패 · 현재 설계 버전과 경로를 확인하세요.'
+            except (OSError,ValueError,UnicodeError):warning='문서를 읽지 못했습니다. 지금 설계 버전과 파일 위치를 확인하세요.'
         elif action[0]=='back':ui.document=None;ui.focus=('review',action[1]);offset=0
         else:ui.toggle(action)
     while True:
@@ -333,7 +349,7 @@ def live(screen,args,config):
         if dirty:result=frame(view,ui,width=max(1,width-1),now=time.time());dirty=False
         if args.publish and now-last_publish>=5:
             try:publish(view,config);warning=''
-            except (KitError,ValueError):warning='좌측 요약 갱신 실패 · 세션과 workspace 연결을 확인해 주세요.'
+            except (KitError,ValueError):warning='왼쪽 목록을 바꾸지 못했습니다. 팀장 작업 창이 열려 있는지 확인해 주세요.'
             last_publish=now
         visible=max(1,height-2);offset=max(0,min(offset,max(0,len(result.lines)-visible)))
         screen.erase()
