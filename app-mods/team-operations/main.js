@@ -245,7 +245,7 @@ export default class TeamOperations extends View {
     };
     const appCounts = teams.reduce((n, team) => { const s = liveFor(team).status; if (s === "working") n.working++; if (s === "blocked") n.blocked++; return n; }, { working: 0, blocked: 0 });
     const unknownTeams = teams.filter(team => { const status = liveFor(team).status; return status === "unknown" || status === "missing" || !STATUS_TEXT[status]; }).length;
-    const waiting = [...new Set([...teams.map(x => x.reason), ...works.map(x => x.reason), ...(data?.holds ?? []).map(x => x.reason)]
+    const waiting = [...new Set([...teams.map(x => x.reason), ...works.map(x => x.reason)]
       .filter(Boolean).map(display))];
     const summary = `실행 ${appCounts.working} · 사용자 답변 필요 ${appCounts.blocked}`;
     const coordinator = data?.coordinator;
@@ -268,7 +268,7 @@ export default class TeamOperations extends View {
         ? button("open-coordinator-recovery", this.coordinatorBusy ? "총괄 복구 중" : "총괄 복구", cx => { if (!this.coordinatorBusy) { this.coordinatorConfirm = true; this.coordinatorMessage = null; cx.notify(); } }, this.coordinatorBusy).text_size(12)
         : div().text_size(12).text_color(coordinator?.state === "recovering" ? t.working : t.muted).child(`총괄 · ${display(coordinator?.reason ?? coordinatorStateText)}`);
     const coordinatorConfirm = v_flex().h(OVERVIEW.card).flex_none().justify_center().gap(6).px(10).rounded(7).bg(t.surface)
-      .child(div().text_size(12).child("닫힌 총괄을 GUI 기록에서 다시 엽니다. 제품 업무 자동 재개 없음"))
+      .child(div().text_size(12).child("닫힌 총괄을 작업 기록에서 다시 엽니다. 제품 업무 자동 재개 없음"))
       .child(h_flex().gap(6).children([
         button("confirm-coordinator-recovery", this.coordinatorBusy ? "복구 중" : "복구", cx => cx.spawn(async cx => this.recoverCoordinator(cx)), this.coordinatorBusy || !coordinator?.can_recover).text_size(12),
         button("cancel-coordinator-recovery", "취소", cx => { this.coordinatorConfirm = false; cx.notify(); }, this.coordinatorBusy).text_size(12)
@@ -459,7 +459,7 @@ export default class TeamOperations extends View {
     return v_flex().id("team-operations").size_full().min_h(0).overflow_hidden().bg(t.background).text_color(t.foreground).text_size(13)
       .font_family(this.config?.font_family || settings().font_family || "monospace")
       .child(h_flex().h(48).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
-        .child(div().font_semibold().text_size(16).child("GUI 운영 현황")).child(div().flex_1())
+        .child(div().font_semibold().text_size(16).child("팀 운영 현황")).child(div().flex_1())
         .child(div().text_size(11).text_color(t.dim).child(`마지막 관찰: ${clock(data?.observed_at)}`))
         .child(button("refresh", this.busy ? "불러오는 중" : "새로고침", cx => cx.spawn(async cx => this.refresh(cx)), this.busy)))
       .when(Boolean(this.error), el => el.child(div().px(12).py(7).text_color(t.blocked).child(`갱신에 실패했습니다. 기존 자료는 이전 관찰값입니다: ${this.error}`)))
@@ -467,25 +467,20 @@ export default class TeamOperations extends View {
       .when(this.busy && !data, el => el.child(div().p(14).text_color(t.dim).child("운영 현황을 읽는 중입니다.")))
       .child(v_flex().id("operations-content").w_full().flex_1().min_h(0).gap(6).p(8)
         .child(v_flex().w_full().flex_none().gap(3)
-          .child(h_flex().gap(12)
-            .child(div().whitespace_nowrap().text_size(12).text_color(t.muted).child("GUI 작업 기록"))
-            .child(div().whitespace_nowrap().text_size(12).text_color(t.muted).child("TUI 업무를 가져오지 않음")))
           .child(h_flex().flex_wrap().gap(12).text_size(12).font_semibold()
             .child(div().whitespace_nowrap().child(`실행 ${appCounts.working}`))
             .child(div().whitespace_nowrap().child(`사용자 답변 필요 ${appCounts.blocked}`))
             .child(div().whitespace_nowrap().text_color(t.muted).child(`미확인 ${unknownTeams}개`))
             .child(div().whitespace_nowrap().text_color(coordinator?.state === "recovering" ? t.working : t.muted).child(`총괄 · ${coordinatorStateText}`)))
-          .when(Boolean(coordinator?.reason), el => el.child(words(`총괄 상태 · ${display(coordinator.reason)}`).text_size(11).text_color(t.muted))))
+          .when(coordinator?.state !== "live" && Boolean(coordinator?.reason), el => el.child(words(`총괄 상태 · ${display(coordinator.reason)}`).text_size(11).text_color(t.muted))))
         .when(waiting.length > 0, el => el.child(v_flex().w_full().flex_none().gap(2)
           .child(div().whitespace_nowrap().text_size(11).font_semibold().text_color(t.muted).child("대기 이유"))
           .children(waiting.map((reason, index) => words(`⚠ ${index + 1} · ${reason}`).text_size(11).text_color(t.dim)))))
-        .when(works.length === 0, el => el.child(div().flex_none().text_size(11).text_color(t.muted).child("등록된 GUI 제품 작업 없음 · TUI 업무는 가져오지 않음")))
-        .when(Boolean(this.coordinatorMessage), el => el.child(div().flex_none().text_size(11).text_color(/⚠|실패|오류/i.test(this.coordinatorMessage) ? t.blocked : t.muted).child(this.coordinatorMessage)))
+        .when(Boolean(this.coordinatorMessage) && (coordinator?.state !== "live" || /⚠|실패|오류/i.test(this.coordinatorMessage)), el => el.child(div().flex_none().text_size(11).text_color(/⚠|실패|오류/i.test(this.coordinatorMessage) ? t.blocked : t.muted).child(this.coordinatorMessage)))
         .when(actionRows.length > 0, el => el.child(v_flex().flex_none().gap(3).children(actionRows)))
         .child(v_flex().flex_none().gap(3)
-          .child(div().whitespace_nowrap().text_size(11).font_semibold().text_color(t.muted).child("전환 작업 목록"))
+          .child(div().whitespace_nowrap().text_size(11).font_semibold().text_color(t.muted).child("작업 목록"))
           .child(h_flex().flex_wrap().gap(12).text_size(11).text_color(t.muted)
-            .child(div().whitespace_nowrap().child("전체 진행률 미정"))
             .child(div().whitespace_nowrap().child(`남은 구축 ${remaining}건`))
             .child(div().whitespace_nowrap().child(`완료 카드 ${completedCount}건`))))
         .child(board)
