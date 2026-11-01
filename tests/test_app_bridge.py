@@ -205,7 +205,7 @@ class DeliveryBridgeTests(FeedbackFixture):
                                                                'identity_checked':True,'identity_source':'host-fresh-provider',**runtime})
             with store.transaction():store._save(task,'fixture_leader')
     def hc(self):
-        def call(*args):
+        def call(*args, **options):
             if args[0]=='get':
                 if args[1]=='t9':return {'address':'t9','state':'live'}
                 if args[1]=='t1':return copy.deepcopy(self.native)
@@ -304,6 +304,23 @@ class DeliveryBridgeTests(FeedbackFixture):
         with self.assertRaises(ValueError):self.job()  # restart or double start cannot send again
         self.assertEqual(len(self.sent),1)
         self.assertEqual(self.call('show','L1')['state'],'running')
+
+    def test_owner_change_after_send_is_unknown_never_not_sent(self):
+        from teamkit.app_bridge import card_send_job
+        self.submit()
+        with self.hc() as boundary:
+            original=boundary.side_effect
+            def changed(*args, **options):
+                result=original(*args, **options)
+                if args[0]=='send':
+                    result['wait'].update(ended=False,reason='message',status='working')
+                    self.native['labels']['teamkit.owner']='replacement'
+                return result
+            boundary.side_effect=changed
+            with patch.dict(os.environ,{'HC_TERMINAL_ID':'t9'}):
+                card_send_job(self.config,self.state,self.links,self.feedback_root/'delivery/req-0001-aaaa/request.json')
+        self.assertEqual(len(self.sent),1)
+        self.assertEqual(self.summary()['state'],'unknown')
 
     def test_typed_answer_text_names_question_option_and_other_text(self):
         from teamkit.app_feedback import question_set
