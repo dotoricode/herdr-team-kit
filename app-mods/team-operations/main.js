@@ -252,13 +252,23 @@ export default class TeamOperations extends View {
     const accountRows = accounts.map(account => {
       const key = `account-${account.provider}-${account.account}`, open = this.expanded.has(key);
       const usage = (value, name) => value == null ? (account.windows?.[name]?.status === "not_provided" ? "미제공" : "확인 필요") : `${display(value)}%${account.windows?.[name]?.status === "stale" ? "*" : ""}`;
+      const usageCell = (label, value, name) => {
+        const measured = typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100;
+        const stale = account.windows?.[name]?.status === "stale";
+        const color = stale ? t.dim : value >= 90 ? t.blocked : t.accent;
+        return h_flex().w(210).flex_none().gap(6).items_center()
+          .child(div().w(36).flex_none().text_color(t.muted).child(label))
+          .when(measured, el => el.child(div().w(92).h(10).flex_none().rounded(2).bg(t.raised)
+            .child(div().w(92 * value / 100).h(10).rounded(2).bg(color))))
+          .child(div().flex_1().min_w(0).truncate().text_color(value >= 90 ? t.blocked : t.foreground).child(usage(value, name)));
+      };
       const meta = [account.coverage == null ? null : `측정 범위 · ${display(account.coverage)}`, account.reason == null ? null : `사유 · ${display(account.reason)}`, account.action == null ? null : `요청 · ${display(account.action)}`].filter(Boolean).join(" · ");
       return v_flex().id(key).gap(2).py(2).px(8).rounded(6).bg(t.surface).cursor_pointer()
         .on_click((_e, cx) => { open ? this.expanded.delete(key) : this.expanded.add(key); cx.notify(); })
         .child(h_flex().h(24).flex_none().gap(8).items_center().text_size(11)
           .child(div().w(92).flex_none().truncate().font_semibold().child(display(account.label)))
-          .child(div().w(84).flex_none().truncate().text_color(account.five_hour >= 90 ? t.blocked : t.foreground).child(`5시간 ${usage(account.five_hour, "five_hour")}`))
-          .child(div().w(84).flex_none().truncate().text_color(account.weekly >= 90 ? t.blocked : t.foreground).child(`주간 ${usage(account.weekly, "weekly")}`))
+          .child(usageCell("5시간", account.five_hour, "five_hour"))
+          .child(usageCell("주간", account.weekly, "weekly"))
           .child(div().flex_1().min_w(0).truncate().child(display(account.coverage ?? statusText(account.status))))
           .child(div().w(92).flex_none().truncate().text_color(t.dim).child(duration(account.age))))
         .when(open && Boolean(meta), el => el.child(div().text_size(10).text_color(t.muted).child(meta)))
