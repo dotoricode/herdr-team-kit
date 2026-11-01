@@ -180,6 +180,8 @@ export default class TeamOperations extends View {
       }
     });
     cx.timer.every(5000, cx => cx.spawn(async cx => {
+      const stale = Boolean(this.data && this.lastSuccessAt && Date.now() - this.lastSuccessAt > 15000);
+      if (stale !== Boolean(this.stale)) { this.stale = stale; cx.notify(); }
       await this.refresh(cx);
       if (["detail", "choice"].includes(this.role)) await Promise.all([this.loadCard(cx), ...(this.viewProps.kind === "work" || this.viewProps.linkedWorkId ? [this.loadDetail(cx)] : [])]);
     }));
@@ -312,7 +314,7 @@ export default class TeamOperations extends View {
     const before = this.sendResult.state;
     await this.lookupSend(cx);
     if (this.sendResult?.state !== before) await this.loadCard(cx);
-    if (this.role === "choice" && this.sendResult?.state === "sent") this.finishChoice("요청을 전달했습니다");
+    if (this.role === "choice" && (this.sendResult?.state === "sent" || this.sendResult?.receipt)) this.finishChoice("요청을 전달했습니다");
   }
 
   async loadDetail(cx) {
@@ -386,7 +388,7 @@ export default class TeamOperations extends View {
 
   async runRefresh(cx) {
     this.busy = !this.data && !this.error; const seq = ++this.seq; this.activeSeq = seq;
-    const previous = visibleSnapshot(this.data), previousError = this.error, previousConfirm = this.confirm;
+    const previous = visibleSnapshot(this.data), previousError = this.error, previousConfirm = this.confirm, previousStale = this.stale;
     let outcome = { seq, ok: false, changed: false, error: null };
     try {
       const result = await this.args("view");
@@ -394,7 +396,7 @@ export default class TeamOperations extends View {
       const next = JSON.parse(result.stdout);
       if (this.closed) return outcome;
       if (seq === this.seq) {
-        this.data = next; this.error = null; this.lastSuccessAt = Date.now();
+        this.data = next; this.error = null; this.lastSuccessAt = Date.now(); this.stale = false;
         outcome = { seq, ok: true, changed: previous !== visibleSnapshot(next), error: null };
         const latest = (next.works ?? []).find(work => work.id === this.confirm?.id);
         if (this.confirm && (!this.doc || this.doc.id !== this.confirm.id || this.doc.revision !== this.confirm.revision || this.doc.digest !== this.confirm.digest || this.doc.phase !== this.confirm.phase || latest?.revision !== this.confirm.revision || latest?.phase !== this.confirm.phase || (latest?.digest != null && latest.digest !== this.confirm.digest))) this.confirm = null;
@@ -404,7 +406,7 @@ export default class TeamOperations extends View {
       outcome = { seq, ok: false, changed: false, error: String(e) };
       if (seq === this.seq && !this.closed) this.error = String(e);
     }
-    finally { this.busy = false; if (!this.closed && (previous !== visibleSnapshot(this.data) || previousError !== this.error || previousConfirm !== this.confirm)) cx.notify(); }
+    finally { this.busy = false; if (!this.closed && (previous !== visibleSnapshot(this.data) || previousError !== this.error || previousConfirm !== this.confirm || previousStale !== this.stale)) cx.notify(); }
     return outcome;
   }
 
@@ -504,6 +506,7 @@ export default class TeamOperations extends View {
 
   choiceContext() {
     const card = this.cardData, selected = this.viewProps.selection;
+    if (card?.interaction && !card.needs_decision && !this.choiceStarted) return null;
     if (!card || !selected || card.revision !== selected.cardRevision
         || card.document_revision !== selected.documentRevision || card.document_digest !== selected.documentDigest) return null;
     let option;
@@ -511,10 +514,10 @@ export default class TeamOperations extends View {
       if (!card.question || card.question.question_id !== selected.questionId || card.question.question_revision !== selected.questionRevision) return null;
       const source = card.question.options.find(o => o.option_id === selected.id);
       if (source) option = { ...source, intent: "question" };
-    } else if (card.needs_decision) option = card.decision?.options.find(o => o.id === selected.id);
+    } else if (card.needs_decision || this.choiceStarted) option = card.decision?.options.find(o => o.id === selected.id);
     if (!option || option.intent === "approve" && (card.kind !== "work" || card.status !== "awaiting_approval")) return null;
     const recipient = option.intent === "confirmed" ? "팀 총괄" : card.leader?.label ?? card.team_label ?? "담당 팀장";
-    const unresolved = (card.deliveries ?? []).some(d => ["pending", "sending", "unknown"].includes(d.effective_state ?? d.state));
+    const unresolved = (card.deliveries ?? []).some(d => !d.receipt && ["pending", "sending", "unknown"].includes(d.effective_state ?? d.state));
     const next = option.intent === "approve" ? `설계 v${card.document_revision}의 진행 허가를 기록합니다. 다음 단계는 ${recipient}의 작업 배정이며, 이번 확인은 설계 승인까지입니다.`
       : option.intent === "confirmed" ? "확인 결과를 총괄에게 남깁니다. 추가 작업을 시작하지 않습니다."
         : `${recipient}에게 이 요청을 전달합니다. 전달 후 담당자의 처리 결과를 확인합니다.`;
@@ -533,7 +536,7 @@ export default class TeamOperations extends View {
 
   async confirmChoice(cx) {
     const choice = this.choiceContext();
-    if (!choice || choice.blocked || !this.cardData?.can_answer || !this.data?.actions_enabled
+    if (!choice || choice.blocked || !this.cardData?.can_answer || !this.data?.actions_enabled || this.stale
         || this.cardError || this.error || this.configError || this.choiceBusy || this.choiceStarted) return;
     if (choice.intent === "approve" && (!this.doc?.can_approve || this.doc.id !== this.cardData.id
         || this.doc.revision !== this.cardData.document_revision || this.doc.digest !== this.cardData.document_digest)) return;
@@ -626,7 +629,7 @@ export default class TeamOperations extends View {
       const terminal = liveTerminals.find(x => x.address === team.terminal);
       // Core done is a turn result; agents().status also tracks whether this screen saw it.
       const raw = team.app_state ?? terminal?.status ?? null;
-      const status = team.context_handoff?.status ?? agent?.status ?? (raw === "done" ? "unknown" : raw);
+      const status = team.identity_verified === false ? "unknown" : team.context_handoff?.status ?? agent?.status ?? (raw === "done" ? "unknown" : raw);
       return { agent, terminal, status, present: Boolean(team.terminal && (agent || terminal)) };
     };
     const appStates = ["blocked", "working", "done", "idle"];
@@ -721,7 +724,7 @@ export default class TeamOperations extends View {
       const choice = this.choiceContext();
       const approvalReady = choice?.intent !== "approve" || Boolean(this.doc?.can_approve && !this.docBusy);
       const ready = Boolean(choice && !choice.blocked && approvalReady && this.cardData?.can_answer && this.data?.actions_enabled
-        && !this.cardError && !this.error && !this.configError && !this.choiceBusy && !this.choiceStarted);
+        && !this.cardError && !this.error && !this.configError && !this.stale && !this.choiceBusy && !this.choiceStarted);
       const message = this.cardError ?? this.error ?? this.configError ?? this.message ?? this.answerMessage ?? this.sendMessage;
       return v_flex().id("choice-preview").size_full().min_h(0).gap(14).p(20).bg(t.background).text_color(t.foreground)
         .font_family(settings().ui_font || "Geist").text_size(13).line_height("21px")
@@ -823,7 +826,7 @@ export default class TeamOperations extends View {
           .child(div().min_w(0).font_semibold().whitespace_normal().child(`${picked ? "●" : "○"} ${number}. ${label}`))
           .when(Boolean(description), el => el.child(words(description).text_size(11).text_color(t.muted)));
       };
-      const questionSection = q
+      const questionSection = q && (card?.interaction ? card.needs_decision : true)
         ? v_flex().id("decision-question").flex_none().min_w(0).gap(7).p(10).rounded(7).bg(t.surface).border_1().border_color(t.accent)
           .child(div().text_size(11).font_semibold().text_color(t.accent).child("결정 질문"))
           .child(words(q.prompt).text_size(14).font_semibold())
@@ -838,7 +841,7 @@ export default class TeamOperations extends View {
           .child(words([draft.other, draft.comment].filter(x => x?.trim()).join("\n")).text_size(11))
           .child(button(`discard-draft-${shortHash(key)}`, "이 내용 지우기", cx => { DRAFTS.delete(key); this.preservedKeys = this.preservedKeys.filter(k => k !== key); cx.notify(); }).text_size(10));
       });
-      const needsDecision = Boolean(q || card?.needs_decision);
+      const needsDecision = card?.interaction ? Boolean(card.needs_decision) : Boolean(q || card?.needs_decision);
       const summary = card?.prompt && card.prompt !== "무엇을 확인했고 어떤 조치가 필요한가요?" ? card.prompt : card?.reason ?? card?.condition;
       const summarySection = v_flex().id("decision-summary").flex_none().min_w(0).gap(6)
         .child(div().text_size(11).font_semibold().text_color(t.muted).child(needsDecision ? "무엇을 결정하나요?" : "어떤 작업인가요?"))
@@ -849,11 +852,11 @@ export default class TeamOperations extends View {
           .min_w(0).whitespace_normal().text_size(13)
           .child(words(option.description).text_size(11).text_color(t.muted))));
       const progressSection = v_flex().id("card-progress").flex_none().min_w(0).gap(7)
-        .child(words(shownStatus).text_color(t.accent).font_semibold())
-        .child(words(card?.status === "complete" || card?.status_label === "완료" ? "완료된 작업입니다. 결과와 이력은 아래에서 볼 수 있습니다."
+        .child(words(card?.interaction?.label ?? shownStatus).text_color(t.accent).font_semibold())
+        .child(words(card?.interaction?.reason || (card?.status === "complete" || card?.status_label === "완료" ? "완료된 작업입니다. 결과와 이력은 아래에서 볼 수 있습니다."
           : card?.status === "approved" ? "승인된 작업입니다. 담당자 배정을 기다리고 있습니다."
             : card?.status === "planning" ? "설계를 준비하고 있습니다. 검토가 필요해지면 질문이 표시됩니다."
-              : "지금 선택할 항목은 없습니다. 담당자가 작업과 검증을 진행하고 있습니다.").text_color(t.muted));
+              : "지금 선택할 항목은 없습니다. 담당자가 작업과 검증을 진행하고 있습니다.")).text_color(t.muted));
       const deliveries = card?.deliveries ?? [];
       const shownDeliveries = current && !deliveries.some(d => d.request_id === current.request_id) ? [current, ...deliveries] : deliveries;
       const deliverySection = v_flex().id("delivery-status").flex_none().min_w(0).gap(4).p(9).rounded(7).bg(t.surface)
@@ -861,6 +864,7 @@ export default class TeamOperations extends View {
         .children(shownDeliveries.slice(0, 3).map(d => v_flex().min_w(0).gap(1)
           .child(div().min_w(0).whitespace_normal().font_semibold().text_color(sendColor(d.effective_state ?? d.state)).child(`${display(d.label)} · ${clock(d.created_at)}`))
           .when(Boolean(d.reason), el => el.child(words(d.reason).text_size(11).text_color(t.muted)))
+          .when(Boolean(d.receipt), el => el.child(words(`응답 확인 · ${d.receipt?.summary ?? ""}`).text_size(11).text_color(t.accent)))
           .when(d.destination != null, el => el.child(div().min_w(0).whitespace_normal().text_size(10).text_color(t.dim).child(softBreaks(`받는 곳 ${display(d.destination.team)} · ${display(d.destination.task)}`))))))
         .when(Boolean(this.sendMessage), el => el.child(words(this.sendMessage).text_size(11).text_color(this.sendMessage.startsWith("⚠") ? t.blocked : t.muted)))
         .child(div().text_size(10).text_color(t.dim).whitespace_normal().child("‘전송 확인됨’은 전달 통로를 통과했다는 뜻입니다. 팀장의 내용 수신·실행 시작·설계 승인·완료와는 별개로 확인합니다."));
@@ -926,12 +930,13 @@ export default class TeamOperations extends View {
           .child(body)
           .child(Scrollbar.vertical("detail-body").absolute().inset_0().mode("always")));
     }
-    const categoryForWork = work => WORK_PHASES[work.phase]?.column ?? "review";
+    const categoryForWork = work => work.interaction?.column ?? WORK_PHASES[work.phase]?.column ?? "review";
     const categoryForInventory = item => {
+      if (item.interaction) return item.interaction.column;
       const status = String(item.status ?? "");
       if (status.startsWith("완료")) return "complete";
+      if (/확인|승인|검토|선택|실패|불명|오류/.test(status)) return "review";
       if (/진행|실행 중/.test(status)) return "progress";
-      if (/확인|승인|검토/.test(status)) return "review";
       return "waiting";
     };
     // Below this logical width the four columns stack in one vertical flow instead of running off the right edge.
@@ -945,11 +950,10 @@ export default class TeamOperations extends View {
     const workCards = works.map(work => {
       const category = categoryForWork(work);
       const reason = work.reason || (category === "waiting" ? work.next : null);
-      return { id: work.id, category, kind: "work", label: "제품", title: work.title, state: phaseText(work.phase), reason, reasonLabel: work.reason ? "대기 이유" : "다음", percent: percent(work), feedback: work.feedback, raw: work };
+      return { id: work.id, category, kind: "work", label: "제품", title: work.title, state: work.interaction?.label ?? phaseText(work.phase), reason: work.interaction?.reason || reason, reasonLabel: work.reason ? "대기 이유" : "다음", percent: percent(work), feedback: work.feedback, raw: work };
     });
     const inventoryCards = inventory.map(item => {
-      const complete = categoryForInventory(item) === "complete";
-      return { id: item.id, category: categoryForInventory(item), kind: "inventory", label: display(item.category ?? "구축"), title: item.name, state: statusText(item.status), reason: item.condition, reasonLabel: "완료 조건", percent: complete ? "|██████████| 100% 1/1 · 완료 조건 확인 · 전체 진척률 아님" : null, feedback: item.feedback, raw: item };
+      return { id: item.id, category: categoryForInventory(item), kind: "inventory", label: display(item.category ?? "구축"), title: item.name, state: item.interaction?.label ?? statusText(item.status), reason: item.interaction?.reason || item.condition, reasonLabel: "완료 조건", percent: null, feedback: item.feedback, raw: item };
     });
     const allCards = [...workCards, ...inventoryCards];
     const completedCount = allCards.filter(card => card.category === "complete").length;
@@ -961,11 +965,8 @@ export default class TeamOperations extends View {
         .child(div().min_w(0).whitespace_normal().text_size(10).text_color(t.dim).child(softBreaks(`ID ${display(card.id)}`)))))
       .child(div().min_w(0).whitespace_normal().text_size(11).text_color(card.category === "complete" ? t.done : card.category === "review" ? t.blocked : card.category === "progress" ? t.working : t.muted).child(card.state))
       .when(card.kind === "work" && card.category !== "review", x => x.child(div().min_w(0).whitespace_normal().text_size(10).text_color(t.accent).child(card.percent)))
-      .when(card.kind === "inventory" && card.percent != null, x => x.child(v_flex().gap(2).text_size(10)
-        .child(div().whitespace_nowrap().text_color(t.accent).child("|██████████| 100% 1/1"))
-        .child(div().whitespace_nowrap().text_color(t.dim).child("완료 조건 확인 · 전체 진척률 아님"))))
       .when(Boolean(card.feedback), x => x.child(div().text_size(10).text_color(t.accent).child("답변 저장됨 · 총괄 확인 대기")))
-      .when(card.category === "review", x => x.child(div().text_size(11).text_color(t.accent).child("선택하기")))
+      .when(card.category === "review", x => x.child(div().text_size(11).text_color(t.accent).child(card.raw.interaction?.action ?? "선택하기")))
       .when(card.category !== "review" && Boolean(card.reason), x => x.child(words(`${card.reasonLabel} · ${display(card.reason)}`).text_size(11).text_color(t.dim)));
     const remaining = inventoryCards.filter(card => card.category !== "complete").length;
     const column = definition => {
@@ -1053,7 +1054,7 @@ export default class TeamOperations extends View {
       .child(h_flex().min_h(48).flex_none().flex_wrap().px(14).py(6).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().text_size(16).child("팀 운영 현황")).child(div().flex_1())
         .child(v_flex().min_w(0).items_end().gap(1)
-          .child(div().min_w(0).whitespace_normal().text_size(11).text_color(t.dim).child(`서버 관찰 ${clock(data?.observed_at)} · 마지막 성공 수신 ${this.lastSuccessAt ? clock(this.lastSuccessAt / 1000) : DUMMY}`))
+          .child(div().min_w(0).whitespace_normal().text_size(11).text_color(t.dim).child(`${this.error ? "갱신 실패 · 이전 자료" : this.stale ? "갱신 지연 · 이전 자료" : data?.synchronization?.state === "partial" ? "일부 자료 미확인" : "조회 성공"} · 관찰 ${clock(data?.observed_at)} · 수신 ${this.lastSuccessAt ? clock(this.lastSuccessAt / 1000) : DUMMY}`))
           .when(Boolean(manualText), el => el.child(div().id("manual-refresh-status").min_w(0).whitespace_normal().text_size(11).text_color(manual.phase === "failed" ? t.blocked : manual.phase === "running" ? t.working : t.muted).child(manualText))))
         .child(button("refresh", manual?.phase === "running" ? "새로고침 중" : this.busy ? "불러오는 중" : "새로고침", cx => { this.refresh(cx, true); }, this.busy || manual?.phase === "running")))
       .when(Boolean(this.error), el => el.child(div().px(12).py(7).text_color(t.blocked).child(`갱신에 실패했습니다. 기존 자료는 이전 관찰값입니다: ${this.error}`)))

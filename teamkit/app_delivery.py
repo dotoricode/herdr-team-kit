@@ -152,6 +152,45 @@ def _append(folder, state, detail):
     return event
 
 
+def receipt(folder, request):
+    path=folder/'receipt.json'
+    if not path.exists() and not path.is_symlink():return None
+    with os.fdopen(_open(path,os.O_RDONLY),'r') as source:value=json.load(source)
+    dest=request.get('destination') or {}
+    if (value.get('request_id')!=request['client_request_id'] or value.get('payload_hash')!=request['payload_hash']
+            or value.get('destination')!=dest or not isinstance(value.get('summary'),str)
+            or value.get('outcome') not in ('responded','deferred') or not isinstance(value.get('recorded_at'),(int,float))):
+        raise ValueError('담당자 처리 기록의 요청·내용·소유권을 확인해야 합니다.')
+    evidence=path.with_name('receipt-evidence.txt')
+    with os.fdopen(_open(evidence,os.O_RDONLY),'r') as source:body=source.read()
+    if hashlib.sha256(body.encode()).hexdigest()!=value.get('evidence_digest'):
+        raise ValueError('담당자 응답 근거가 바뀌었습니다.')
+    return value
+
+
+def record_receipt(state,rid,outcome,text,evidence,verifier):
+    """Attach verified response evidence; never rewrite transport history or work status."""
+    if outcome not in ('responded','deferred') or not isinstance(text,str) or not text.strip() or len(text)>4000:
+        raise ValueError('응답 결과와 4000자 이내의 처리 요약이 필요합니다.')
+    if not isinstance(evidence,str) or rid not in evidence or not isinstance(verifier,dict) or not verifier:
+        raise ValueError('요청 ID가 포함된 응답 근거와 확인 주체가 필요합니다.')
+    base=_base(state)
+    with _locked(base):
+        folder=request_dir(state,rid);req=read_request(folder)
+        old=receipt(folder,req)
+        if old:
+            if old['outcome']==outcome and old['summary']==text.strip():return old
+            raise ValueError('이미 기록된 응답입니다. 기존 근거를 덮어쓰지 않습니다.')
+        if read_events(folder)[-1]['state'] not in ('sending','sent','unknown'):
+            raise ValueError('전달하지 않은 요청에는 응답을 연결할 수 없습니다.')
+        value={'request_id':rid,'payload_hash':req['payload_hash'],'destination':req['destination'],
+               'outcome':outcome,'summary':text.strip(),'recorded_at':time.time(),'verifier':verifier,
+               'evidence_digest':hashlib.sha256(evidence.encode()).hexdigest()}
+        _write_new(folder/'receipt-evidence.txt',evidence.encode())
+        _write_new(folder/'receipt.json',canonical(value).encode());_sync(folder)
+        return value
+
+
 def summary(folder, now=None):
     """Display view. Orphan detection only changes what is shown; it records nothing and resends nothing."""
     request, events = read_request(folder), read_events(folder)
@@ -161,10 +200,13 @@ def summary(folder, now=None):
     if limit and now - last['at'] > limit:
         effective, orphaned = 'unknown', True
     dest = request.get('destination') or {}
+    response=receipt(folder,request)
     return {'request_id': request['client_request_id'], 'kind': request['payload']['kind'], 'work_id': request['payload']['work_id'],
-            'state': last['state'], 'effective_state': effective, 'orphaned': orphaned, 'label': LABELS[effective],
+            'state': last['state'], 'effective_state': effective, 'receipt': response, 'orphaned': orphaned, 'label': LABELS[effective],
             'reason': last['detail'].get('reason', '') if not orphaned else '제어 프로세스의 마지막 기록 뒤 결과를 확인하지 못했습니다. 자동 재전송 없이 보존합니다.',
             'created_at': request['created_at'], 'updated_at': last['at'], 'payload_hash': request['payload_hash'],
+            'binding': {k: request['payload'].get(k) for k in ('card_revision', 'document_revision', 'document_digest', 'question_id', 'question_revision')},
+            'selection': {k: request['payload'].get(k) for k in ('choice', 'comment', 'option_id', 'other_text')},
             'destination': {k: dest.get(k) for k in ('team', 'task', 'owner', 'attempt', 'terminal')} if dest else None}
 
 
@@ -220,7 +262,7 @@ def claim(state, rid, controller):
         return read_request(folder)
 
 
-def card_requests(state, key, limit=5):
+def card_requests(state, key, limit=None):
     base = _base(state)
     if not base.exists():
         return []

@@ -81,7 +81,8 @@ class AppBridgeTests(test_cli.Fixture):
         before=self.state.read_bytes()
         with patch('teamkit.app_bridge.core_read',return_value={'terminals':[{'address':'t1','status':'idle','state':'live'}]}), patch('teamkit.providers.identity') as identity:
             value=view(self.config,self.state,self.binding_file())
-        self.assertEqual(value['teams'][0]['app_state'],'idle')
+        self.assertEqual(value['teams'][0]['app_state'],'unknown')
+        self.assertFalse(value['teams'][0]['identity_verified'])
         self.assertEqual(value['works'][0]['percent'],None)
         self.assertFalse(value['works'][0]['approved'])
         self.assertEqual(before,self.state.read_bytes());identity.assert_not_called()
@@ -159,7 +160,7 @@ class AppBridgeTests(test_cli.Fixture):
         with patch('teamkit.app_bridge.core_read',side_effect=ValueError('unavailable')):
             result=view(self.config,self.state,self.binding_file())
         self.assertFalse(result['actions_enabled'])
-        self.assertEqual(result['teams'][0]['app_state'],'미확인')
+        self.assertEqual(result['teams'][0]['app_state'],'unknown')
 
     def test_approval_transaction_rejects_selected_revision(self):
         self.setup_work();self.call('work','submit','W1')

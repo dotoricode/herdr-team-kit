@@ -70,7 +70,7 @@ def _digest(value):
 
 def _work_view_signature(row):
     return _digest({key:value for key,value in row.items()
-                    if key not in ('native_state','feedback','previous_feedback')})
+                    if key not in ('native_state','feedback','previous_feedback','interaction')})
 
 
 def _current(config_path,state,binding_path,kind,ident):
@@ -198,13 +198,13 @@ def feedback_summaries(state):
     with _locked(root):return _records(root)
 
 
-def card_detail(config_path,state,binding_path,kind,ident):
+def card_detail(config_path,state,binding_path,kind,ident,*,_include_signature=False):
     value=_current(config_path,state,binding_path,kind,ident)
     saved=feedback_summaries(state).get(_key(kind,ident))
     current=saved is not None and saved['revision']==value['revision']
     value['answer']=saved['answer'] if current else None
     value['previous_answer']=saved['answer'] if saved and not current else None
-    value.pop('_view_signature',None)
+    if not _include_signature:value.pop('_view_signature',None)
     root=_root(state)
     value['question'],value['previous_question'],value['question_state']=None,None,{'state':'missing','reason':'담당자가 결정 질문을 준비하지 않았습니다.'}
     if root.exists():
@@ -218,7 +218,40 @@ def card_detail(config_path,state,binding_path,kind,ident):
         value['deliveries']=card_requests(state,_key(kind,ident))
     except (OSError,ValueError):
         value['deliveries']=[];value['delivery_error']='전달 기록을 읽지 못했습니다. 저장된 요청을 확인해야 합니다.'
+    apply_interaction(value)
     return value
+
+
+def apply_interaction(value):
+    """One display decision shared by board and detail; never changes work lifecycle."""
+    complete=value['status']=='complete' or value['status_label']=='완료'
+    question=value.get('question')
+    needs=bool(value['needs_decision'] or question) and not complete
+    state='complete' if complete else 'decision' if needs else 'progress' if value['status'] in ('planning','in_progress') or value['status_label']=='진행 중' else 'waiting'
+    column='complete' if complete else 'review' if needs else 'progress' if state=='progress' else 'waiting'
+    result={'state':state,'column':column,'label':'완료로 기록됨' if complete and value['kind']=='inventory' else value['status_label'],'reason':'','action':'선택하기' if needs else '상세 보기'}
+    matches=[]
+    for item in value.get('deliveries',[]):
+        bound=item.get('binding',{})
+        if (bound.get('card_revision'),bound.get('document_revision'),bound.get('document_digest')) != (value['revision'],value['document_revision'],value.get('document_digest')):continue
+        if question and (bound.get('question_id'),bound.get('question_revision')) != (question['question_id'],question['question_revision']):continue
+        matches.append(item)
+    if not complete and (value.get('delivery_error') or any('binding' not in d for d in value.get('deliveries',[]))):
+        needs=False;result.update(state='unknown',column='review',label='전달 기록 확인 필요',reason=value.get('delivery_error') or '읽지 못한 전달 기록이 있습니다. 재전송 전에 확인해야 합니다.',action='전달 기록 확인')
+    elif not complete and matches:
+        latest=matches[0];status=latest.get('effective_state',latest['state'])
+        if status!='not_sent':
+            needs=False
+            label={'pending':'전달 준비 중','sending':'전송 확인 중','sent':'담당자 처리 대기','unknown':'전달 결과 확인 필요'}[status]
+            reason='전달 확인 · 처리 결과 미기록. 담당자가 요청을 확인하고 작업 기록을 갱신해야 합니다.' if status=='sent' else latest.get('reason') or '같은 요청을 다시 보내지 않고 전달 결과를 확인합니다.'
+            result.update(state=status,column='review' if status=='unknown' else 'waiting',label=label,reason=reason,action='전달 기록 확인',request_id=latest['request_id'])
+            if latest.get('receipt'):
+                response=latest['receipt']
+                result.update(state=response['outcome'],column='waiting',label='보류 접수됨' if response['outcome']=='deferred' else '담당자 응답 확인됨',reason=response['summary'],action='응답 기록 보기')
+    elif not complete and not question and value.get('answer'):
+        needs=False;result.update(state='recorded',column='waiting',label='확인 기록됨 · 총괄 확인 대기',reason='선택은 기록됐습니다. 작업 완료나 설계 승인으로 처리하지 않습니다.',action='기록 보기')
+    value['needs_decision']=needs
+    value['interaction']=result
 
 
 def _append_record(root,record):
@@ -286,17 +319,23 @@ def card_answer(config_path,state,binding_path,kind,ident,revision,choice,text):
 
 def decorate_feedback(config_path,state,binding_path,inventory_rows,work_rows):
     """Attach a reply only when it matches the card currently being displayed."""
-    summaries=feedback_summaries(state)
+    coherent=True
     for kind,rows in (('inventory',inventory_rows),('work',work_rows)):
         for row in rows:
-            saved=summaries.get(_key(kind,row['id']))
-            if not saved:continue
-            try:current=_current(config_path,state,binding_path,kind,row['id'])
-            except (OSError,ValueError):
-                row['previous_feedback']=saved['answer'];continue
+            current=card_detail(config_path,state,binding_path,kind,row['id'],_include_signature=True)
+            # Concurrent writers may advance state between the snapshot and this read.
+            # Do not combine facts from different versions as a successful refresh.
             displayed=(row.get('name')==current['title'] and row.get('status')==current['status'] and row.get('condition')==current['condition']) if kind=='inventory' else (_work_view_signature(row)==current['_view_signature'])
-            field='feedback' if displayed and saved['revision']==current['revision'] else 'previous_feedback'
-            row[field]=saved['answer']
+            if not displayed:
+                coherent=False
+                if current.get('answer') or current.get('previous_answer'):row['previous_feedback']=current.get('answer') or current['previous_answer']
+                row['interaction']={'state':'unknown','column':'review','label':'카드 동기화 확인 필요','reason':'조회 중 카드가 바뀌었습니다. 다음 갱신에서 다시 확인합니다.','action':'기록 확인'}
+                continue
+            if current.get('answer'):row['feedback']=current['answer']
+            if current.get('previous_answer'):row['previous_feedback']=current['previous_answer']
+            row['interaction']=current['interaction']
+            if current.get('delivery_error') or any('binding' not in d for d in current.get('deliveries',[])):coherent=False
+    return coherent
 
 
 # ---- typed decision questions -------------------------------------------------

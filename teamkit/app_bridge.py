@@ -83,12 +83,18 @@ def view(config_path, state, binding_path):
         tasks = [t for t in data['tasks'] if t['team'] == ident and t['role'] == 'leader']
         bound = next((t for t in tasks if t.get('runtime', {}).get('backend') == 'core'
                       and t['runtime'].get('terminal') == terminal and t.get('owner')), None)
+        verified=False;app_state='unknown'
+        if bound and observed.get('state')=='live':
+            try:
+                verified,status=verified_session(bound,terminal)
+                if verified:app_state=status.get('state','unknown')
+            except (OSError,ValueError,subprocess.SubprocessError):pass
         teams.append({'id':ident, 'label':setting.get('label', ident), 'terminal':terminal,
                       'space':setting.get('space'),
-                      'app_state':observed.get('status', '미확인') if observed.get('state') == 'live' else '미확인',
+                      'app_state':app_state,'identity_verified':verified,
                       'ledger_state':bound['state'] if bound else '새 요청 대기 · 수신 확인 전',
                       'binding_status':'GUI 작업 기록 연결됨' if bound else '앱 대화 확인 · 작업 소유권 미등록',
-                      'reason':error or ('' if bound else 'TUI 작업·소유권을 가져오지 않습니다.')})
+                      'reason':error or ('현재 팀장의 실행 신원을 확인하지 못했습니다.' if not verified else '')})
     from .session_pool import status as pool_status
     pool_data=pool_status(config,state)
     for team in teams:
@@ -99,8 +105,12 @@ def view(config_path, state, binding_path):
         team['context_handoff']=next((j for j in context_status['active'] if j['terminal']==team['terminal']),None)
     rows, holds = inventory(linked.get('inventory'))
     feedback_error=''
-    try:decorate_feedback(config_path,state,binding_path,rows,value['rows'])
-    except (OSError,ValueError):feedback_error='답변 기록을 읽지 못했습니다. 저장 이력을 확인해 주세요.'
+    try:
+        if not decorate_feedback(config_path,state,binding_path,rows,value['rows']):raise ValueError('incoherent cards')
+    except (OSError,ValueError):
+        feedback_error='카드 상태·답변·전달 기록을 함께 확인하지 못했습니다. 다음 갱신에서 다시 확인합니다.'
+        for row in [*rows,*value['rows']]:
+            row['interaction']={'state':'unknown','column':'review','label':'카드 동기화 확인 필요','reason':feedback_error,'action':'기록 확인'}
     from .app_usage import read_coverage
     coverage=read_coverage(config,state).get('accounts',{})
     for account in value['accounts']:
@@ -127,12 +137,12 @@ def view(config_path, state, binding_path):
                     status=label;message=json.loads((folder/filename).read_text()).get('message','')
             actions.append({'id':folder.name,'task':request['task'],'status':status,'message':message})
     from .app_coordinator import status as coordinator_status
-    return {'observed_at':time.time(), 'teams':teams, 'accounts':value['accounts'],
+    return {'synchronization':{'state':'partial' if error or feedback_error else 'ok','sources':{'native':not bool(error),'cards':not bool(feedback_error)},'reason':' · '.join(x for x in (error,feedback_error) if x)},'observed_at':time.time(), 'teams':teams, 'accounts':value['accounts'],
             'works':value['rows'], 'inventory':rows, 'holds':holds,
             'actions':actions,'feedback_error':feedback_error,'context_handoff':context_status,
             'usage_refreshing':refresh.get('phase') in ('queued','running'),
             'usage_message':refresh.get('message',''),
-            'actions_enabled':linked.get('actions_enabled') is True and not error,
+            'actions_enabled':linked.get('actions_enabled') is True and not error and not feedback_error,
             'native_error':error, 'independent':True,
             'coordinator':coordinator_status(state,linked,list(native.values()),bool(error))}
 
@@ -184,6 +194,22 @@ def session_read(address):
     return value
 
 
+
+def verified_session(task,terminal):
+    from .core_runtime import _process_matches,_detector_matches
+    runtime=task.get('runtime',{})
+    current=session_read(terminal);labels=current.get('labels',{});fg=current.get('foreground') or {}
+    status=current.get('status') or {};pid=runtime.get('native_pid')
+    verified=(current.get('address')==terminal and current.get('state')=='live'
+        and current.get('name')==runtime.get('native_name',runtime.get('name'))
+        and labels.get('teamkit.owner')==task['owner'] and labels.get('teamkit.task')==task['id']
+        and labels.get('teamkit.name')==runtime.get('name')
+        and type(pid) is int and pid>0 and type(fg.get('pid')) is int and fg['pid']==pid
+        and _process_matches(task.get('provider'),fg.get('name'))
+        and _detector_matches(task.get('provider'),status.get('app')))
+    return verified,status
+
+
 def work_detail(config_path, state, binding_path, ident):
     """Read one GUI work's purpose and current/historical execution sessions."""
     config=load(config_path);linked=bindings(binding_path,config);data=readonly_snapshot(state)
@@ -203,15 +229,7 @@ def work_detail(config_path, state, binding_path, ident):
         verified=False;app_state='unknown'
         if present and task.get('owner') and isinstance(terminal,str) and ADDRESS.fullmatch(terminal):
             try:
-                current=session_read(terminal);labels=current.get('labels',{});fg=current.get('foreground') or {}
-                status=current.get('status') or {};pid=runtime.get('native_pid')
-                verified=(current.get('address')==terminal and current.get('state')=='live'
-                    and current.get('name')==runtime.get('native_name',runtime.get('name'))
-                    and labels.get('teamkit.owner')==task['owner'] and labels.get('teamkit.task')==task['id']
-                    and labels.get('teamkit.name')==runtime.get('name')
-                    and type(pid) is int and pid>0 and type(fg.get('pid')) is int and fg['pid']==pid
-                    and _process_matches(task.get('provider'),fg.get('name'))
-                    and _detector_matches(task.get('provider'),status.get('app')))
+                verified,status=verified_session(task,terminal)
                 if verified:app_state=status.get('state','unknown')
             except (OSError,ValueError,subprocess.SubprocessError):pass
         tasks.append({'id':task['id'],'goal':'\n'.join(clean(line) for line in task.get('goal','').split('\n')),
@@ -409,7 +427,17 @@ def card_question_set(config_path, state, binding_path, kind, ident, task, owner
     return question_set(config_path, state, binding_path, kind, ident, author, json.loads(path.read_text()), expected)
 
 
-def _message(request, shown, question):
+def card_receipt(config_path,state,binding_path,rid,task,owner,attempt,outcome,text):
+    from .app_delivery import read_request,request_dir,record_receipt
+    stored=read_request(request_dir(state,rid));payload=stored['payload']
+    actor=verify_author(config_path,state,binding_path,payload['kind'],payload['work_id'],task,owner,attempt)
+    dest=stored.get('destination') or {}
+    if any(actor.get(k)!=dest.get(k) for k in ('task','owner','attempt','terminal')):
+        raise ValueError('이 요청을 받은 소유자·시도·터미널만 응답을 기록할 수 있습니다.')
+    return {'receipt':record_receipt(state,rid,outcome,text,'요청 ID '+rid+'\n'+text,actor)}
+
+
+def _message(request, shown, question, receipt_command=None):
     payload = request['payload']
     lines = ['GUI 사용자 의견 전달입니다. 요청 ID ' + request['client_request_id'],
              '이 메시지는 사용자가 화면에서 남긴 수정 의견이며 설계 승인이나 구현 허가가 아닙니다.',
@@ -426,6 +454,8 @@ def _message(request, shown, question):
     if payload['comment']:
         lines.append('의견: ' + payload['comment'])
     lines.append('이 요청은 한 번만 전달됩니다. 자동 재전송은 없습니다.')
+    if receipt_command:
+        lines += ['처리 뒤 아래 명령으로 응답 근거를 기록하세요. --outcome은 responded 또는 deferred이며, 업무 완료나 설계 승인을 대신하지 않습니다.',receipt_command]
     return '\n'.join(lines)
 
 
@@ -521,7 +551,9 @@ def card_send_job(config_path, state, binding_path, request):
         message = folder / 'message.txt'
         fd = os.open(message, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, 'w') as out:
-            out.write(_message(stored, shown, question))
+            import shlex
+            command=shlex.join([sys.executable,str(Path(__file__).resolve().parent.parent/'teamkit_app.py'),'--config',str(config_path),'--state',str(state),'--bindings',str(binding_path),'card-receipt','--request-id',rid,'--task',dest['task'],'--owner',dest['owner'],'--attempt',str(dest['attempt']),'--outcome','responded','--answer-text','처리 결과를 여기에 적으세요'])
+            out.write(_message(stored, shown, question,command))
     except ValueError as error:
         journal(state, rid, 'not_sent', {'reason': str(error)})
         return
@@ -612,7 +644,7 @@ def main():
     parser.add_argument('--config', default=str(Path.home()/'.config/herdr-team-kit-app/config.json'))
     parser.add_argument('--state', default=str(Path.home()/'.local/state/herdr-team-kit-app/state.sqlite'))
     parser.add_argument('--bindings', default=str(Path.home()/'.config/herdr-team-kit-app/bindings.json'))
-    parser.add_argument('action', choices=('view','document','work-detail','approve','resume','resume-job','recover-coordinator','coordinator-job','refresh-usage','usage-job','card-detail','card-answer','card-question-set','card-send','card-send-job','card-send-status'))
+    parser.add_argument('action', choices=('view','document','work-detail','approve','resume','resume-job','recover-coordinator','coordinator-job','refresh-usage','usage-job','card-detail','card-answer','card-question-set','card-send','card-send-job','card-send-status','card-receipt'))
     parser.add_argument('--work'); parser.add_argument('--revision', type=int); parser.add_argument('--digest')
     parser.add_argument('--task'); parser.add_argument('--owner'); parser.add_argument('--request')
     parser.add_argument('--attempt',type=int)
@@ -620,6 +652,7 @@ def main():
     parser.add_argument('--card-revision');parser.add_argument('--choice');parser.add_argument('--answer-text',default='')
     parser.add_argument('--question-file');parser.add_argument('--expected-question-revision',type=int,default=0)
     parser.add_argument('--send-json');parser.add_argument('--request-id')
+    parser.add_argument('--outcome',choices=('responded','deferred'))
     parser.add_argument('--confirmed', action='store_true')
     args = parser.parse_args()
     try:
@@ -630,6 +663,7 @@ def main():
         elif args.action == 'card-answer':result=card_answer(args.config,args.state,args.bindings,args.kind,args.work,args.card_revision,args.choice,args.answer_text)
         elif args.action == 'card-question-set':result=card_question_set(args.config,args.state,args.bindings,args.kind,args.work,args.task,args.owner,args.attempt,args.question_file,args.expected_question_revision)
         elif args.action == 'card-send':result=card_send(args.config,args.state,args.bindings,args.send_json)
+        elif args.action == 'card-receipt':result=card_receipt(args.config,args.state,args.bindings,args.request_id,args.task,args.owner,args.attempt,args.outcome,args.answer_text)
         elif args.action == 'card-send-status':result=card_send_status(args.state,args.request_id)
         elif args.action == 'card-send-job':card_send_job(args.config,args.state,args.bindings,args.request);result={'message':'전송 확인을 마쳤습니다.'}
         elif args.action == 'approve': result = approve(args.config, args.state, args.bindings, args.work, args.revision, args.digest, args.confirmed)
