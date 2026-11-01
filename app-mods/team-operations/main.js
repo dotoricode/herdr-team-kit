@@ -5,8 +5,27 @@ import { appHome, readTextFile, exec, agents, terminals, theme, settings, run, n
 const LOCAL = "/mods/team-operations/local.json";
 const DUMMY = "—";
 const visibleSnapshot = value => JSON.stringify(value, (key, item) => key === "observed_at" ? undefined : key === "age" && typeof item === "number" ? Math.floor(item / 60) : item);
-// Drafts live in module scope for the running app: closing, refreshing or a changed card never submits or discards them.
-const DRAFTS = new Map();
+// Native session storage survives overlay instances and is discarded when the app exits.
+const DRAFT_PREFIX = "team-operations:draft:v1:";
+const DRAFTS = {
+  set(key, value) { sessionStorage.setItem(DRAFT_PREFIX + key, JSON.stringify(value)); },
+  get(key) {
+    try {
+      const value = JSON.parse(sessionStorage.getItem(DRAFT_PREFIX + key));
+      return value && typeof value === "object" && typeof value.comment === "string" && typeof value.other === "string" ? value : undefined;
+    } catch { return undefined; }
+  },
+  has(key) { return this.get(key) !== undefined; },
+  delete(key) { sessionStorage.removeItem(DRAFT_PREFIX + key); },
+  keys() {
+    const keys = [];
+    for (let index = 0; index < sessionStorage.length; index++) {
+      const key = sessionStorage.key(index);
+      if (key?.startsWith(DRAFT_PREFIX)) keys.push(key.slice(DRAFT_PREFIX.length));
+    }
+    return keys;
+  }
+};
 const requestId = () => `gui-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 // A very long unbroken token (path, id) may wrap after its separators instead of running past the card.
 const softBreaks = text => String(text).replace(/\S{28,}/g, token => token.replace(/([/._:\-])/g, "$1\u200b"));
@@ -200,7 +219,7 @@ export default class TeamOperations extends View {
   formKeyFor(card) {
     if (!card) return null;
     const q = card.question;
-    return [card.kind, card.id, q ? `${q.question_id}:${q.question_revision}` : "general", card.revision, card.document_digest ?? ""].join("|");
+    return [this.config?.state ?? "", card.kind, card.id, q ? `${q.question_id}:${q.question_revision}` : "general", card.revision, card.document_digest ?? ""].join("|");
   }
 
   rememberDraft() {
@@ -220,7 +239,7 @@ export default class TeamOperations extends View {
     this.otherInput?.set_value(saved?.other ?? "");
     this.restoring = false;
     this.sendRequestId = null;
-    const prefix = `${card.kind}|${card.id}|`;
+    const prefix = `${this.config?.state ?? ""}|${card.kind}|${card.id}|`;
     this.preservedKeys = [...DRAFTS.keys()].filter(k => k.startsWith(prefix) && k !== key && (DRAFTS.get(k).comment?.trim() || DRAFTS.get(k).other?.trim())).slice(-3);
   }
 
