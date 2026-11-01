@@ -26,6 +26,15 @@ def load(path):
         for role, policy in team['roles'].items():
             if role not in ('leader','implementer','reviewer') or policy.get('provider') not in value['profiles'] or not policy.get('model'):
                 raise ValueError('role requires configured provider and explicit model')
+    pool=value.get('session_pool')
+    if pool is not None:
+        if (not isinstance(pool,dict) or set(pool)!={'enabled','bindings','tasks'} or type(pool['enabled']) is not bool
+                or not isinstance(pool['bindings'],str) or not Path(pool['bindings']).is_absolute()
+                or not isinstance(pool['tasks'],dict) or set(pool['tasks'])!=set(value['teams'])
+                or any(not isinstance(t,str) or not t for t in pool['tasks'].values())
+                or len(set(pool['tasks'].values()))!=len(pool['tasks'])
+                or pool['enabled'] and value.get('runtime_backend')!='core'):
+            raise ValueError('session_pool requires core, enabled, absolute bindings and a distinct canonical task per team')
     routes = value.get('routing', {})
     from .routing import KINDS, execution_preference
     execution_preference(value)

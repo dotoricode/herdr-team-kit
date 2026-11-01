@@ -139,6 +139,10 @@ def parser():
     x.add_argument('--once',action='store_true');x.add_argument('--json',action='store_true')
     x.add_argument('--publish',action='store_true');x.add_argument('--interval',type=float,default=3)
     x.add_argument('--color',choices=['auto','always','never'],default='auto')
+    x=commands.add_parser('pool')
+    x.add_argument('action',choices=('prepare','present','status','plan','bootstrap','assign','refresh'))
+    x.add_argument('--team')
+    x.add_argument('--message-file')
     x=commands.add_parser('auto-context')
     x.add_argument('action',choices=('serve','status','register','enroll','checkpoint','verify-request'))
     x.add_argument('--once',action='store_true')
@@ -155,6 +159,9 @@ def run(args):
     args.config = str(Path(args.config).expanduser().resolve())
     args.state = str(Path(args.state).expanduser().resolve())
     config = load(args.config)
+    if args.command == 'pool':
+        from .pool_control import handle
+        return handle(args)
     if args.command == 'auto-context':
         from . import context_handoff as context
         if args.action == 'serve':return context.serve(args.config,args.state,args.once)
@@ -321,10 +328,18 @@ def run(args):
             if args.terminal:
                 from .core_runtime import CoreRuntime
                 CoreRuntime.validate_adoption(launch_task, spec, args.terminal)
-            owner = uuid.uuid4().hex
+            from . import session_pool
+            pool_managed=session_pool.managed(config,task)
+            if pool_managed and args.terminal:raise ValueError('pool leader uses its prepared slot, not manual terminal adoption')
+            pool_slot=session_pool.reserve(config,args.state,task,role) if pool_managed else None
+            owner=pool_slot['owner'] if pool_slot else uuid.uuid4().hex
             spec['env'].update(TEAMKIT_TASK=args.task, TEAMKIT_OWNER=owner,
                                TEAMKIT_CONFIG=str(Path(args.config).resolve()), TEAMKIT_STATE=str(Path(args.state).resolve()))
-            store.claim(args.task, owner, provider, account, pr['model'], pr.get('effort','medium'), expected_task=task,approval_config=config)
+            try:
+                store.claim(args.task, owner, provider, account, pr['model'], pr.get('effort','medium'), expected_task=task,approval_config=config)
+            except BaseException:
+                if pool_slot:session_pool.mark_uncertain(args.state,pool_slot,'claim did not complete; inspect before reusing')
+                raise
             if config.get('runtime_backend', 'tui') == 'core':
                 from .core_runtime import CoreRuntime
                 runtime = CoreRuntime()
@@ -337,11 +352,14 @@ def run(args):
                     launching['backend'] = 'core'
                 store.update(args.task, owner, 'launching', launching)
                 record = lambda detail: store.note(args.task, owner, detail)
-                if args.terminal:
+                if pool_slot:
+                    launched=session_pool.activate(config,args.state,pool_slot,store.get(args.task),spec)
+                elif args.terminal:
                     launched = runtime.adopt(launch_task, spec, name, args.terminal, record)
                 else:
                     launched = runtime.launch(launch_task, spec, name, record)
                 store.update(args.task, owner, 'submitted', launched)
+                if pool_slot:runtime=CoreRuntime(store.get(args.task))
                 receipt = [sys.executable,str(Path(__file__).resolve().parent.parent/'teamkit_cli.py'),'--config',str(Path(args.config).resolve()),
                            '--state',str(Path(args.state).resolve()),'receipt',args.task,'--owner',owner]
                 import shlex
@@ -394,6 +412,17 @@ def run(args):
             allowed = ('idle','done')
             if agent.get('agent_status') not in allowed:
                 raise KitError('leader is not idle; inspect before sending')
+            from . import session_pool
+            if session_pool.managed(config,task):
+                session_pool.verify_leased(config,args.state,task)
+                pr=profile(config,task['provider'],task['account'])
+                providers.identity(task['provider'],pr)
+                latest_config=load(args.config)
+                chosen=select_execution(latest_config,store,store.get(args.task),time.time())
+                if (not session_pool.managed(latest_config,task) or chosen.get('action')!='dispatch'
+                        or any(chosen.get(k)!=task.get(k) for k in ('provider','account','model','effort'))
+                        or binding(profile(latest_config,task['provider'],task['account']))!=binding(pr)):
+                    raise ValueError('pool selection changed before new work; use pool assign and wait for handoff')
             store.wake(args.task, task['owner'], approval_config=config)
             try:
                 import shlex

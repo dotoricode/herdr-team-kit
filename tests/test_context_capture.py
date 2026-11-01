@@ -19,7 +19,7 @@ class ClaudeContextCaptureTests(Fixture):
         self.value['quota_ttl_seconds'] = 120
         self.value['context_handoff'] = {'enabled': True, 'threshold': 90, 'interval': 10}
         self.state.parent.mkdir()
-        self.now = time.time()
+        self.now = float(int(time.time()))
         self.context_directory = self.state.parent / 'context-handoffs'
         self.observation = self.context_directory / 'observation-t1.json'
         environment = patch.dict(os.environ, {'HC_TERMINAL_ID': 't1', 'TEAMKIT_OWNER': 'fixture-owner',

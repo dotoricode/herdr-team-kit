@@ -207,6 +207,13 @@ def run_job(request):
                 '제품 코드 조사/수정·작업 재개·다른 agent 생성·기억 전체 조회·외부 게시를 하지 마세요. '+
                 'GUI 기록에서 이어갈 준비가 됐는지와 미완료 항목을 짧게 보고하고 사용자 요청을 기다리세요. '+
                 '이것은 새 총괄 대화이며 과거 대화 전문 복원이나 제품 구현 승인이 아닙니다.')
+        from .session_pool import enabled as pool_enabled
+        if pool_enabled(config):
+            import shlex
+            from .context_handoff import cli as pool_cli
+            prompt += (' 팀장 배정은 준비된 세션 풀을 사용하세요. 먼저 '+shlex.join(pool_cli(packet['config'],state,'pool','status'))+
+                       '로 네 팀장별 세션과 사용량을 확인하고, pool plan --team 팀ID로 선택을 확인하세요. 승인된 요청 파일은 pool assign --team 팀ID --message-file 경로로 전달하세요. '+
+                       '기존 작업·소유권을 덮어쓰지 말고, 인계 예약과 수신 확인을 기다리세요. 준비 세션을 이유로 별도 팀장 대화를 중복 생성하지 마세요.')
         if record.get('context_checkpoint'):
             prompt += (' 자동 컨텍스트 인계 기록 '+record['context_checkpoint']+
                        '의 checkpoint만 추가로 읽고 미완료·승인 대기를 보존하세요. 제품 업무를 자동 재개하지 마세요.')

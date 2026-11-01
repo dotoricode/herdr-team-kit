@@ -89,6 +89,10 @@ def view(config_path, state, binding_path):
                       'ledger_state':bound['state'] if bound else '새 요청 대기 · 수신 확인 전',
                       'binding_status':'GUI 작업 기록 연결됨' if bound else '앱 대화 확인 · 작업 소유권 미등록',
                       'reason':error or ('' if bound else 'TUI 작업·소유권을 가져오지 않습니다.')})
+    from .session_pool import status as pool_status
+    pool_data=pool_status(config,state)
+    for team in teams:
+        team['sessions']=[slot for slot in pool_data.get('slots',[]) if slot['team']==team['id']]
     from .context_handoff import summary as context_summary
     context_status=context_summary(config,state)
     for team in teams:

@@ -96,6 +96,11 @@ def targets(config, state, starting=False):
         task_rows=[json.loads(row[0]) for row in db.execute('SELECT body FROM tasks')]
         result = []
         for task in task_rows:
+            from . import session_pool
+            if (session_pool.enabled(config) and task.get('role')=='leader' and not task.get('work_id')
+                    and task.get('classification',{}).get('kind','general')=='general'
+                    and task['id']!=session_pool.task_id(config,task['team'])):
+                continue
             runtime = task.get('runtime', {})
             if (task['state'] not in ('running', 'ready') or not task.get('owner')
                     or runtime.get('backend') != 'core' or runtime.get('identity_checked') is not True):
@@ -368,20 +373,32 @@ def jobs(state):
     return [read(p) for p in sorted(root.glob('*.json')) if JOB.fullmatch(p.stem)]
 
 
-def request(config, state, target, observation, manual=False):
+def request(config, state, target, observation, manual=False, policy_rotation=False):
     with locked(directory(state) / 'requests'):
-        return _request(config, state, target, observation, manual)
+        return _request(config, state, target, observation, manual, policy_rotation)
 
 
-def _request(config, state, target, observation, manual=False):
+def _request(config, state, target, observation, manual=False, policy_rotation=False):
     """manual is reserved for explicit isolated lifecycle verification."""
     if not settings(config)['enabled']:
         raise ValueError('context handoff disabled')
     if manual and (target['kind'] != 'task' or not target['id'].startswith('CONTEXT-SMOKE-')
                    or not Path(target['root']).resolve().is_relative_to(Path(config['private_plan_root']).resolve())):
         raise ValueError('manual rehearsal is limited to an isolated context smoke task')
+    if policy_rotation:
+        from . import session_pool
+        store=Store(state)
+        try:task=store.get(target['id'])
+        finally:store.close()
+        if (manual or not session_pool.managed(config,task) or task['state']!='ready'
+                or task.get('owner')!=target['owner'] or task.get('runtime',{}).get('terminal')!=target['terminal']):
+            raise ValueError('policy rotation requires the current idle pool leader')
+        from .handoff_trigger import trigger
+        store=Store(state)
+        try:observation=trigger(config,store,target,observe(config,state,target),time.time())
+        finally:store.close()
     metric=(observation or {}).get('metric','context')
-    if not manual:
+    if not manual and not policy_rotation:
         valid=(isinstance(observation,dict) and number(observation.get('observed_at'))
                and 0 <= time.time()-observation['observed_at'] <= 120)
         if metric=='account_blocked':
@@ -403,7 +420,8 @@ def _request(config, state, target, observation, manual=False):
             else:return None
     nonce = uuid.uuid4().hex
     job = {'id':nonce, 'phase':'pending', 'target':target, 'trigger':observation,
-           'verification_only':manual, 'at':time.time(), 'updated_at':time.time()}
+           'verification_only':manual, 'policy_rotation':policy_rotation, 'at':time.time(), 'updated_at':time.time()}
+    update_next_session(config,state,job)
     write(job_path(state, nonce), job)
     return job
 
@@ -420,7 +438,9 @@ def checkpoint_prompt(config_path, state, job):
                              '--evidence-file', str(evidence), '--writer-stopped'))
     metric=(job.get('trigger') or {}).get('metric','context')
     reason=('Explicit isolated lifecycle rehearsal (not a measured 90% crossing). ' if job['verification_only'] else
-            ('Context90% automatic handoff. ' if metric=='context' else 'Subscription limit handoff ('+metric+'). '))
+            ('Policy-based idle leader handoff. ' if job.get('policy_rotation') else
+             'Context90% automatic handoff. ' if metric=='context' else 'Subscription limit handoff ('+metric+'). '))
+    reason+=' Planned next receiver (rechecked before activation): '+json.dumps(job.get('next_session'),ensure_ascii=False)+'. '
     return (reason + 'Stop starting product work; finish or stop any background writers safely. '
             'Save a concise handoff as JSON at ' + str(evidence) + ' with exactly these keys: '
             'verification (nonempty string list), next (remaining approved work or standby), '
@@ -543,6 +563,12 @@ def _advance(config_path, state, job):
                     refresh_candidates(config_path,state,pairs)
                     job['last_refresh']=time.time()
                 return set_phase(state,job,'waiting_dispatch','사용 가능한 계정을 기다립니다. 새 한도 확인은 최대 5분에 한 번 수행합니다.')
+            from . import session_pool
+            if target['kind']=='task' and session_pool.managed(config,task):
+                chosen=(task['team'],selection['provider'],selection['account'])
+                session_pool.prepare(config_path,state,only=chosen)
+                session_pool.present(config,state,only=chosen)
+                update_next_session(config,state,job)
             with locked(directory(state)/'model-start'):
                 if not capacity_available(state,None,job['id']):
                     return set_phase(state,job,'waiting_dispatch','동시 실행 여유가 생기면 새 담당을 연결합니다.')
@@ -694,6 +720,14 @@ def tick(config_path, state, pool=None, futures=None):
                 del futures[job['id']]
             if job['id'] not in futures:
                 futures[job['id']]=pool.submit(advance,config_path,state,job)
+    from . import session_pool
+    if session_pool.enabled(config):
+        from . import pool_control
+        for assignment in pool_control.requests(state):
+            if assignment['phase'] in ('done','uncertain','cancelled'):continue
+            key='assignment-'+assignment['id']
+            if pool is None:pool_control.advance(config_path,state,assignment['id'])
+            elif key not in futures:futures[key]=pool.submit(pool_control.advance,config_path,state,assignment['id'])
     return {'enabled':True, 'jobs':[{k:j.get(k) for k in ('id', 'phase', 'reason')} for j in jobs(state)]}
 
 
@@ -800,7 +834,7 @@ def summary(config, state):
                 'new_terminal':job.get('new_terminal'),
                 'task':job['target']['id'],'kind':job['target']['kind'],'phase':phase,
                 'status':'blocked' if needs_you or phase=='waiting_dispatch' else 'working',
-                'title':title,'detail':job.get('reason') or 'Context 90%에서 담당을 이어 붙이고 있어요'})
+                'title':title,'next_session':job.get('next_session'),'detail':job.get('reason') or 'Context 90%에서 담당을 이어 붙이고 있어요'})
     return {'enabled':True,'healthy':healthy,'label':'자동 인계 · 90%' if healthy else '자동 인계 · 감시 확인 필요','active':active}
 
 
@@ -822,3 +856,25 @@ def capacity_available(state, target=None, current_job=None):
             t=job['target'];active.add('task:'+t['id'] if t['kind']=='task' else 'coordinator')
     key=('task:'+target['id'] if target['kind']=='task' else 'coordinator') if target else None
     return len(active)<=3 if key in active else len(active)<3
+
+
+def update_next_session(config,state,job):
+    from . import session_pool
+    if job['target']['kind']!='task' or not session_pool.enabled(config):return
+    store=Store(state)
+    try:
+        task=store.get(job['target']['id'])
+        if not session_pool.managed(config,task):return
+        from .__main__ import select_execution
+        selected=select_execution(config,store,task,time.time())
+    finally:store.close()
+    hint={k:selected.get(k) for k in ('action','provider','account','model','effort','reason') if k in selected}
+    if selected['action']=='dispatch':
+        try:
+            slot=session_pool.preview(config,state,task,selected)
+            hint.update({k:slot.get(k) for k in ('terminal','generation')})
+        except ValueError:
+            hint['reason']='preferred slot is occupied or unavailable; replacement requires verified exit'
+    if job.get('next_session')!=hint:
+        job.setdefault('receiver_changes',[]).append({'at':time.time(),'previous':job.get('next_session'),'next':hint})
+        job['next_session']=hint
