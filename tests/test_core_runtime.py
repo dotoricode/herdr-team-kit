@@ -249,6 +249,56 @@ class CoreTests(unittest.TestCase):
                 with self.assertRaises(KitError):require_managed()
 
 
+    def test_message_checkin_waits_same_turn_without_resending(self):
+        self.hc.send['wait'].update(ended=False,reason='message',status='working')
+        self.hc.wait.update(turn=2,status='done')
+        result=CoreRuntime(self.task).prompt('tk-owner','once')
+        self.assertEqual(result['wait']['turn'],2)
+        self.assertEqual(sum(a[:2]==['hc','send'] for a,_ in self.hc.calls),1)
+        self.assertEqual(sum(a[:2]==['hc','wait'] for a,_ in self.hc.calls),1)
+
+    def test_not_started_checkin_can_complete_the_same_sent_turn(self):
+        self.hc.send.update(started=False)
+        self.hc.send['wait'].update(ended=False,reason='not_started')
+        self.hc.wait.update(turn=2,status='done')
+        result=CoreRuntime(self.task).prompt('tk-owner','once')
+        self.assertEqual(result['wait']['turn'],2)
+        self.assertEqual(sum(a[:2]==['hc','send'] for a,_ in self.hc.calls),1)
+
+    def test_checkin_owner_change_stops_before_followup_wait(self):
+        self.hc.send['wait'].update(ended=False,reason='message',status='working')
+        original=self.hc.__call__
+        def changed(argv,**kwargs):
+            result=original(argv,**kwargs)
+            if argv[:2]==['hc','send']:self.hc.agent['labels']['teamkit.owner']='replacement'
+            return result
+        with patch('teamkit.core_runtime.subprocess.run',side_effect=changed):
+            with self.assertRaises(KitError):CoreRuntime(self.task).prompt('tk-owner','once')
+        self.assertEqual(sum(a[:2]==['hc','wait'] for a,_ in self.hc.calls),0)
+
+
+    def test_startup_message_checkin_does_not_launch_a_replacement(self):
+        self.hc.wait.update(ended=False,reason='message',status=None)
+        original=self.hc.__call__
+        def settled(argv,**kwargs):
+            result=original(argv,**kwargs)
+            if argv[:2]==['hc','wait']:self.hc.wait.update(ended=True,reason='status',status='idle')
+            return result
+        with patch('teamkit.core_runtime.subprocess.run',side_effect=settled):
+            result=CoreRuntime().launch(self.task,self.spec,'tk-owner')
+        self.assertEqual(result['terminal'],'t8')
+        self.assertEqual(sum(a[:2]==['hc','run'] for a,_ in self.hc.calls),1)
+        self.assertEqual(sum(a[:2]==['hc','wait'] for a,_ in self.hc.calls),2)
+
+    def test_repeated_checkin_obeys_the_original_deadline(self):
+        self.hc.send['wait'].update(ended=False,reason='message',status='working')
+        with patch('teamkit.core_runtime.time.monotonic',side_effect=[0,31]):
+            with self.assertRaisesRegex(KitError,'message'):
+                CoreRuntime(self.task).prompt('tk-owner','once')
+        self.assertEqual(sum(a[:2]==['hc','send'] for a,_ in self.hc.calls),1)
+        self.assertEqual(sum(a[:2]==['hc','wait'] for a,_ in self.hc.calls),0)
+
+
 class CoreCliTests(Fixture):
     def setUp(self):
         super().setUp();self.value['runtime_backend']='core';self.config.write_text(json.dumps(self.value))

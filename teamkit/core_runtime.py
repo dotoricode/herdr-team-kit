@@ -162,7 +162,15 @@ class CoreRuntime:
             on_created(dict(detail))
         # hc owns readiness waiting. A timeout is a known terminal with an
         # uncertain startup, not permission to launch a replacement.
+        deadline = time.monotonic() + 30
         waited = _call('wait', '--json', '--timeout', '30', address)
+        while (waited.get('terminal') == address and waited.get('ended') is False
+               and waited.get('reason') == 'message'):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            waited = _call('wait', '--json', '--timeout', str(max(1, int(remaining))), address)
+            time.sleep(0.01)
         if waited.get('terminal') != address or waited.get('ended') is not True or waited.get('reason') != 'status' or waited.get('status') != 'idle':
             raise RuntimeError('Core startup not ready; inspect the recorded terminal')
         native = startup_native(address)
@@ -254,13 +262,32 @@ class CoreRuntime:
         # hc has an atomic --if idle guard, but no --if done. For a checked,
         # settled done agent use ordinary send; never force a blocked program.
         condition = ['--if','idle'] if native['status']['state']=='idle' else []
+        deadline = time.monotonic() + 30
         sent = _call('send', '--json', *condition, '--wait', '--timeout', '30', address, text)
         waited = sent.get('wait') or {}
-        if (sent.get('started') is not True or waited.get('terminal') != address
+        resumed = False
+        # A caller message or delayed status report ends hc's wait, not the
+        # accepted input. Follow that same turn; never submit the text again.
+        while (waited.get('terminal') == address and waited.get('ended') is False
+               and waited.get('reason') in ('message', 'not_started')
+               and type(sent.get('started')) is bool):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            self._native(name)
+            waited = _call('wait', '--json', '--timeout', str(max(1, int(remaining))), address)
+            resumed = True
+            time.sleep(0.01)
+        if ((sent.get('started') is not True and not resumed) or waited.get('terminal') != address
                 or waited.get('ended') is not True or waited.get('reason') != 'status'
                 or waited.get('status') not in ('idle','done')
                 or type(waited.get('turn')) is not int or waited['turn'] <= native.get('turn', 0)):
-            raise RuntimeError('Core delivery/wait not confirmed; inspect before further input')
+            reason = waited.get('reason')
+            reason = reason if reason in ('status','exit','output','timeout','not_started','message') else 'unknown'
+            raise RuntimeError(f'Core delivery/wait not confirmed ({reason}); inspect before further input')
+        if resumed:
+            self._native(name)
+            sent = {**sent, 'wait':waited}
         # This confirms the transport turn only. Receipt and verification remain
         # separate ledger events on the host/worker paths.
         return sent
