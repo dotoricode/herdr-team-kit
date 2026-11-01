@@ -247,7 +247,7 @@ class WorkflowTests(Fixture):
         rows={c.args[0]:c.args[2] for c in screen.addnstr.call_args_list}
         for call in screen.addstr.call_args_list:
             y,x,label=call.args[:3]
-            if label=='설계 검토 필요':
+            if label=='설계 확인 필요':
                 prefix=rows[y].split(label,1)[0]
                 expected=sum(2 if '\uac00'<=char<='\ud7a3' else 1 for char in prefix)
                 self.assertEqual(x,expected,'color overlay must not overwrite Korean text or counts')
@@ -377,7 +377,7 @@ class WorkflowTests(Fixture):
             h.return_value.call.return_value={'workspace':{'label':'Alpha'}}
             publish(view,self.value)
             args=h.return_value.call.call_args.args
-            self.assertIn('work_summary=실행 상태 미확인 · 실행 — · 업무 1 · 완료 1',args)
+            self.assertIn('work_summary=지금 상태 확인 안 됨 · 실행 — · 업무 1 · 완료 1',args)
             self.assertIn('work_blocked=',args)
 
     def test_publisher_renews_before_ttl_with_long_snapshot_interval(self):
@@ -405,14 +405,14 @@ class WorkflowTests(Fixture):
         self.call('work','record','W1','--step','behavior','--evidence-file',str(evidence))
         output=render(model(snapshot(self.state),self.value))
         self.assertIn('[███████████████████ ]  99% 1/1',output)
-        self.assertIn('남은 단계: 최종 검증·독립 리뷰·완료 확인',output)
+        self.assertIn('남은 단계: 마지막 동작 확인 · 다른 담당자의 코드 확인 · 완료 확인',output)
 
     def test_unapproved_progress_is_unknown_and_complete_has_no_remaining_work(self):
         from teamkit.dashboard import model,render
         from teamkit.workflow import snapshot
         self.setup_work()
         view=model(snapshot(self.state),self.value)
-        self.assertIn('미정 · 0/1',render(view))
+        self.assertIn('아직 정하지 않음 · 0/1',render(view))
         self.approve()
         view=model(snapshot(self.state),self.value)
         view['rows'][0].update(phase='complete',percent=100,steps_done=1,remaining_steps=[])

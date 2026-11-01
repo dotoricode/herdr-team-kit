@@ -25,7 +25,7 @@ class VisibilityTests(Fixture):
         output=render(model(self.data(),self.value),width=120)
         self.assertIn('Codex 회사',output);self.assertIn('42%',output);self.assertIn('73%',output)
         personal=next(line for line in output.splitlines() if 'Codex 개인' in line)
-        self.assertIn('미수집',personal);self.assertNotIn('0%',personal)
+        self.assertIn('아직 확인 못 함',personal);self.assertNotIn('0%',personal)
 
     def test_live_work_and_review_request_are_distinct(self):
         self.setup_work();self.call('work','submit','W1');self.task('D1','leader')
@@ -35,7 +35,7 @@ class VisibilityTests(Fixture):
                          'agents':[{'name':'designer','agent_status':'working'}]}
         output=render(model(data,self.value))
         self.assertIn('현재: 작업 중',output)
-        self.assertIn('설계 검토 필요',output);self.assertIn('권한 팝업이 아닌',output)
+        self.assertIn('설계 확인 필요',output);self.assertIn('어떤 방식으로 작업할지',output)
         self.assertIn(str(self.root/'private-plans/W1/r1/plan.md'),output)
         self.assertIn('제품 완료 0',output)
         data['monitor']['agents'][0]['agent_status']='idle'
@@ -46,7 +46,7 @@ class VisibilityTests(Fixture):
         from teamkit.monitor import namespace
         data['monitor']={'namespace':namespace(self.value),'observed_at':data['observed_at']-20,'native_ttl':10,'agents':[]}
         result=model(data,self.value)
-        self.assertEqual(result['activity']['alpha']['label'],'실행 상태 미확인')
+        self.assertEqual(result['activity']['alpha']['label'],'지금 상태 확인 안 됨')
         self.assertIsNone(result['activity']['alpha']['working'])
 
     def test_account_mismatch_stale_expired_and_failed_are_distinguished(self):
@@ -58,7 +58,7 @@ class VisibilityTests(Fixture):
         self.assertEqual(view['five_hour'],42);self.assertIsNone(view['weekly']);self.assertFalse(view['current'])
         with StoreContext(self.state) as db:db.quota('codex/team',{**q,'binding':'other'})
         view=model(self.data(),self.value)['accounts'][0]
-        self.assertIsNone(view['five_hour']);self.assertEqual(view['status'],'미수집')
+        self.assertIsNone(view['five_hour']);self.assertEqual(view['status'],'아직 확인 못 함')
 
     def test_provider_failure_invalidates_recent_admission(self):
         q={'observed_at':100,'five_hour':{'used':1,'resets_at':1000},'weekly':{'used':1,'resets_at':1000},'unavailable':True}
@@ -79,7 +79,7 @@ class VisibilityTests(Fixture):
         save_quotas(self.state,self.value,[('team',binding(self.value['profiles']['codex']['team']),None)])
         with StoreContext(self.state) as db:
             cached=db.quota('codex/team');self.assertTrue(cached['unavailable']);self.assertFalse(eligible(cached,time.time()))
-        self.assertIn('조회 실패',render(model(self.data(),self.value)))
+        self.assertIn('사용량 읽기 실패',render(model(self.data(),self.value)))
 
     def test_new_workspace_label_describes_the_task(self):
         from teamkit.runtime import Herdr
@@ -202,7 +202,7 @@ class VisibilityTests(Fixture):
         from teamkit.monitor import namespace
         data['monitor']={'namespace':namespace(self.value),'observed_at':data['observed_at'],'native_ttl':10,'agents':[]}
         self.assertEqual(model(data,self.value,now=data['observed_at'])['activity']['alpha']['label'],'대기 중')
-        self.assertEqual(model(data,self.value,now=data['observed_at']+11)['activity']['alpha']['label'],'실행 상태 미확인')
+        self.assertEqual(model(data,self.value,now=data['observed_at']+11)['activity']['alpha']['label'],'지금 상태 확인 안 됨')
 
     def test_created_pane_is_recorded_when_workspace_metadata_is_invalid(self):
         from teamkit.runtime import Herdr,RuntimeError as KitError
@@ -223,7 +223,7 @@ class VisibilityTests(Fixture):
             with self.subTest(state=state):
                 data['tasks'][0]['state']=state
                 activity=model(data,self.value,now=100)['activity']['alpha']
-                self.assertEqual(activity['label'],'실행 상태 미확인');self.assertIsNone(activity['working'])
+                self.assertEqual(activity['label'],'지금 상태 확인 안 됨');self.assertIsNone(activity['working'])
 
     def test_removed_codex_profile_discards_result(self):
         self.setup_work()
@@ -267,7 +267,7 @@ class VisibilityTests(Fixture):
         with patch('teamkit.dashboard.Herdr') as h,patch('teamkit.dashboard.time.time',side_effect=lambda:clock[0]):
             h.return_value.call.side_effect=native;publish(view,self.value)
         summary=next(x for x in sent[0] if x.startswith('work_summary='))
-        self.assertIn('실행 상태 미확인',summary)
+        self.assertIn('지금 상태 확인 안 됨',summary)
 
     def test_company_failure_blocks_route_before_personal_query_finishes(self):
         self.setup_work()
@@ -304,9 +304,9 @@ class VisibilityTests(Fixture):
         path.write_text(json.dumps(value))
         result=model(self.data(),self.value,now=now)['accounts'][-1]
         self.assertEqual(result['five_hour'],0);self.assertEqual(result['weekly'],100)
-        self.assertTrue(result['display_only']);self.assertEqual(result['status'],'CLI 확인값')
+        self.assertTrue(result['display_only']);self.assertEqual(result['status'],'직접 확인한 값')
         self.assertNotIn('claude/team',self.data()['quotas'])
-        self.assertEqual(model(self.data(),self.value,now=now+121)['accounts'][-1]['status'],'CLI 이전 확인값')
+        self.assertEqual(model(self.data(),self.value,now=now+121)['accounts'][-1]['status'],'전에 직접 확인한 값')
         for key,val in [('binding','other'),('observed_at',now+1),('weekly',101),('source','redraw')]:
             bad={'claude/team':{**value['claude/team'],key:val}};path.write_text(json.dumps(bad))
             self.assertIsNone(model(self.data(),self.value,now=now)['accounts'][-1]['five_hour'])
@@ -320,3 +320,15 @@ class VisibilityTests(Fixture):
         self.assertEqual(self.data()['works'][0],old)
         (self.root/'private-plans/W1/r1/plan.md').write_text('unsubmitted edit')
         with self.assertRaises(ValueError):review_document(self.state,self.value,'W1')
+
+    def test_plain_step_names_do_not_change_saved_work_or_approval(self):
+        import copy
+        from teamkit.dashboard_ui import UIState,frame
+        self.setup_work();data=self.data()
+        data['works'][0]['steps'][0]['title']='host 동등성·실패 회귀 검증'
+        before=copy.deepcopy(data)
+        view=model(data,self.value);ui=UIState();ui.toggle(('work','W1'))
+        for output in (render(view),frame(view,ui,120,time.time()).text()):
+            self.assertIn('개발 PC에서 바꾸기 전과 같은지',output)
+            self.assertNotIn('동등성',output);self.assertNotIn('회귀 검증',output)
+        self.assertEqual(data,before)

@@ -13,20 +13,20 @@ class DashboardUITests(unittest.TestCase):
     def view(self):
         return {'rows':[{'id':'W1','team':'alpha','title':'A [bold]literal[/bold] 긴 설계',
             'phase':'awaiting_approval','percent':None,'steps_done':0,'steps_total':1,'revision':2,
-            'updated_at':0,'model_requested':'model','effort_requested':'high','native_state':'공간 정리됨',
+            'updated_at':0,'model_requested':'model','effort_requested':'high','native_state':'작업 창 닫힘',
             'review_path':'/srv/private/W1/r2/plan.md','remaining_steps':['검증 단계'],
             'execution_state':'handed_off','attempts':1,'reason':'','next':''}],
             'teams':{'alpha':{'awaiting_approval':1},'beta':{}},'team_labels':{'alpha':'한글 팀장','beta':'다른 팀장'},
             'activity':{'alpha':{'label':'대기 중','working':0,'blocked':0},'beta':{'label':'대기 중','working':0,'blocked':0}},
             'accounts':[{'label':'Codex 개인','provider':'codex','account':'personal','current':True,
-                         'five_hour':None,'weekly':3,'status':'일부 한도 확인 불가','age':65}], 'native_known':True}
+                         'five_hour':None,'weekly':3,'status':'일부 사용량 알 수 없음','age':65}], 'native_known':True}
 
     def test_default_is_collapsed_and_literal_markup_is_preserved(self):
         from teamkit.dashboard_ui import UIState,frame
         ui=UIState();result=frame(self.view(),ui,width=120,now=33547)
         text=result.text()
         self.assertIn('▶ W1',text);self.assertNotIn('model/high',text)
-        self.assertIn('3%',text);self.assertIn('미제공',text)
+        self.assertIn('3%',text);self.assertIn('제공 안 함',text)
         self.assertIn('9시간 19분 7초 전',text)
         self.assertIn('팀장 창은 실행 기록',text)
         self.assertNotIn('/srv/private',text)
@@ -75,7 +75,7 @@ class DashboardUITests(unittest.TestCase):
         v=self.view();v['rows']=[];v['teams']={'beta':{}};v['accounts']=[]
         v['activity']['beta']['blocked']=1
         result=frame(v,UIState(),width=120,now=33547)
-        self.assertIn('입력 요청 1',result.text())
+        self.assertIn('답변 필요 1',result.text())
         self.assertNotIn('사용자 확인 사항 없음',result.text())
         self.assertFalse(any(s.style and s.style.bold and s.text.strip()=='—' for line in result.lines for s in line))
 
