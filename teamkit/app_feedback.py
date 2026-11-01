@@ -115,7 +115,8 @@ def _current(config_path,state,binding_path,kind,ident):
             value['reason']+=' · 설계 문서를 읽지 못했습니다. 일반 답변만 기록하며 설계 승인으로 처리하지 않습니다.'
         basis={'source':str(Path(state).resolve()),'work':work,'document':doc,
                'tasks':[t for t in data['tasks'] if t.get('work_id')==ident],'leader':leader}
-        value['execution_states']=[t['state'] for t in basis['tasks'] if t.get('role')!='leader']
+        value['execution_states']=[t['state'] for t in basis['tasks'] if t.get('role')!='leader'
+            and doc.get('digest') is not None and t.get('design_digest')==doc['digest'] and t.get('design_revision')==work['revision']]
     prompts=linked.get('card_prompts',{})
     override=prompts.get(_key(kind,ident)) if isinstance(prompts,dict) else None
     if isinstance(override,str) and override.strip():value['prompt']=override.strip()
@@ -259,7 +260,7 @@ def apply_interaction(value):
             elif 'queued' in tasks:
                 result.update(state='assignment_wait',column='waiting',label='담당자 배정 대기',reason='구현 작업은 배정 대기로 기록돼 있습니다. 실행 중인 구현 요청 기록이 없습니다.')
             else:
-                result.update(state='execution_unknown',column='review',label='진행 상태 확인 필요',reason='진행 단계이지만 실행 중인 구현 요청 기록이 없습니다. 담당자가 현재 상태를 확인해야 합니다.',action='상태 기록 확인')
+                result.update(state='execution_unknown',column='review',label='진행 상태 확인 필요',reason='현재 설계에 연결된 실행 중인 구현 요청 기록이 없습니다. 담당자가 배정과 진행 상태를 확인해야 합니다.',action='상태 기록 확인')
     value['needs_decision']=needs
     value['interaction']=result
 

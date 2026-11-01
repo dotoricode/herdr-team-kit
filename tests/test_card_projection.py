@@ -168,3 +168,8 @@ class ProjectionTests(FeedbackFixture):
                 self.assertEqual(current['interaction']['state'],display_state)
                 self.assertEqual(current['interaction']['column'],column)
                 self.assertFalse(current['needs_decision'])
+        with StoreContext(self.state) as store:
+            with store.transaction():
+                current=store.get('IMPL');current['state']='queued';store._save(current,'fixture')
+                old=dict(current,id='OLD',state='awaiting_review',design_revision=0,design_digest='0'*64);store._save(old,'fixture')
+        self.assertEqual(self.detail('W1','work')['interaction']['state'],'assignment_wait')
