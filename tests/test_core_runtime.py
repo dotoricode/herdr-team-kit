@@ -2,6 +2,7 @@
 import copy
 import json
 import os
+from pathlib import Path
 import subprocess
 import tempfile
 import time
@@ -68,6 +69,22 @@ class CoreTests(unittest.TestCase):
         self.assertIn('teamkit.owner=owner',argv)
         self.assertEqual(argv[-2:],['codex','--no-daemon'])
         self.assertFalse(any(a[:2]==['hc','send'] for a,_ in self.hc.calls))
+    def test_startup_waits_for_nullable_foreground_without_relaunch(self):
+        calls=self.hc.__call__
+        agent_gets=0
+        def delayed(argv,**kwargs):
+            nonlocal agent_gets
+            if argv[:3]==['hc','get','t8']:
+                agent_gets+=1
+                if agent_gets==1:
+                    value=copy.deepcopy(self.hc.agent);value['foreground']=None
+                    return subprocess.CompletedProcess(argv,0,json.dumps(value),'')
+            return calls(argv,**kwargs)
+        with patch('teamkit.core_runtime.subprocess.run',side_effect=delayed):
+            result=CoreRuntime().launch(self.task,self.spec,'tk-owner')
+        self.assertEqual(result['native_pid'],88)
+        self.assertEqual(sum(a[:2]==['hc','run'] for a,_ in self.hc.calls),1)
+
     def test_readiness_timeout_preserves_created_address_and_does_not_prompt(self):
         self.hc.wait.update(ended=False,reason='timeout',status=None)
         self.hc.agent['status']=None
@@ -157,6 +174,12 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(KitError):CoreRuntime.validate_adoption(task,spec,'t8')
         self.hc.agent['foreground']['argv']+=['--add-dir','/private/gui-state']
         CoreRuntime.validate_adoption(task,spec,'t8')
+
+    def test_relative_native_add_dir_uses_native_cwd(self):
+        task,spec=self.adoption()
+        spec['args']+=['--add-dir',str(Path.cwd()/'ledger')]
+        self.hc.agent['foreground']['argv']+=['--add-dir','ledger']
+        with self.assertRaises(KitError):CoreRuntime.validate_adoption(task,spec,'t8')
 
     def test_adoption_metadata_or_ownership_mismatch_is_read_only(self):
         task,spec=self.adoption();original=copy.deepcopy(self.hc.agent)

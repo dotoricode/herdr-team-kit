@@ -8,6 +8,7 @@ import subprocess
 import sys
 import shlex
 import tomllib
+import time
 
 from .runtime import RuntimeError
 
@@ -86,6 +87,18 @@ def _model_effort(provider, argv):
     return model[0], effort[0]
 
 
+def startup_native(address):
+    """Wait only for absent OS metadata on the same settled terminal."""
+    deadline = time.monotonic() + 3
+    while True:
+        native = _call('get', address)
+        if (native.get('state') != 'live' or native.get('foreground') is not None
+                or (native.get('status') or {}).get('state') not in ('idle', 'done')
+                or time.monotonic() >= deadline):
+            return native
+        time.sleep(.1)
+
+
 def _process_matches(provider, name):
     return name in ({'claude', 'claude.exe'} if provider == 'claude' else {provider})
 
@@ -146,7 +159,7 @@ class CoreRuntime:
         waited = _call('wait', '--json', '--timeout', '30', address)
         if waited.get('terminal') != address or waited.get('ended') is not True or waited.get('reason') != 'status' or waited.get('status') != 'idle':
             raise RuntimeError('Core startup not ready; inspect the recorded terminal')
-        native = _call('get', address)
+        native = startup_native(address)
         detail['native_pid'] = (native.get('foreground') or {}).get('pid')
         self.task = {**task, 'owner':owner, 'provider':spec['kind']}
         self.target = detail
@@ -178,7 +191,7 @@ class CoreRuntime:
         if spec['kind'] not in ('codex','claude') or _model_effort(spec['kind'], foreground.get('argv')) != _model_effort(spec['kind'], spec['args']):
             raise RuntimeError('Core adoption model/effort metadata differs from admission')
         required = [Path(value).resolve() for value in _values(spec['args'], '--add-dir')]
-        writable = [Path(cwd).resolve(), *[Path(value).resolve() for value in _values(foreground['argv'], '--add-dir')]]
+        writable = [Path(cwd).resolve(), *[(Path(cwd)/value).resolve() for value in _values(foreground['argv'], '--add-dir')]]
         if any(not any(path.is_relative_to(root) for root in writable) for path in required):
             raise RuntimeError('Core adoption lacks the requested GUI writable directory; use a fresh execution')
         return native

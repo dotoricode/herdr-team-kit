@@ -111,7 +111,7 @@ class NativeHc:
     def __init__(self):
         self.calls=[];self.labels={};self.state='live';self.missing=False
         self.screen='Session\nUsage: 0 input, 0 output, 0 cache read, 0 cache write\nCurrent session\n0% used\nCurrent week (all models)\n32% used'
-        self.ready=True;self.timeout_run=False;self.queried=False;self.foreground_name='claude';self.status_app='claude';self.foreground_missing_once=False;self.gets=0
+        self.ready=True;self.timeout_run=False;self.queried=False;self.foreground_name='claude';self.status_app='claude';self.foreground_missing_once=False;self.gets=0;self.wrap_sends=False;self.received_text=None
     def __call__(self,argv,**opts):
         import subprocess
         self.calls.append(argv);args=argv[1:];op=args[0]
@@ -125,7 +125,12 @@ class NativeHc:
             value={'address':'t9','state':self.state,'labels':self.labels,'name':'usage-test',
                    'foreground':None if self.foreground_missing_once and self.gets==1 else {'pid':99,'name':self.foreground_name},'status':{'app':self.status_app,'state':'idle'} if self.ready else None}
         elif op=='wait':value={'ended':self.ready,'reason':'status' if self.ready else 'timeout','status':'idle' if self.ready else None}
-        elif op=='send':self.queried=True;value={'started':False,'status':'idle','turn':0}
+        elif op=='send':
+            self.received_text='<hc from="tcontroller">'+args[-1]+'</hc>' if self.wrap_sends else args[-1]
+            self.queried=self.received_text=='/usage';value={'started':not self.queried,'status':'idle','turn':0}
+        elif op=='keys':
+            self.received_text=''.join(args[3:-1]) if args[1]=='--json' else ''.join(args[2:-1])
+            self.queried=self.received_text=='/usage';value={'status':'idle','turn':0}
         elif op=='read':return subprocess.CompletedProcess(argv,0,self.screen if self.queried or not self.ready else 'Ready for input','')
         elif op=='ls':value={'terminals':[{'address':'t9','state':self.state}]} if self.labels and not self.missing else {'terminals':[]}
         elif op=='kill':self.state='finished';value={'ok':True}
@@ -142,7 +147,7 @@ class NativeUsageTests(UsageFixture):
             value=refresh_native_usage(self.value,self.state,'personal')
         self.assertEqual(value['weekly'],32);self.assertTrue(native.missing)
         launch=next(a for a in native.calls if a[1]=='run');self.assertIn('--safe-mode',launch);self.assertNotIn('-p',launch)
-        sends=[a for a in native.calls if a[1]=='send'];self.assertEqual(len(sends),1);self.assertEqual(sends[0][-1],'/usage')
+        self.assertEqual(native.received_text,'/usage')
         with StoreContext(self.state) as db:self.assertIsNone(db.quota('claude/personal'))
 
     def test_os_process_name_is_distinct_from_reported_claude_program_id(self):
@@ -168,6 +173,15 @@ class NativeUsageTests(UsageFixture):
                 with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=native):
                     with self.assertRaisesRegex(UsageUnavailable,'native_not_ready'):refresh_native_usage(self.value,self.state,'team')
                 self.assertTrue(native.missing);self.assertFalse(any(a[1]=='send' for a in native.calls))
+
+    def test_controller_context_uses_literal_keys_instead_of_agent_message_send(self):
+        import os
+        from teamkit.app_usage import refresh_native_usage
+        native=NativeHc();native.wrap_sends=True
+        with patch.dict(os.environ,{'HC_TERMINAL_ID':'tcontroller','HC_SCOPE':'scope-fixture'}),patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=native):
+            value=refresh_native_usage(self.value,self.state,'personal')
+        self.assertEqual(value['weekly'],32)
+        self.assertEqual(native.received_text,'/usage')
 
     def test_native_trust_dialog_is_not_approved_or_reported_as_usage(self):
         from teamkit.app_usage import refresh_native_usage,UsageUnavailable

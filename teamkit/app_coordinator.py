@@ -12,7 +12,7 @@ import uuid
 
 from .app_bridge import core_read
 from .config import load, profile, binding, cached_quota
-from .core_runtime import _call, require_managed, CoreRuntime
+from .core_runtime import _call, require_managed, CoreRuntime, startup_native
 from .policy import choose_account
 from .runtime import launch_spec, RuntimeError as KitError
 from .store import Store
@@ -167,12 +167,24 @@ def run_job(request):
         labels={'herdr.space':sp,'herdr.tab':tab,'teamkit.app-scope':scope(state),'teamkit.kind':'coordinator',
                 'teamkit.task':'GUI-COORDINATOR','teamkit.owner':packet['nonce'],'teamkit.name':name}
         for key,value in labels.items():args+=['--label',key+'='+value]
+        if hashlib.sha256(Path(packet['config']).read_bytes()).hexdigest()!=packet['config_digest']:
+            raise ValueError('총괄 실행 설정이 신원 확인 중 바뀌었습니다.')
+        store=Store(state)
+        try:
+            current=choose_account(cached_quota(config,store,'codex','team'),cached_quota(config,store,'codex','personal'),time.time(),config['quota_ttl_seconds'])
+        finally:store.close()
+        if current!=account:
+            raise ValueError('총괄 구독 한도가 신원 확인 중 바뀌었습니다. 갱신 후 다시 확인하세요.')
+        # Creation may succeed even when its response is lost. Persist uncertainty
+        # before crossing the native boundary so a retry cannot duplicate it.
+        launched=True
+        record['phase']='uncertain';save(record_path(state),record)
         created=_call(*args,'--','env',*(k+'='+v for k,v in spec['env'].items()),'codex',*spec['args'])
-        launched=True;record['terminal']=created['address'];save(record_path(state),record)
+        record['phase']='launching';record['terminal']=created['address'];save(record_path(state),record)
         waited=_call('wait','--json','--timeout','30',record['terminal'])
         if waited.get('ended') is not True or waited.get('status') not in ('idle','done'):
             raise ValueError('총괄 터미널은 생성됐지만 준비를 확인하지 못했습니다. 다시 만들지 말고 확인하세요.')
-        native=_call('get',record['terminal']);pid=(native.get('foreground') or {}).get('pid')
+        native=startup_native(record['terminal']);pid=(native.get('foreground') or {}).get('pid')
         runtime={'backend':'core','name':name,'terminal':record['terminal'],'native_pid':pid}
         actor=CoreRuntime({'id':'GUI-COORDINATOR','owner':packet['nonce'],'provider':'codex','runtime':runtime})
         actor._native(name,ready=True)

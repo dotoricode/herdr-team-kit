@@ -369,9 +369,12 @@ def refresh_native_usage(config,state,account):
                 raise UsageUnavailable(_dialog(text) or 'native_not_ready')
             baseline=_hc(['read','--lines','100',address],plain=True)
             if 'Current week (all models)' in baseline:raise UsageUnavailable('native_outcome_unknown')
-            sent=_hc(['send','--json','--if','idle',address,'/usage'])
-            if sent.get('started') is not False or sent.get('status')!='idle':
-                raise UsageUnavailable('native_unexpected_turn')
+            ready=_owned_usage(address,labels)
+            if (ready.get('status') or {}).get('state')!='idle':raise UsageUnavailable('native_not_ready')
+            # send adds agent-message attribution inside an hc controller. Named
+            # keys preserve the literal builtin command without clearing scope.
+            keyed=_hc(['keys','--json',address,'/','u','s','a','g','e','enter'])
+            if keyed.get('status')!='idle':raise UsageUnavailable('native_unexpected_turn')
             deadline=time.monotonic()+10
             while True:
                 _owned_usage(address,labels)
@@ -389,6 +392,7 @@ def refresh_native_usage(config,state,account):
                     time.sleep(0.2)
             if not re.search(r'Usage:\s*0 input, 0 output, 0 cache read, 0 cache write',text):
                 raise UsageUnavailable('native_unexpected_turn')
+            record['zero_token_usage']=True
             value=record_native_observation(config,state,account,text,observed)
             record['observed_at']=observed;record['values']={k:value[k] for k in ('five_hour','weekly')}
         except UsageUnavailable as caught:error=caught

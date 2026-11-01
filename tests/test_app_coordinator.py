@@ -2,7 +2,12 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import hashlib
+import time
 from unittest.mock import patch
+from test_cli import Fixture, StoreContext
+from teamkit.config import binding
+from teamkit.runtime import RuntimeError as KitError
 
 from teamkit import app_coordinator
 
@@ -55,3 +60,39 @@ class CoordinatorTests(unittest.TestCase):
             value=app_coordinator.start(self.config,self.state,self.link,True)
         self.assertEqual(observed[0]['phase'],'recovering')
         self.assertIn('복구',value['message'])
+
+
+class RecoveryBoundaryTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        private=self.root/'private';private.mkdir()
+        coord=private/'coordinator';coord.mkdir()
+        self.value.update(runtime_backend='core',private_plan_root=str(private),
+                          coordinator={'provider':'codex','model':'fixture','effort':'high','root':str(coord)})
+        self.config.write_text(json.dumps(self.value));self.create()
+        inventory=self.root/'inventory.md';inventory.write_text('Fixture inventory')
+        linked=self.root/'bindings.json';linked.write_text(json.dumps({'inventory':str(inventory)}))
+        with StoreContext(self.state) as store:
+            now=time.time()
+            store.quota('codex/team',{'binding':binding(self.value['profiles']['codex']['team']),
+                        'observed_at':now,'five_hour':{'used':1,'resets_at':now+900},
+                        'weekly':{'used':1,'resets_at':now+900}})
+        job=self.state.parent/'job';job.mkdir()
+        self.request=job/'request.json'
+        self.request.write_text(json.dumps({'config':str(self.config),'state':str(self.state),
+            'bindings':str(linked),'nonce':'fixture','config_digest':hashlib.sha256(self.config.read_bytes()).hexdigest()}))
+        app_coordinator.save(app_coordinator.record_path(self.state),{'phase':'recovering','nonce':'fixture'})
+
+    def test_unknown_creation_result_blocks_another_recovery(self):
+        with patch('teamkit.app_coordinator.require_managed'),patch('teamkit.app_coordinator.providers.identity'),patch('teamkit.app_coordinator._call',side_effect=KitError('outcome unknown')):
+            with self.assertRaises(KitError):app_coordinator.run_job(self.request)
+        self.assertEqual(app_coordinator.read_record(self.state)['phase'],'uncertain')
+        self.assertFalse(app_coordinator.status(self.state,{},terminals=[])['can_recover'])
+
+    def test_quota_invalidated_during_identity_does_not_launch(self):
+        def invalidate(*args):
+            with StoreContext(self.state) as store:
+                value=store.quota('codex/team');value['unavailable']=True;store.quota('codex/team',value)
+        with patch('teamkit.app_coordinator.require_managed'),patch('teamkit.app_coordinator.providers.identity',side_effect=invalidate),patch('teamkit.app_coordinator._call',side_effect=AssertionError('quota-ineligible launch')) as native:
+            with self.assertRaises(ValueError):app_coordinator.run_job(self.request)
+        native.assert_not_called()
