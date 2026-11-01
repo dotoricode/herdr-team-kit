@@ -238,7 +238,8 @@ def apply_interaction(value):
     for item in value.get('deliveries',[]):
         bound=item.get('binding',{})
         if (bound.get('document_revision'),bound.get('document_digest')) != (value['document_revision'],value.get('document_digest')):continue
-        same_card=bound.get('card_revision')==value['revision']
+        exact_card=bound.get('card_revision')==value['revision']
+        same_card=exact_card
         if not same_card and value['kind']=='work':
             # Prove the old full card hash by substituting only its recorded route.
             # A changed prompt, design, task or work state still fails this comparison.
@@ -248,7 +249,12 @@ def apply_interaction(value):
                     'space':destination.get('space') or content['leader'].get('space')}
             same_card=bool(destination.get('terminal')) and bound.get('card_revision')==_digest({**source,'content':{**content,'leader':leader}})
         if not same_card:continue
-        if question and (bound.get('question_id'),bound.get('question_revision')) != (question['question_id'],question['question_revision']):continue
+        expected_question=question
+        previous=value.get('previous_question')
+        if (expected_question is None and previous and (not exact_card or bound.get('question_id') is not None)
+                and (previous['document_revision'],previous['document_digest'])==(value['document_revision'],value.get('document_digest'))):
+            expected_question=previous
+        if expected_question and (bound.get('question_id'),bound.get('question_revision')) != (expected_question['question_id'],expected_question['question_revision']):continue
         matches.append(item)
     if not complete and (value.get('delivery_error') or any('binding' not in d for d in value.get('deliveries',[]))):
         needs=False;result.update(state='unknown',column='review',label='전달 기록 확인 필요',reason=value.get('delivery_error') or '읽지 못한 전달 기록이 있습니다. 재전송 전에 확인해야 합니다.',action='전달 기록 확인')

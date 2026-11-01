@@ -95,6 +95,10 @@ class ProjectionTests(FeedbackFixture):
         question_set(self.config,self.state,self.links,'work','W1',AUTHOR,{'prompt':'새 범위도 확인할까요?','options':OPTIONS},1)
         self.assertTrue(self.detail('W1','work')['needs_decision'])
         self.assertEqual(self.board()['works'][0]['interaction']['state'],'decision')
+        import json
+        self.linked['teams']['alpha']['terminal']='t8';self.links.write_text(json.dumps(self.linked))
+        self.assertTrue(self.detail('W1','work')['needs_decision'])
+        self.assertEqual(self.detail('W1','work')['interaction']['state'],'decision')
 
     def test_receipt_rejects_different_destination_and_damaged_evidence(self):
         import json
