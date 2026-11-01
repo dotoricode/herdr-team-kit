@@ -61,6 +61,22 @@ class ExecutionPreferenceTests(Fixture):
             result = self.call('dispatch', 'T1')
             return result, identity, herdr
 
+    def test_small_implementation_prefers_personal_codex_before_company_claude(self):
+        self.value['routing']['small'] = {'provider': 'claude', 'model': 'haiku-fixture', 'effort': 'low'}
+        self.save(); self.make('--work-kind', 'small'); self.seed()
+        task, _, herdr = self.dispatch()
+        self.assertEqual((task['provider'], task['account'], task['model'], task['effort']),
+                         ('codex', 'personal', 'codex-personal', 'low'))
+        spec = herdr.return_value.launch.call_args.args[1]
+        self.assertIn('model_reasoning_effort="low"', spec['args'])
+
+    def test_available_personal_claude_keeps_small_task_model_and_low_effort(self):
+        self.value['routing']['small'] = {'provider': 'claude', 'model': 'haiku-fixture', 'effort': 'low'}
+        self.save(); self.make('--work-kind', 'small'); self.seed(claude_personal=20)
+        task, _, _ = self.dispatch()
+        self.assertEqual((task['provider'], task['account'], task['model'], task['effort']),
+                         ('claude', 'personal', 'haiku-fixture', 'low'))
+
     def test_actual_weekend_dispatch_uses_personal_codex_before_company_claude(self):
         self.make(); self.seed()
         task, identity, herdr = self.dispatch()

@@ -66,7 +66,7 @@ def execution_candidates(config, task, role, now):
     preference = execution_preference(config)
     cls = task.get('classification', {'kind': 'general', 'risks': []})
     if (preference is None or task.get('user_decision') or task['role'] not in ('leader', 'implementer')
-            or cls['kind'] != 'general' or cls['risks']):
+            or cls['kind'] not in ('general', 'small') or cls['risks']):
         return None
     from datetime import datetime
     from zoneinfo import ZoneInfo
