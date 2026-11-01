@@ -286,4 +286,11 @@ def snapshot(state):
         cached=cache_path(state)
         if cached.stat().st_size<=1024*1024:monitor=json.loads(cached.read_text())
     except (OSError,ValueError):pass
-    return {'works':works,'tasks':tasks,'quotas':quotas,'monitor':monitor,'event_sequence':events,'observed_at':time.time()}
+    observations={}
+    observed=path.with_name(path.name+'.usage-observations.json')
+    try:
+        if observed.stat().st_size<=1024*1024:
+            value=json.loads(observed.read_text())
+            if isinstance(value,dict):observations=value
+    except (OSError,ValueError):pass
+    return {'works':works,'tasks':tasks,'quotas':quotas,'monitor':monitor,'usage_observations':observations,'event_sequence':events,'observed_at':time.time()}

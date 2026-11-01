@@ -1,12 +1,12 @@
 # Herdr Team Kit
 
-Herdr 안에서 제품별 팀장과 작업 워커를 조정하는 Python 표준 라이브러리 기반 도구입니다. 팀계정 우선 배정, 계정별 한도, 작업 소유권과 인계 기록을 로컬에서 관리합니다.
+Herdr 안에서 제품별 팀장과 작업 워커를 조정하는 Python 도구입니다. 팀계정 우선 배정, 계정별 한도, 작업 소유권과 인계 기록을 로컬에서 관리합니다.
 
 **현재는 운영 기반 구현입니다.** 가짜 provider·Herdr 경계와 로컬 Git/SQLite를 이용한 검사는 실행하지만 실제 Herdr·계정·모델 통합은 별도 검증이 필요합니다. 로그인, 컨텍스트 교체, PR 머지, 매뉴얼 빌드를 무인으로 완결하는 서비스는 아닙니다.
 
 ## 시작
 
-Python 3.11 이상, Git, Herdr와 사용할 에이전트 CLI가 필요합니다. 별도 Python 패키지는 필요하지 않습니다.
+Python 3.11 이상, Git, Herdr와 사용할 에이전트 CLI가 필요합니다. 핵심 CLI는 표준 라이브러리를 사용합니다. 클릭·접기/펼치기를 지원하는 운영 화면은 Rich가 필요합니다. 전용 가상 환경에서 `python -m pip install -r requirements-ui.txt`로 설치하세요.
 
 ```bash
 python3 teamkit_cli.py --help

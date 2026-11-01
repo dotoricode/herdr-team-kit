@@ -292,3 +292,31 @@ class VisibilityTests(Fixture):
                 run(Namespace(config=str(self.config),state=str(self.state),interval=1,quota_interval=30,once=False),self.value)
         finally:release.set()
         self.assertEqual(observed[-1],'wait')
+
+    def test_manual_usage_is_display_only_and_never_admission_quota(self):
+        self.setup_work();now=time.time()
+        self.value['profiles']['claude']={'team':{**self.value['profiles']['codex']['team'],'home':str(self.root/'claude')}}
+        pr=self.value['profiles']['claude']['team']
+        from pathlib import Path
+        path=Path(str(self.state.resolve())+'.usage-observations.json')
+        value={'claude/team':{'source':'native-cli-manual-observation','binding':binding(pr),
+            'observed_at':now,'five_hour':0,'weekly':100}}
+        path.write_text(json.dumps(value))
+        result=model(self.data(),self.value,now=now)['accounts'][-1]
+        self.assertEqual(result['five_hour'],0);self.assertEqual(result['weekly'],100)
+        self.assertTrue(result['display_only']);self.assertEqual(result['status'],'CLI 확인값')
+        self.assertNotIn('claude/team',self.data()['quotas'])
+        self.assertEqual(model(self.data(),self.value,now=now+121)['accounts'][-1]['status'],'CLI 이전 확인값')
+        for key,val in [('binding','other'),('observed_at',now+1),('weekly',101),('source','redraw')]:
+            bad={'claude/team':{**value['claude/team'],key:val}};path.write_text(json.dumps(bad))
+            self.assertIsNone(model(self.data(),self.value,now=now)['accounts'][-1]['five_hour'])
+
+    def test_inline_review_is_read_only_and_refuses_modified_submission(self):
+        from teamkit.dashboard import review_document
+        self.setup_work();self.call('work','submit','W1')
+        old=self.data()['works'][0]
+        ident,title,body=review_document(self.state,self.value,'W1')
+        self.assertEqual(ident,'W1');self.assertEqual(body,self.plan.read_text().rstrip('\n'))
+        self.assertEqual(self.data()['works'][0],old)
+        (self.root/'private-plans/W1/r1/plan.md').write_text('unsubmitted edit')
+        with self.assertRaises(ValueError):review_document(self.state,self.value,'W1')
