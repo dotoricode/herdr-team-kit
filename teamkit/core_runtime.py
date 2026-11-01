@@ -144,7 +144,12 @@ class CoreRuntime:
                 '--name', name, '--cwd', task['root'],
                 '--label', 'teamkit.owner='+owner, '--label', 'teamkit.task='+task['id'],
                 '--label', 'teamkit.name='+name]
-        args += ['--', 'env', *(key+'='+value for key, value in spec['env'].items()), spec['kind'], *spec['args']]
+        # An empty CLAUDE_CONFIG_DIR makes Claude store its home in the working directory.
+        env = dict(spec['env'])
+        unset = ['-u', 'CLAUDE_CONFIG_DIR'] if env.get('CLAUDE_CONFIG_DIR') == '' else []
+        if unset:
+            del env['CLAUDE_CONFIG_DIR']
+        args += ['--', 'env', *unset, *(key+'='+value for key, value in env.items()), spec['kind'], *spec['args']]
         created = _call(*args)
         address = created.get('address', '')
         if not isinstance(address, str) or not ADDRESS.fullmatch(address):

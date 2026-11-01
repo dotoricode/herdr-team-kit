@@ -69,6 +69,21 @@ class CoreTests(unittest.TestCase):
         self.assertIn('teamkit.owner=owner',argv)
         self.assertEqual(argv[-2:],['codex','--no-daemon'])
         self.assertFalse(any(a[:2]==['hc','send'] for a,_ in self.hc.calls))
+    def launched_env(self,env):
+        spec={'kind':'codex','env':{'TEAMKIT_OWNER':'owner',**env},'args':['--model','m']}
+        CoreRuntime().launch(self.task,spec,'tk-owner')
+        argv=next(a for a,_ in self.hc.calls if a[:2]==['hc','run'])
+        return argv[argv.index('--')+1:]
+    def test_default_claude_home_is_unset_not_empty(self):
+        argv=self.launched_env({'ANTHROPIC_API_KEY':'','CLAUDE_CONFIG_DIR':''})
+        self.assertEqual(argv[:3],['env','-u','CLAUDE_CONFIG_DIR'])
+        self.assertNotIn('CLAUDE_CONFIG_DIR=',argv)
+        self.assertIn('ANTHROPIC_API_KEY=',argv)
+        self.assertEqual(argv[-3:],['codex','--model','m'])
+    def test_explicit_claude_home_stays_assigned(self):
+        argv=self.launched_env({'CLAUDE_CONFIG_DIR':'/private/custom'})
+        self.assertIn('CLAUDE_CONFIG_DIR=/private/custom',argv)
+        self.assertNotIn('-u',argv)
     def test_startup_waits_for_nullable_foreground_without_relaunch(self):
         calls=self.hc.__call__
         agent_gets=0
