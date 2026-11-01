@@ -1,4 +1,4 @@
-import { View, div } from "gpui-kit";
+import { View, div, image } from "gpui-kit";
 import { v_flex, h_flex, Popover, Scrollbar, Textarea, TextareaState, Editor, EditorState } from "gpui-base";
 import { appHome, readTextFile, exec, agents, terminals, theme, settings, run, nextCommand, props as getModProps, openOverlay, closeOverlay } from "herdr";
 
@@ -582,7 +582,9 @@ export default class TeamOperations extends View {
       return v_flex().id(key).gap(2).py(2).px(8).rounded(6).bg(t.surface).cursor_pointer()
         .on_click((_e, cx) => { open ? this.expanded.delete(key) : this.expanded.add(key); cx.notify(); })
         .child(h_flex().h(24).flex_none().gap(8).items_center().text_size(11)
-          .child(div().w(92).flex_none().truncate().font_semibold().child(display(account.label)))
+          .child(h_flex().w(114).flex_none().gap(6).items_center()
+            .when(["codex", "claude"].includes(account.provider), el => el.child(image(`icons/${account.provider}.svg`).w(16).h(16).flex_none()))
+            .child(div().flex_1().min_w(0).truncate().font_semibold().child(display(account.label))))
           .child(usageCell("5시간", account.five_hour, "five_hour"))
           .child(usageCell("주간", account.weekly, "weekly"))
           .child(div().flex_1().min_w(0).truncate().child(display(account.coverage ?? statusText(account.status))))
