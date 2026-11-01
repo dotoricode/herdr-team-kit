@@ -1,4 +1,4 @@
-"""GUI account coverage. Native /usage observations never authorize admission."""
+"""GUI coverage and verified official native usage for account admission."""
 from contextlib import contextmanager
 import fcntl
 import json
@@ -6,13 +6,14 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import stat
 import tempfile
 import time
 import uuid
 
 from . import providers
 from .config import binding
-from .policy import CLAUDE_QUOTA_SOURCE, normalize_quota, number
+from .policy import CLAUDE_QUOTA_SOURCE, CLAUDE_NATIVE_QUOTA_SOURCE, normalize_quota, number
 from .statusline import peek_quota
 from .runtime import AUTH_ENV, home_value
 from .store import Store
@@ -21,6 +22,7 @@ REASONS={'provider_windows_read':'구독 조회가 반환한 사용량입니다.
          'native_usage_needed':'로그인은 확인했지만 GUI에 연결된 최신 사용량 자료가 없습니다.',
          'native_display_observation':'공식 /usage에서 확인한 표시 전용 값입니다.',
          'native_response_observation':'실제 응답에 연결된 statusline 사용량입니다.',
+         'native_verified_observation':'계정·조회 완료·정리를 검증한 공식 /usage 값이며 배정에도 사용합니다.',
          'observation_expired':'마지막 사용량 자료의 유효기간이 지났습니다.',
          'observation_unreadable':'이전 표시용 기록을 읽지 못했습니다. 새 /usage 관측이 필요합니다.',
          'query_failed':'구독 CLI에서 사용량을 읽지 못했습니다. 로그인 문제로 단정하지 않습니다.',
@@ -120,7 +122,7 @@ def _measured(row,value,now,ttl,display_only=False,missing='not_provided'):
         used=window if display_only else window.get('used') if isinstance(window,dict) else None
         valid=number(used) and 0<=used<=100
         reset=None if display_only else window.get('resets_at') if isinstance(window,dict) else None
-        valid=valid and (display_only or number(reset) and reset>now)
+        valid=valid and (display_only or value.get('source')==CLAUDE_NATIVE_QUOTA_SOURCE or number(reset) and reset>now)
         state='provided' if valid and current else 'stale' if valid or age is not None and not current else missing if window is None else 'unavailable'
         out={'status':state,'status_label':WINDOW_LABELS[state],'observed_at':row['observed_at'],
              'reason':'provider_window_not_returned' if state=='not_provided' else state,
@@ -189,10 +191,14 @@ def collect(config,state):
                                 and all(number(observation.get(k)) and 0<=observation[k]<=100 for k in ('five_hour','weekly'))
                                 and (not value or observation['observed_at']>value.get('observed_at',0))):
                             value=observation;display=True
+                            verified=native_admission_quota(config,state,account)
+                            if verified and verified['observed_at']==observation['observed_at']:
+                                value=verified;display=False
                         if value and number(value.get('observed_at')) and value['observed_at']<=now:
                             fresh=now-value['observed_at']<=config.get('quota_ttl_seconds',120) and not value.get('unavailable')
                             row=_measured(_entry(provider,account,pr,'query_succeeded' if fresh else 'stale',attempt),value,now,config.get('quota_ttl_seconds',120),display)
-                            row['reason']='native_display_observation' if display else 'native_response_observation'
+                            row['reason']=('native_verified_observation' if value.get('source')==CLAUDE_NATIVE_QUOTA_SOURCE
+                                           else 'native_display_observation' if display else 'native_response_observation')
                         else:
                             row=_entry(provider,account,pr,'not_collected',attempt,'observation_unreadable' if observation_error else 'native_usage_needed')
                             row['source']='claude-auth-status';row['auth_checked_at']=now
@@ -271,6 +277,56 @@ REASONS.update(NATIVE_REASONS)
 
 def _native_attempt_path(state,account):
     return _path(state,'.native-usage-'+account+'.json')
+
+
+def _private_usage_record(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd) as stream:
+        info = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) & 0o077 or info.st_size > 65536):
+            raise ValueError('private usage record required')
+        value = json.load(stream)
+        if not isinstance(value, dict):
+            raise ValueError('usage record must be an object')
+        return value
+
+
+def native_admission_quota(config, state, account):
+    """Only a completed owned probe attests a matching display observation."""
+    if config.get('runtime_backend') != 'core':
+        return None
+    try:
+        attempt = _private_usage_record(_native_attempt_path(state, account))
+        observations = _private_usage_record(_path(state, '.usage-observations.json'))
+        observation = observations.get('claude/' + account)
+        pr = config['profiles']['claude'][account]
+        at, started = attempt.get('observed_at'), attempt.get('attempt_at')
+        now = time.time()
+        native, values = attempt.get('native'), attempt.get('values')
+        if (attempt.get('cleaned') is not True or attempt.get('zero_token_usage') is not True
+                or attempt.get('error') or attempt.get('binding') != binding(pr)
+                or not re.fullmatch(r'[0-9a-f]{32}', str(attempt.get('nonce', '')))
+                or not re.fullmatch(r't[0-9a-z]+', str(attempt.get('terminal', '')))
+                or not number(at) or not number(started) or not started <= at <= now
+                or now - at > config.get('quota_ttl_seconds', 120)
+                or not isinstance(native, dict) or not isinstance(values, dict)
+                or native.get('foreground_name') not in ('claude', 'claude.exe')
+                or type(native.get('foreground_pid')) is not int or native['foreground_pid'] <= 0
+                or native.get('status_app') not in ('claude', 'claude-code')
+                or native.get('status_state') != 'idle'
+                or not isinstance(observation, dict)
+                or observation.get('source') != 'native-cli-manual-observation'
+                or observation.get('binding') != binding(pr) or observation.get('observed_at') != at):
+            return None
+        for key in ('five_hour', 'weekly'):
+            if (not number(values.get(key)) or not 0 <= values[key] <= 100
+                    or not number(observation.get(key)) or observation[key] != values[key]):
+                return None
+        return {'source':CLAUDE_NATIVE_QUOTA_SOURCE, 'binding':binding(pr), 'observed_at':at,
+                'five_hour':{'used':values['five_hour']}, 'weekly':{'used':values['weekly']}}
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
 
 
 def _hc(args,timeout=15,plain=False):

@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from .runtime import launch_spec
-from .policy import CLAUDE_QUOTA_SOURCE
+from .policy import CLAUDE_QUOTA_SOURCE, CLAUDE_NATIVE_QUOTA_SOURCE, number
 
 
 def load(path):
@@ -68,6 +68,24 @@ def binding(profile):
 
 def cached_quota(config, store, provider, account):
     value = store.quota(provider+'/'+account)
-    if provider == 'claude' and value and value.get('source') != CLAUDE_QUOTA_SOURCE:
-        return None
-    return value if value and value.get('binding') == binding(profile(config, provider, account)) else None
+    if value and value.get('binding') != binding(profile(config, provider, account)):
+        value = None
+    if provider != 'claude':
+        return None if value and value.get('source') == CLAUDE_NATIVE_QUOTA_SOURCE else value
+    if value and value.get('source') != CLAUDE_QUOTA_SOURCE:
+        value = None
+    from .app_usage import native_admission_quota
+    native = native_admission_quota(config, store.path, account)
+    if native is None:
+        return value
+    if value is None or not number(value.get('observed_at')) or native['observed_at'] > value['observed_at']:
+        return native
+    if native['observed_at'] == value['observed_at']:
+        for key in ('five_hour', 'weekly'):
+            window = value.get(key)
+            used = window.get('used') if isinstance(window, dict) else None
+            if not number(used) or not 0 <= used <= 100:
+                return value
+            native[key]['used'] = max(native[key]['used'], used)
+        return native
+    return value

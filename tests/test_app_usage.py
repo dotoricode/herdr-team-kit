@@ -209,3 +209,139 @@ class NativeUsageTests(UsageFixture):
         with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=native):
             with self.assertRaises(UsageUnavailable):refresh_native_usage(self.value,self.state,'team')
         self.assertEqual(sum(a[1]=='run' for a in native.calls),1);self.assertTrue(native.missing)
+
+
+class NativeAdmissionTests(UsageFixture):
+    def probe(self, account='team', weekly=32):
+        from teamkit.app_usage import refresh_native_usage
+        native = NativeHc()
+        native.screen = native.screen.replace('32% used', str(weekly) + '% used')
+        with patch('teamkit.app_usage.claude_identity'), patch('teamkit.app_usage.subprocess.run', side_effect=native):
+            refresh_native_usage(self.value, self.state, account)
+        return native
+
+    def attempt_path(self, account='team'):
+        return Path(str(self.state) + '.native-usage-' + account + '.json')
+
+    def test_verified_official_refresh_enables_company_route_without_quota_injection(self):
+        self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+        native = self.probe()
+        self.assertEqual(self.call('route', '--provider', 'claude'), {'account':'team', 'action':'dispatch'})
+        self.assertTrue(native.missing)
+        self.assertEqual(native.received_text, '/usage')
+        with StoreContext(self.state) as db:
+            self.assertIsNone(db.quota('claude/team'))
+
+    def test_company_then_personal_then_wait_uses_the_same_ninety_percent_limit(self):
+        self.probe(weekly=90)
+        self.probe('personal', weekly=38)
+        self.assertEqual(self.call('route', '--provider', 'claude')['account'], 'personal')
+        self.probe('personal', weekly=95)
+        self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+
+    def test_unverified_manual_display_alone_does_not_enable_assignment(self):
+        with patch('teamkit.app_usage.claude_identity'):
+            record_native_observation(self.value, self.state, 'team',
+                'Current session\n0% used\nCurrent week (all models)\n0% used', self.now)
+        self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+
+    def test_failed_incomplete_mismatched_or_expired_probe_never_authorizes(self):
+        import copy
+        self.probe()
+        path = self.attempt_path()
+        original = json.loads(path.read_text())
+        changes = [
+            {'cleaned':False}, {'zero_token_usage':False}, {'error':'native_usage_failed'},
+            {'binding':'wrong'}, {'nonce':'wrong'}, {'terminal':'other'},
+            {'observed_at':time.time()-301}, {'observed_at':time.time()+30},
+            {'attempt_at':time.time()+30}, {'values':{'five_hour':0}},
+            {'values':{'five_hour':False, 'weekly':0}},
+            {'native':{'foreground_name':'zsh', 'foreground_pid':99, 'status_app':'claude', 'status_state':'idle'}},
+        ]
+        for change in changes:
+            with self.subTest(change=change):
+                path.write_text(json.dumps({**copy.deepcopy(original), **change}))
+                self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+
+    def test_changed_measurement_or_profile_cannot_reuse_probe_attestation(self):
+        self.probe()
+        observations = Path(str(self.state) + '.usage-observations.json')
+        data = json.loads(observations.read_text())
+        data['claude/team']['weekly'] = 1
+        observations.write_text(json.dumps(data))
+        self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+        self.probe()
+        self.value['profiles']['claude']['team']['identity']['email'] = 'changed@example.invalid'
+        self.config.write_text(json.dumps(self.value))
+        self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+
+    def test_latest_response_limits_override_older_native_zero(self):
+        self.probe(weekly=0)
+        from teamkit.policy import CLAUDE_QUOTA_SOURCE
+        now = time.time()
+        with StoreContext(self.state) as db:
+            db.quota('claude/team', {'source':CLAUDE_QUOTA_SOURCE,
+                'binding':binding(self.value['profiles']['claude']['team']), 'observed_at':now,
+                'five_hour':{'used':95, 'resets_at':now+300}, 'weekly':{'used':0, 'resets_at':now+600}})
+        self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+
+    def test_equal_timestamps_use_the_more_restrictive_usage(self):
+        self.probe(weekly=95)
+        from teamkit.policy import CLAUDE_QUOTA_SOURCE
+        at = json.loads(self.attempt_path().read_text())['observed_at']
+        with StoreContext(self.state) as db:
+            db.quota('claude/team', {'source':CLAUDE_QUOTA_SOURCE,
+                'binding':binding(self.value['profiles']['claude']['team']), 'observed_at':at,
+                'five_hour':{'used':0, 'resets_at':at+300}, 'weekly':{'used':0, 'resets_at':at+600}})
+        self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+
+    def test_private_probe_file_is_required_and_tui_does_not_consume_it(self):
+        self.probe()
+        path = self.attempt_path()
+        path.chmod(0o644)
+        self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+        path.chmod(0o600)
+        self.value['runtime_backend'] = 'tui'
+        self.config.write_text(json.dumps(self.value))
+        self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+
+
+    def test_verified_probe_has_admission_source_in_account_coverage(self):
+        self.probe()
+        with patch('teamkit.app_usage.providers.codex_quota', return_value=self.raw), patch('teamkit.app_usage.claude_identity'):
+            row = collect(self.value, self.state)['accounts']['claude/team']
+        self.assertFalse(row['display_only'])
+        self.assertEqual(row['source'], 'claude-native-usage')
+        self.assertEqual(row['windows']['weekly']['status'], 'provided')
+        self.assertNotIn('resets_at', row['windows']['weekly'])
+
+    def test_probe_read_does_not_renew_timestamp_and_rejects_symlink(self):
+        self.probe()
+        original = self.attempt_path().read_bytes()
+        with patch('teamkit.app_usage.time.time', return_value=time.time()+301):
+            self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+        self.assertEqual(self.attempt_path().read_bytes(), original)
+        other = self.root/'outside.json'
+        other.write_bytes(original)
+        other.chmod(0o600)
+        self.attempt_path().unlink()
+        self.attempt_path().symlink_to(other)
+        self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+
+
+    def test_native_source_cannot_bypass_codex_reset_checks(self):
+        with StoreContext(self.state) as db:
+            db.quota('codex/team', {'source':'claude-native-usage',
+                'binding':binding(self.value['profiles']['codex']['team']), 'observed_at':time.time(),
+                'five_hour':{'used':0}, 'weekly':{'used':0}})
+        self.assertEqual(self.call('route', '--provider', 'codex')['action'], 'wait')
+
+    def test_malformed_tied_response_fails_closed(self):
+        self.probe()
+        from teamkit.policy import CLAUDE_QUOTA_SOURCE
+        at = json.loads(self.attempt_path().read_text())['observed_at']
+        with StoreContext(self.state) as db:
+            db.quota('claude/team', {'source':CLAUDE_QUOTA_SOURCE,
+                'binding':binding(self.value['profiles']['claude']['team']), 'observed_at':at,
+                'five_hour':None, 'weekly':None})
+        self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')

@@ -2,6 +2,7 @@
 import math
 
 CLAUDE_QUOTA_SOURCE = 'claude-statusline-response'
+CLAUDE_NATIVE_QUOTA_SOURCE = 'claude-native-usage'
 
 
 def number(value):
@@ -19,7 +20,9 @@ def eligible(snapshot, now, ttl=120):
         if not isinstance(window, dict):
             return False
         used, reset = window.get('used'), window.get('resets_at')
-        if not number(used) or not 0 <= used < 90 or not number(reset) or reset <= now:
+        if not number(used) or not 0 <= used < 90:
+            return False
+        if snapshot.get('source') != CLAUDE_NATIVE_QUOTA_SOURCE and (not number(reset) or reset <= now):
             return False
     return True
 
