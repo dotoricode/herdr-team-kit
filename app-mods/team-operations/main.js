@@ -1,6 +1,6 @@
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex, Popover, Scrollbar, Textarea, TextareaState, TextView, Editor, EditorState } from "gpui-base";
-import { appHome, readTextFile, exec, agents, terminals, theme, settings, layout, run, nextCommand, props as getModProps, openOverlay, closeOverlay } from "herdr";
+import { appHome, readTextFile, exec, agents, terminals, theme, settings, run, nextCommand, props as getModProps, openOverlay, closeOverlay, notify as showNotice, layout } from "herdr";
 
 const LOCAL = "/mods/team-operations/local.json";
 const DUMMY = "—";
@@ -110,7 +110,8 @@ export default class TeamOperations extends View {
     this.usageBusy = false; this.usageMessage = null;
     this.statusOpen = null; this.statusRevealed = false; this.statusEpoch = 0;
     this.detailData = null; this.detailError = null; this.detailBusy = false; this.detailFetching = false; this.detailHeight = null;
-    this.showReviewFeedback = false; this.infoOpen = false; this.historyOpen = false; this.optionDetailsOpen = false;
+    this.choiceIds = new Map(); this.choiceBusy = false; this.choiceStarted = false; this.choiceCompleted = false;
+    this.infoOpen = false; this.historyOpen = false;
     this.cardData = null; this.cardError = null; this.cardBusy = false;
     this.answerChoice = null; this.answerBusy = false; this.answerMessage = null;
     this.closed = false; this.refreshPromise = null; this.activeSeq = 0; this.manual = null; this.manualCount = 0; this.lastSuccessAt = null; this.viewWidth = null;
@@ -134,12 +135,13 @@ export default class TeamOperations extends View {
         this.config = c;
       } catch (e) { this.configError = String(e); }
       await this.refresh(cx);
-      if (this.role === "detail") {
+      if (["detail", "choice"].includes(this.role)) {
         await Promise.all([this.loadCard(cx), ...(this.viewProps.kind === "work" || this.viewProps.linkedWorkId ? [this.loadDetail(cx)] : [])]);
+        if (this.role === "choice" && this.choiceContext()?.intent === "approve") await this.document({ id: this.viewProps.workId }, cx);
         if (this.viewProps.readDocument && this.viewProps.kind === "work" && this.detailData) await this.document(this.detailData, cx);
       }
     });
-    if (this.role !== "detail") cx.spawn(async cx => {
+    if (!["detail", "choice"].includes(this.role)) cx.spawn(async cx => {
       for (;;) {
         const command = await nextCommand();
         if (command === "refresh") cx.spawn(async cx => this.refresh(cx, true));
@@ -179,10 +181,10 @@ export default class TeamOperations extends View {
     });
     cx.timer.every(5000, cx => cx.spawn(async cx => {
       await this.refresh(cx);
-      if (this.role === "detail") await Promise.all([this.loadCard(cx), ...(this.viewProps.kind === "work" || this.viewProps.linkedWorkId ? [this.loadDetail(cx)] : [])]);
+      if (["detail", "choice"].includes(this.role)) await Promise.all([this.loadCard(cx), ...(this.viewProps.kind === "work" || this.viewProps.linkedWorkId ? [this.loadDetail(cx)] : [])]);
     }));
     // A pending/sending delivery is only looked up, never re-sent.
-    if (this.role === "detail") cx.timer.every(1500, cx => cx.spawn(async cx => this.pollSend(cx)));
+    if (["detail", "choice"].includes(this.role)) cx.timer.every(1500, cx => cx.spawn(async cx => this.pollSend(cx)));
   }
 
   update(props) { this.viewProps = props ?? getModProps() ?? {}; }
@@ -247,20 +249,22 @@ export default class TeamOperations extends View {
       this.answerMessage = "수정 필요·보류 사유를 입력해 주세요. 답변은 4,000자까지 저장할 수 있습니다."; cx.notify(); return;
     }
     const submittedChoice = this.answerChoice, key = this.form.key;
+    let succeeded = false;
     this.answerBusy = true; this.answerMessage = null; cx.notify();
     try {
       const result = await this.args("card-answer", ["--kind", card.kind, "--work", String(card.id), "--card-revision", card.revision, "--choice", submittedChoice, `--answer-text=${text}`]);
       if (result.code !== 0) throw new Error(result.stderr || "답변을 저장하지 못했습니다.");
-      const response = JSON.parse(result.stdout);
+      const response = JSON.parse(result.stdout); succeeded = true;
       this.answerMessage = this.form.key !== key ? "이전 카드 내용에 대한 답변은 저장됐습니다. 현재 내용을 확인하고 다시 답변해 주세요." : response.message ?? "답변을 저장했습니다. 총괄 확인 대기입니다.";
       await this.loadCard(cx);
     } catch (e) { this.answerMessage = `⚠ ${String(e)}`; }
     finally { this.answerBusy = false; if (!this.closed) cx.notify(); }
+    return succeeded;
   }
 
   // One explicit click sends one request. The id is made at the click and kept until the content changes, so a
   // timeout, error or repeated click only looks the same request up; the server never resends it.
-  async sendAnswer(cx, typed) {
+  async sendAnswer(cx, typed, selectedComment = null) {
     const card = this.cardData, q = card?.question;
     if (this.sendBusy || !card?.can_answer || this.cardError) return;
     const fields = { kind: card.kind, work_id: String(card.id), card_revision: card.revision, document_revision: card.document_revision, document_digest: card.document_digest };
@@ -271,7 +275,7 @@ export default class TeamOperations extends View {
       if (other.length > 4000) { this.sendMessage = "직접 입력은 4,000자까지 보낼 수 있습니다."; cx.notify(); return; }
       Object.assign(fields, { question_id: q.question_id, question_revision: q.question_revision, option_id: option, other_text: option === "other" ? other : "" });
     } else {
-      const comment = this.answerInput?.value() ?? "";
+      const comment = selectedComment ?? this.answerInput?.value() ?? "";
       if (!["changes", "defer"].includes(this.answerChoice) || !comment.trim() || comment.length > 4000) {
         this.sendMessage = "수정 필요 또는 나중 확인을 고르고 4,000자 이내 내용을 적어 주세요."; cx.notify(); return;
       }
@@ -308,6 +312,7 @@ export default class TeamOperations extends View {
     const before = this.sendResult.state;
     await this.lookupSend(cx);
     if (this.sendResult?.state !== before) await this.loadCard(cx);
+    if (this.role === "choice" && this.sendResult?.state === "sent") this.finishChoice("요청을 전달했습니다");
   }
 
   async loadDetail(cx) {
@@ -467,6 +472,7 @@ export default class TeamOperations extends View {
     if (!pending || !doc || this.actionBusy || this.busy || this.docBusy || this.error || this.configError || !this.data || !this.data.actions_enabled || pending.id !== doc.id || pending.revision !== doc.revision || pending.digest !== doc.digest || pending.phase !== doc.phase) {
       this.confirm = null; cx.notify(); return;
     }
+    let succeeded = false;
     this.actionBusy = true; this.confirm = null; this.message = null; cx.notify();
     try {
       const args = pending.kind === "approve"
@@ -474,10 +480,79 @@ export default class TeamOperations extends View {
         : ["--task", String(pending.value.id), "--owner", String(pending.value.owner), "--attempt", String(pending.value.attempt), "--work", String(doc.id), "--revision", String(doc.revision), "--digest", String(doc.digest), "--confirmed"];
       const r = await this.args(pending.kind, args);
       if (r.code !== 0) throw new Error(r.stderr || `요청한 작업이 실패했습니다 (종료 코드 ${r.code}).`);
-      const out = JSON.parse(r.stdout); this.message = String(out.message ?? "처리가 끝났습니다.");
+      const out = JSON.parse(r.stdout); succeeded = true; this.message = String(out.message ?? "처리가 끝났습니다.");
       if (pending.kind === "approve") this.doc = { ...doc, can_approve: false, phase: "approved" };
     } catch (e) { this.message = String(e); }
     finally { this.actionBusy = false; await this.refresh(cx); cx.notify(); }
+    return succeeded;
+  }
+
+  openChoice(kind, id) {
+    const card = this.cardData;
+    if (!card?.can_answer || this.cardError || this.choiceBusy) return;
+    const option = kind === "question" ? card.question?.options.find(o => o.option_id === id) : card.decision?.options.find(o => o.id === id);
+    if (!option) return;
+    const key = `${this.formKeyFor(card)}|${kind}|${id}`;
+    if (!this.choiceIds.has(key)) this.choiceIds.set(key, requestId());
+    openOverlay({ mod: "team-operations", kind: "dialog", modal: false, width: 0.48, height: 0.30,
+      props: { role: "choice", kind: card.kind, workId: card.id, local: this.viewProps.local,
+        parentOverlay: this.viewProps.overlay ?? getModProps()?.overlay,
+        selection: { kind, id, cardRevision: card.revision, documentRevision: card.document_revision,
+          documentDigest: card.document_digest, questionId: card.question?.question_id,
+          questionRevision: card.question?.question_revision, clientRequestId: this.choiceIds.get(key) } } });
+  }
+
+  choiceContext() {
+    const card = this.cardData, selected = this.viewProps.selection;
+    if (!card || !selected || card.revision !== selected.cardRevision
+        || card.document_revision !== selected.documentRevision || card.document_digest !== selected.documentDigest) return null;
+    let option;
+    if (selected.kind === "question") {
+      if (!card.question || card.question.question_id !== selected.questionId || card.question.question_revision !== selected.questionRevision) return null;
+      const source = card.question.options.find(o => o.option_id === selected.id);
+      if (source) option = { ...source, intent: "question" };
+    } else if (card.needs_decision) option = card.decision?.options.find(o => o.id === selected.id);
+    if (!option || option.intent === "approve" && (card.kind !== "work" || card.status !== "awaiting_approval")) return null;
+    const recipient = option.intent === "confirmed" ? "팀 총괄" : card.leader?.label ?? card.team_label ?? "담당 팀장";
+    const unresolved = (card.deliveries ?? []).some(d => ["pending", "sending", "unknown"].includes(d.effective_state ?? d.state));
+    const next = option.intent === "approve" ? `설계 v${card.document_revision}의 진행 허가를 기록합니다. 다음 단계는 ${recipient}의 작업 배정이며, 이번 확인은 설계 승인까지입니다.`
+      : option.intent === "confirmed" ? "확인 결과를 총괄에게 남깁니다. 추가 작업을 시작하지 않습니다."
+        : `${recipient}에게 이 요청을 전달합니다. 전달 후 담당자의 처리 결과를 확인합니다.`;
+    return { ...option, recipient, next, blocked: unresolved && ["question", "changes", "defer"].includes(option.intent)
+      ? "이전 요청의 전달 결과를 확인 중입니다. 새 요청은 보내지 않습니다." : null };
+  }
+
+  finishChoice(title) {
+    if (this.choiceCompleted || this.closed) return;
+    this.choiceCompleted = true;
+    showNotice({ title, body: this.choiceContext()?.recipient, level: "success", timeout: 3500 });
+    const overlay = this.viewProps.overlay ?? getModProps()?.overlay;
+    if (overlay) closeOverlay(overlay);
+    if (this.viewProps.parentOverlay) closeOverlay(this.viewProps.parentOverlay);
+  }
+
+  async confirmChoice(cx) {
+    const choice = this.choiceContext();
+    if (!choice || choice.blocked || !this.cardData?.can_answer || !this.data?.actions_enabled
+        || this.cardError || this.error || this.configError || this.choiceBusy || this.choiceStarted) return;
+    if (choice.intent === "approve" && (!this.doc?.can_approve || this.doc.id !== this.cardData.id
+        || this.doc.revision !== this.cardData.document_revision || this.doc.digest !== this.cardData.document_digest)) return;
+    this.choiceBusy = true; this.choiceStarted = true; cx.notify();
+    try {
+      if (choice.intent === "approve") {
+        this.begin("approve", null, cx);
+        if (await this.executeConfirmed(cx)) this.finishChoice("설계를 승인했습니다");
+      } else if (choice.intent === "confirmed") {
+        this.answerChoice = "confirmed";
+        if (await this.saveAnswer(cx)) this.finishChoice("확인 결과를 남겼습니다");
+      } else {
+        this.sendRequestId = this.viewProps.selection.clientRequestId;
+        if (choice.intent === "question") this.form.option = this.viewProps.selection.id;
+        else this.answerChoice = choice.intent;
+        await this.sendAnswer(cx, choice.intent === "question", `${choice.label}\n${choice.description}`);
+        if (this.sendResult?.state === "sent") this.finishChoice("요청을 전달했습니다");
+      }
+    } finally { this.choiceBusy = false; if (!this.closed) cx.notify(); }
   }
 
   syncOverviewHeight(width, height, cx) {
@@ -642,6 +717,32 @@ export default class TeamOperations extends View {
       .when(!this.coordinatorConfirm, el => el.child(v_flex().id("team-operations-rail").w_full().h(overviewRailHeight).flex_none().min_w(0).gap(OVERVIEW.gap)
         .children(overviewRows.map((row, index) => h_flex().id(`team-operations-rail-row-${index}`).w_full().min_w(0).h(OVERVIEW.card).flex_none().gap(OVERVIEW.gap).children(row.map(teamCard))))));
     const overlay = this.viewProps.overlay ?? getModProps()?.overlay;
+    if (this.role === "choice") {
+      const choice = this.choiceContext();
+      const approvalReady = choice?.intent !== "approve" || Boolean(this.doc?.can_approve && !this.docBusy);
+      const ready = Boolean(choice && !choice.blocked && approvalReady && this.cardData?.can_answer && this.data?.actions_enabled
+        && !this.cardError && !this.error && !this.configError && !this.choiceBusy && !this.choiceStarted);
+      const message = this.cardError ?? this.error ?? this.configError ?? this.message ?? this.answerMessage ?? this.sendMessage;
+      return v_flex().id("choice-preview").size_full().min_h(0).gap(14).p(20).bg(t.background).text_color(t.foreground)
+        .font_family(settings().ui_font || "Geist").text_size(13).line_height("21px")
+        .child(h_flex().items_center().justify_between().gap(8)
+          .child(div().font_semibold().text_size(16).child(choice?.label ?? "선택 확인"))
+          .child(button("choice-close", "닫기", () => closeOverlay(overlay))))
+        .child(v_flex().id("choice-description").flex_1().min_h(0).gap(10).overflow_y_scroll()
+          .when(Boolean(choice), el => el
+            .child(pair(choice.intent === "approve" ? "다음 담당" : "받는 사람", choice.recipient))
+            .child(words(choice.description))
+            .child(words(choice.next).text_color(t.muted))
+            .when(Boolean(choice.blocked), x => x.child(words(choice.blocked).text_color(t.blocked))))
+          .when(!choice, el => el.child(words(this.cardBusy || !this.cardData ? "선택 내용을 확인하고 있습니다." : "카드나 선택지가 바뀌었습니다. 닫고 최신 카드에서 다시 선택해 주세요.").text_color(t.muted)))
+          .when(this.docBusy, el => el.child(words("승인할 설계 버전을 확인하고 있습니다.").text_color(t.muted)))
+          .when(Boolean(choice?.intent === "approve" && this.doc && !this.doc.can_approve), el => el.child(words("현재는 이 설계를 승인할 수 없습니다. 최신 상태를 확인해 주세요.").text_color(t.blocked)))
+          .when(Boolean(message), el => el.child(words(message).text_size(12).text_color(t.blocked)))
+          .when(Boolean(this.sendResult), el => el.child(words(this.sendResult.label).text_color(t.accent))))
+        .child(h_flex().flex_none().gap(8)
+          .child(button("choice-confirm", this.choiceBusy ? "처리 중" : choice?.intent === "approve" ? "이 설계 승인" : choice?.intent === "confirmed" ? "확인" : "이 요청 보내기", cx => cx.spawn(async cx => this.confirmChoice(cx)), !ready))
+          .child(button("choice-cancel", "취소", () => closeOverlay(overlay))));
+    }
     if (this.role === "detail") {
       const detail = this.detailData;
       const card = this.cardData;
@@ -718,24 +819,17 @@ export default class TeamOperations extends View {
       const optionButton = (id, number, label, description) => {
         const picked = this.form.option === id;
         return v_flex().id(`question-option-${id}`).min_w(0).gap(2).p(8).rounded(6).border_1().border_color(picked ? t.accent : t.border).bg(picked ? t.raised : t.chrome)
-          .when(canSend && !this.sendBusy, el => el.cursor_pointer().on_click((_e, cx) => { this.form.option = id; this.rememberDraft(); this.editedAfterSend(); cx.notify(); }))
+          .when(canSend && !this.sendBusy, el => el.cursor_pointer().on_click(() => this.openChoice("question", id)))
           .child(div().min_w(0).font_semibold().whitespace_normal().child(`${picked ? "●" : "○"} ${number}. ${label}`))
-          .when(this.optionDetailsOpen && Boolean(description), el => el.child(words(description).text_size(11).text_color(t.muted)));
+          .when(Boolean(description), el => el.child(words(description).text_size(11).text_color(t.muted)));
       };
       const questionSection = q
         ? v_flex().id("decision-question").flex_none().min_w(0).gap(7).p(10).rounded(7).bg(t.surface).border_1().border_color(t.accent)
           .child(div().text_size(11).font_semibold().text_color(t.accent).child("결정 질문"))
           .child(words(q.prompt).text_size(14).font_semibold())
           .when(!canSend, el => el.child(words("완료되었거나 답변 기능이 꺼져 있어 보낼 수 없습니다. 질문과 이전 기록은 계속 볼 수 있습니다.").text_size(11).text_color(t.muted)))
-          .child(v_flex().min_w(0).gap(5)
-            .children(q.options.map((option, index) => optionButton(option.option_id, index + 1, option.label, option.description)))
-            .child(optionButton("other", q.options.length + 1, "기타 · 직접 입력", null)))
-          .when(q.options.some(option => option.description), el => el.child(button("toggle-option-details", this.optionDetailsOpen ? "선택지 설명 접기" : "선택지 설명", cx => { this.optionDetailsOpen = !this.optionDetailsOpen; cx.notify(); }).text_size(11)))
-          .when(this.form.option === "other" && Boolean(this.otherInput), el => el.child(Textarea.new(this.otherInput).h(76).px(8).py(5).rounded(6).border_1().border_color(t.border).bg(t.background).text_size(12).text_color(t.foreground)))
-          .child(h_flex().flex_wrap().gap(8).items_center()
-            .child(button("send-question-answer", sendLabel("답변 보내기"), cx => cx.spawn(async cx => this.sendAnswer(cx, true)),
-              !canSend || this.sendBusy || !this.form.option || sendLocked || (this.form.option === "other" && !(this.otherInput?.value() ?? "").trim())).text_size(12))
-            .child(div().flex_1().min_w(160).text_size(10).text_color(t.muted).whitespace_normal().child("선택한 답변을 전달합니다. 설계 승인은 별도입니다.")))
+          .child(v_flex().min_w(0).gap(6)
+            .children(q.options.map((option, index) => optionButton(option.option_id, index + 1, option.label, option.description))))
         : null;
       const preserved = this.preservedKeys.filter(key => DRAFTS.has(key)).map(key => {
         const draft = DRAFTS.get(key);
@@ -744,33 +838,22 @@ export default class TeamOperations extends View {
           .child(words([draft.other, draft.comment].filter(x => x?.trim()).join("\n")).text_size(11))
           .child(button(`discard-draft-${shortHash(key)}`, "이 내용 지우기", cx => { DRAFTS.delete(key); this.preservedKeys = this.preservedKeys.filter(k => k !== key); cx.notify(); }).text_size(10));
       });
-      const answerChoices = v_flex().min_w(0).gap(5).children((card?.choices ?? []).map(choice =>
-        button(`answer-${choice.id}`, `${this.answerChoice === choice.id ? "● " : "○ "}${designReview && choice.id === "confirmed" ? "읽었습니다 · 승인 아님" : choice.label}`, cx => {
-          this.answerChoice = choice.id; this.answerMessage = null; this.rememberDraft(); this.editedAfterSend(); cx.notify();
-        }, !canSend || this.answerBusy).min_w(0).whitespace_normal().border_1().border_color(this.answerChoice === choice.id ? t.accent : t.border).text_size(12)));
-      const needsReason = this.answerChoice === "changes" || this.answerChoice === "defer";
-      const fallbackSection = v_flex().id("decision-fallback").flex_none().min_w(0).gap(9)
-        .child(words(designReview ? "이 설계의 확인 결과를 선택해 주세요." : "확인 결과를 선택해 주세요.").text_size(14).font_semibold())
-        .child(answerChoices)
-        .when(!canSend, el => el.child(words("지금은 답변을 저장할 수 없습니다.").text_size(11).text_color(t.muted)))
-        .when(needsReason && Boolean(this.answerInput), el => el
-          .child(div().text_size(11).text_color(t.muted).child(this.answerChoice === "changes" ? "수정할 내용을 적어 주세요." : "보류 사유를 적어 주세요."))
-          .child(Textarea.new(this.answerInput).h(76).px(8).py(5).rounded(6).border_1().border_color(t.border).bg(t.background).text_size(12).text_color(t.foreground)))
-        .when(!needsReason && Boolean(this.answerInput?.value().trim()), el => el.child(button("show-selection-comment", "작성한 의견 포함 · 보기", cx => { this.infoOpen = true; this.showReviewFeedback = true; cx.notify(); }).text_size(11)))
-        .child(h_flex().flex_wrap().items_center().gap(8)
-          .child(button("save-card-selection", this.answerBusy ? "저장 중" : "선택 저장", cx => cx.spawn(async cx => this.saveAnswer(cx)),
-            !canSend || this.answerBusy || !this.answerChoice || needsReason && !(this.answerInput?.value() ?? "").trim()))
-          .child(div().text_size(10).text_color(t.muted).child("확인 결과만 저장합니다. 설계 승인은 별도입니다.")));
-      const answerSection = v_flex().flex_none().min_w(0).gap(6).p(10).rounded(7).bg(t.surface)
-        .child(div().text_size(12).font_semibold().child(designReview ? "설계에 대한 의견" : "수정 의견"))
-        .child(words(designReview ? "바꾸고 싶은 범위나 확인할 점을 적어 주세요." : card?.prompt ?? "확인 결과와 필요한 조치를 적어 주세요.").text_size(12))
-        .when(Boolean(q), el => el.child(answerChoices))
-        .when(Boolean(this.answerInput) && (Boolean(q) || !needsReason), x => x.child(Textarea.new(this.answerInput).h(76).px(8).py(5).rounded(6).border_1().border_color(t.border).bg(t.background).text_size(12).text_color(t.foreground)))
-        .child(h_flex().flex_wrap().gap(8).items_center()
-          .child(button("send-card-feedback", sendLabel("의견 보내기"), cx => cx.spawn(async cx => this.sendAnswer(cx, false)),
-            this.sendBusy || sendLocked || !["changes", "defer"].includes(this.answerChoice) || !(this.answerInput?.value() ?? "").trim()).text_size(11))
-          .child(button("save-card-answer", this.answerBusy ? "저장 중" : "저장만", cx => cx.spawn(async cx => this.saveAnswer(cx)), this.answerBusy || this.cardBusy && !card || Boolean(this.cardError) || !this.answerChoice).text_size(11))
-          .child(div().flex_1().min_w(160).text_size(10).text_color(t.muted).whitespace_normal().child("‘의견 보내기’는 담당 팀장에게 한 번 전달하고, ‘저장만’은 기록만 합니다. 어느 쪽도 승인·구현 허가가 아닙니다.")));
+      const needsDecision = Boolean(q || card?.needs_decision);
+      const summary = card?.prompt && card.prompt !== "무엇을 확인했고 어떤 조치가 필요한가요?" ? card.prompt : card?.reason ?? card?.condition;
+      const summarySection = v_flex().id("decision-summary").flex_none().min_w(0).gap(6)
+        .child(div().text_size(11).font_semibold().text_color(t.muted).child(needsDecision ? "무엇을 결정하나요?" : "어떤 작업인가요?"))
+        .child(words(summary ?? "작업 내용을 확인하고 있습니다.").text_size(13));
+      const fallbackSection = v_flex().id("decision-options").flex_none().min_w(0).gap(8)
+        .child(words(card?.decision?.prompt ?? card?.decision_reason ?? "이 작업의 선택지를 준비하고 있습니다.").text_size(14).font_semibold())
+        .children((card?.decision?.options ?? []).map(option => button(`answer-${option.id}`, option.label, () => this.openChoice("decision", option.id), !canSend || this.choiceBusy)
+          .min_w(0).whitespace_normal().text_size(13)
+          .child(words(option.description).text_size(11).text_color(t.muted))));
+      const progressSection = v_flex().id("card-progress").flex_none().min_w(0).gap(7)
+        .child(words(shownStatus).text_color(t.accent).font_semibold())
+        .child(words(card?.status === "complete" || card?.status_label === "완료" ? "완료된 작업입니다. 결과와 이력은 아래에서 볼 수 있습니다."
+          : card?.status === "approved" ? "승인된 작업입니다. 담당자 배정을 기다리고 있습니다."
+            : card?.status === "planning" ? "설계를 준비하고 있습니다. 검토가 필요해지면 질문이 표시됩니다."
+              : "지금 선택할 항목은 없습니다. 담당자가 작업과 검증을 진행하고 있습니다.").text_color(t.muted));
       const deliveries = card?.deliveries ?? [];
       const shownDeliveries = current && !deliveries.some(d => d.request_id === current.request_id) ? [current, ...deliveries] : deliveries;
       const deliverySection = v_flex().id("delivery-status").flex_none().min_w(0).gap(4).p(9).rounded(7).bg(t.surface)
@@ -809,9 +892,6 @@ export default class TeamOperations extends View {
         .when(tasks.length > 0, el => el.child(v_flex().flex_none().gap(5)
           .child(div().font_semibold().text_size(12).text_color(t.accent).child(`연결된 세션 · ${tasks.length}`)).children(detailSessions)))
         .when(detail?.native_error, el => el.child(words(detail.native_error).text_size(11).text_color(t.blocked)))
-        .when(Boolean(card?.can_answer), el => el
-          .child(button("review-show-feedback", this.showReviewFeedback ? "의견 접기" : "추가 의견", cx => { this.showReviewFeedback = !this.showReviewFeedback; cx.notify(); }))
-          .when(this.showReviewFeedback, x => x.child(answerSection)))
         .child(technical);
       const historySection = v_flex().id("detail-history").flex_none().min_w(0).gap(8)
         .children(preserved)
@@ -826,7 +906,8 @@ export default class TeamOperations extends View {
       const body = v_flex().id("detail-body").size_full().min_h(0).gap(9).overflow_y_scroll()
         .when(this.detailBusy || this.cardBusy && !card && !this.cardError, x => x.child(div().p(8).text_color(t.dim).child("카드 정보를 읽는 중입니다.")))
         .when(Boolean(this.detailError || this.cardError), x => x.child(words(`정보를 읽지 못했습니다 · ${this.detailError ?? this.cardError}`).text_color(t.blocked)))
-        .child(q ? questionSection : fallbackSection)
+        .child(summarySection)
+        .child(needsDecision ? (q ? questionSection : fallbackSection) : progressSection)
         .when(Boolean(this.sendMessage), el => el.child(words(this.sendMessage).text_size(11).text_color(this.sendMessage.startsWith("⚠") ? t.blocked : t.muted)))
         .when(Boolean(current), el => el.child(words(current.label ?? sendLabel("전달 상태")).text_size(11).text_color(sendColor(current.state))))
         .when(Boolean(this.answerMessage), el => el.child(words(this.answerMessage).text_size(11).text_color(this.answerMessage.startsWith("⚠") ? t.blocked : t.accent)))

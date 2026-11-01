@@ -26,6 +26,38 @@ MESSAGE='답변을 저장했습니다. 총괄 검토 대기입니다.'
 PROMPT='무엇을 확인했고 어떤 조치가 필요한가요?'
 
 
+def _decision(raw, can_approve, document=None):
+    if raw is None:return None
+    if not isinstance(raw,dict) or not {'prompt','options'}.issubset(raw) or not set(raw)<={'prompt','options','document'}:
+        raise ValueError('선택 질문에는 prompt와 options가 필요합니다.')
+    bound=raw.get('document')
+    if document is not None:
+        if (not isinstance(bound,dict) or set(bound)!={'revision','digest','phase'}
+                or not isinstance(bound['phase'],str) or not bound['phase'].strip()
+                or type(bound['revision']) is not int or bound['revision']<1
+                or not isinstance(bound['digest'],str) or not re.fullmatch(r'[0-9a-f]{64}',bound['digest'])):
+            raise ValueError('작업별 선택지는 설계 버전과 내용에 연결해야 합니다.')
+        if bound!=document:return None
+    elif bound is not None:raise ValueError('운영 확인 카드에는 설계 연결을 지정할 수 없습니다.')
+    prompt=_text(raw['prompt'],'선택 질문',1000)
+    options=raw['options']
+    if not isinstance(options,list) or not 2 <= len(options) <= 6:
+        raise ValueError('작업별 선택지는 2~6개여야 합니다.')
+    parsed=[];seen=set()
+    for option in options:
+        if not isinstance(option,dict) or set(option)!={'id','label','description','intent'}:
+            raise ValueError('선택지의 이름·설명·처리 유형을 확인하세요.')
+        ident=option['id'];intent=option['intent']
+        if (not isinstance(ident,str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}',ident)
+                or ident in seen or intent not in ('confirmed','changes','defer','approve')
+                or intent=='approve' and not can_approve):
+            raise ValueError('이 카드에서 사용할 수 없는 선택지입니다.')
+        seen.add(ident)
+        parsed.append({'id':ident,'label':_text(option['label'],'선택지',100),
+                       'description':_text(option['description'],'선택 설명',1000),'intent':intent})
+    return dict({'prompt':prompt,'options':parsed},**({'document':dict(bound)} if bound is not None else {}))
+
+
 def _key(kind,ident):
     if kind not in ('inventory','work') or not isinstance(ident,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',ident):
         raise ValueError('확인할 카드 종류와 작업 ID를 다시 선택하세요.')
@@ -86,7 +118,18 @@ def _current(config_path,state,binding_path,kind,ident):
     prompts=linked.get('card_prompts',{})
     override=prompts.get(_key(kind,ident)) if isinstance(prompts,dict) else None
     if isinstance(override,str) and override.strip():value['prompt']=override.strip()
-    value['revision']=_digest({'kind':kind,'id':ident,'content':basis,'prompt':value['prompt']})
+    value['needs_decision']=not complete and (label=='확인 필요' if kind=='inventory' else
+        value['status'] in ('awaiting_approval','awaiting_review','blocked','inspect','quota','environment'))
+    decisions=linked.get('card_decisions',{})
+    if not isinstance(decisions,dict):raise ValueError('작업별 선택지 설정을 확인하세요.')
+    value['decision']=_decision(decisions.get(_key(kind,ident)),
+        kind=='work' and value['status']=='awaiting_approval',
+        {'revision':value['document_revision'],'digest':value.get('document_digest'),'phase':value['status']} if kind=='work' else None) if value['needs_decision'] else None
+    if value['needs_decision'] and decisions.get(_key(kind,ident)) is not None and value['decision'] is None:
+        value['decision_reason']='카드 상태나 설계가 바뀌었거나 문서를 읽을 수 없습니다. 현재 설계에 맞는 선택지를 다시 준비해야 합니다.'
+    revision_basis={'kind':kind,'id':ident,'content':basis,'prompt':value['prompt']}
+    if value['decision'] is not None:revision_basis['decision']=value['decision']
+    value['revision']=_digest(revision_basis)
     if kind=='inventory':value['document_revision']=0;value['document_digest']=value['revision']
     value['can_answer']=not complete and linked.get('actions_enabled') is True
     value['choices']=[dict(choice) for choice in CHOICES]

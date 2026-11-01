@@ -37,6 +37,50 @@ class FeedbackTests(FeedbackFixture):
         self.assertEqual(value['prompt'],'화면에서 확인한 결과를 알려 주세요.')
         self.assertEqual(len(value['revision']),64);self.assertTrue(value['can_answer']);self.assertIsNone(value['answer'])
         self.assertEqual(before,self.state.read_bytes());self.assertEqual(files,set(self.root.rglob('*')))
+    def test_task_specific_choices_are_bound_to_card_revision(self):
+        old=self.detail()['revision']
+        decision={'prompt':'어떤 순서로 확인할까요?', 'options':[
+            {'id':'first','label':'화면부터 확인','description':'화면의 표시를 먼저 확인해 주세요.','intent':'changes'},
+            {'id':'later','label':'다음에 확인','description':'지금은 결정을 보류합니다.','intent':'defer'}]}
+        self.linked['card_decisions']={'inventory:W47':decision};self.links.write_text(json.dumps(self.linked))
+        value=self.detail();self.assertTrue(value['needs_decision']);self.assertEqual(value['decision'],decision)
+        self.assertNotEqual(value['revision'],old)
+        with self.assertRaises(ValueError):self.answer(revision=old)
+        self.assertIsNone(self.detail('W48')['decision']);self.assertFalse(self.detail('W48')['needs_decision'])
+
+    def test_in_progress_card_has_no_generic_decision_request(self):
+        self.setup_work()
+        from teamkit.store import Store
+        store=Store(self.state)
+        try:
+            with store.transaction():
+                row=json.loads(store.db.execute('SELECT body FROM work_items').fetchone()[0])
+                row['phase']='in_progress'
+                store.db.execute('UPDATE work_items SET body=?',(json.dumps(row),))
+        finally:store.close()
+        value=self.detail('W1','work')
+        self.assertFalse(value['needs_decision']);self.assertIsNone(value['decision'])
+
+    def test_work_choices_expire_when_the_bound_design_changes(self):
+        self.setup_work();self.call('work','submit','W1')
+        card=self.detail('W1','work')
+        decision={'prompt':'어떻게 진행할까요?', 'document':{'revision':card['document_revision'],'digest':card['document_digest'],'phase':card['status']},'options':[
+            {'id':'approve','label':'설계 승인','description':'이 설계를 승인합니다.','intent':'approve'},
+            {'id':'later','label':'다음에 결정','description':'다음 지시까지 보류합니다.','intent':'defer'}]}
+        self.linked['card_decisions']={'work:W1':decision};self.links.write_text(json.dumps(self.linked))
+        self.assertIsNotNone(self.detail('W1','work')['decision'])
+        decision['document']['digest']='0'*64;self.links.write_text(json.dumps(self.linked))
+        self.assertIsNone(self.detail('W1','work')['decision'])
+        self.assertIn('설계',self.detail('W1','work')['decision_reason'])
+
+    def test_invalid_or_unsafe_choice_configuration_is_not_offered(self):
+        for intent in ('resume','shell','approve'):
+            self.linked['card_decisions']={'inventory:W47':{'prompt':'선택해 주세요.','options':[
+                {'id':'one','label':'첫째','description':'첫째 선택','intent':intent},
+                {'id':'two','label':'둘째','description':'둘째 선택','intent':'defer'}]}}
+            self.links.write_text(json.dumps(self.linked))
+            with self.subTest(intent=intent),self.assertRaises(ValueError):self.detail()
+
     def test_confirmed_reply_persists_without_approving_or_prompting(self):
         before=self.state.read_bytes();source=self.inventory.read_bytes()
         with patch('teamkit.providers.identity') as provider,patch('teamkit.app_bridge.core_read') as native:
