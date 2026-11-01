@@ -1,4 +1,4 @@
-import { View, div, image } from "gpui-kit";
+import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex, Popover, Scrollbar, Textarea, TextareaState, Editor, EditorState } from "gpui-base";
 import { appHome, readTextFile, exec, agents, terminals, theme, settings, run, nextCommand, props as getModProps, openOverlay, closeOverlay } from "herdr";
 
@@ -43,6 +43,19 @@ const OVERVIEW = { height: 166, rail: 98, card: 94 };
 const STATUS_TEXT = { unknown: "미확인", working: "실행 중", running: "실행 중", blocked: "사용자 답변 필요", done: "응답 완료", idle: "대기 중", pending: "대기 중", failed: "실패", error: "오류", success: "성공", healthy: "정상", not_measured: "측정 전", not_available: "미제공", unavailable: "미제공", missing: "미확인", current: "최신 기록", stale: "지난 기록" };
 function statusText(status) { return STATUS_TEXT[status] ?? (status == null ? "미확인" : display(status)); }
 function statusColor(status, t) { return status === "working" ? t.working : status === "blocked" ? t.blocked : status === "done" ? t.done : status === "idle" ? t.idle : t.unknown; }
+function teamPresence(status, taskState) {
+  if (status === "working") return {
+    title: "업무 중",
+    detail: ({ launching: "업무를 시작할 준비 중이에요", submitted: "전달된 요청을 확인하고 있어요", running: "맡은 업무를 진행하고 있어요" })[taskState] ?? "대화에서 응답을 준비하고 있어요"
+  };
+  if (status === "blocked") return { title: "확인 부탁드려요", detail: "입력이나 승인을 기다리고 있어요" };
+  if (status === "done") return { title: "답변을 남겼어요", detail: "대화를 열어 확인해 주세요" };
+  if (status === "idle") return {
+    title: "다음 업무 대기",
+    detail: taskState === "awaiting_review" ? "검토 의견을 기다리고 있어요" : taskState === "queued" ? "배정된 요청이 대기 중이에요" : "다음 요청을 기다리고 있어요"
+  };
+  return { title: "상태 확인 필요", detail: "지금은 상태를 확인할 수 없어요" };
+}
 
 export default class TeamOperations extends View {
   init(props, cx) {
@@ -347,7 +360,7 @@ export default class TeamOperations extends View {
               run("agent.focus", { terminal: team.terminal });
             })
             .child(div().whitespace_nowrap().font_semibold().text_size(14).child(display(team.label)))
-            .child(div().whitespace_nowrap().text_size(11).text_color(t.muted).child(status === "done" ? "새 응답 · 확인 전" : statusText(status)))))
+            .child(div().whitespace_nowrap().text_size(11).text_color(t.muted).child(teamPresence(status, team.ledger_state).title))))
           .when(matches.length === 0, el => el.child(div().p(10).text_size(12).text_color(t.muted).child("해당 상태의 팀장이 없습니다."))));
       return Popover.new(`status-popover-${status}`).open(open).anchor("top_left").overlay_closable(true)
         .on_open_change((next, cx) => this.setStatusOpen(status, next, cx))
@@ -356,19 +369,20 @@ export default class TeamOperations extends View {
     };
     const waiting = [...new Set([...teams.map(x => x.reason), ...works.map(x => x.reason)]
       .filter(Boolean).map(display))];
-    const summary = `실행 ${appCounts.working} · 사용자 답변 필요 ${appCounts.blocked}`;
+    const summary = `업무 중 ${appCounts.working} · 확인 필요 ${appCounts.blocked}`;
     const coordinator = data?.coordinator;
     const teamCard = team => {
-      const live = liveFor(team), status = live.status;
+      const live = liveFor(team), status = live.status, presence = teamPresence(status, team.ledger_state);
       const activate = cx => run("agent.focus", { terminal: team.terminal });
       return v_flex().id(`rail-${team.id}`).flex_1().min_w(210).h(OVERVIEW.card).gap(3).p(8).rounded(7).hover(s => s.bg(t.raised))
         .when(live.present, el => el.cursor_pointer().on_click((_e, cx) => activate(cx)))
         .bg(t.surface)
         .child(h_flex().h(28).flex_none().gap(6).items_center()
           .child(div().h(28).line_height("28px").truncate().font_semibold().text_size(19).child(display(team.label))))
-        .child(h_flex().h(20).flex_none().child(badge(status === "done" ? "새 응답 · 확인 전" : statusText(status), statusColor(status, t))
-          .when(status === "working" && live.present && !this.error && !data?.native_error, el => el.frames(["실행 중 ◐", "실행 중 ◓", "실행 중 ◑", "실행 중 ◒"], 180))))
-        .child(div().h(20).flex_none().line_height("20px").truncate().text_size(12).text_color(t.muted).child(`작업 상태 · ${taskStateText(team.ledger_state)}`));
+        .child(h_flex().h(20).flex_none().child(h_flex().h(20).flex_none().items_center().gap(6).px(7).rounded(5).bg(t.raised).text_size(11).font_semibold().text_color(statusColor(status, t))
+          .child(div().whitespace_nowrap().child(presence.title))
+          .when(status === "working" && live.present && !this.error && !data?.native_error, el => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))))
+        .child(div().h(20).flex_none().line_height("20px").truncate().text_size(12).text_color(t.muted).tooltip(presence.detail).child(presence.detail));
     };
     const coordinatorStateText = { live: "연결됨", missing: "총괄 종료", recovering: "복구 중", unknown: "상태 미확인" }[coordinator?.state] ?? "상태 미확인";
     const coordinatorButton = coordinator?.state === "live" && coordinator.terminal
