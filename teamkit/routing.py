@@ -42,3 +42,44 @@ def execution_policy(config, task):
         if role.get('effort', 'medium') not in ('high','xhigh','max'):
             role['effort'] = 'high'
     return {'action':'dispatch', **role}
+
+
+def execution_preference(config):
+    """Validate opt-in provider fallback separately from fixed role policies."""
+    if 'execution_preference' not in config:
+        return None
+    preference = config['execution_preference']
+    if (not isinstance(preference, dict)
+            or set(preference) != {'provider_order', 'weekend_account_first'}
+            or type(preference['weekend_account_first']) is not bool):
+        raise ValueError('execution_preference requires provider_order and weekend_account_first')
+    order = preference['provider_order']
+    if (not isinstance(order, list) or not order
+            or any(not isinstance(provider, str) or provider not in config['profiles'] for provider in order)
+            or len(set(order)) != len(order)):
+        raise ValueError('provider_order must list distinct configured providers')
+    return preference
+
+
+def execution_candidates(config, task, role, now):
+    """Return ordered flexible candidates, or None for role-fixed execution."""
+    preference = execution_preference(config)
+    cls = task.get('classification', {'kind': 'general', 'risks': []})
+    if (preference is None or task.get('user_decision') or task['role'] not in ('leader', 'implementer')
+            or cls['kind'] != 'general' or cls['risks']):
+        return None
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from .policy import account_order
+    schedule = config.get('account_selection', {'timezone': 'Asia/Seoul',
+        'weekdays': ['team', 'personal'], 'weekends': ['personal', 'team']})
+    weekend = datetime.fromtimestamp(now, ZoneInfo(schedule['timezone'])).weekday() >= 5
+    accounts = account_order({'account_selection': schedule}, now)
+    providers = preference['provider_order']
+    pairs = ([(provider, account) for account in accounts for provider in providers]
+             if weekend and preference['weekend_account_first']
+             else [(provider, account) for provider in providers for account in accounts])
+    return [{**role, 'provider': provider, 'account': account,
+             'model': role['model'] if provider == role['provider'] else config['profiles'][provider][account]['model'],
+             'effort': role.get('effort', 'medium')}
+            for provider, account in pairs]

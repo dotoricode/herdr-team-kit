@@ -27,7 +27,8 @@ def load(path):
             if role not in ('leader','implementer','reviewer') or policy.get('provider') not in value['profiles'] or not policy.get('model'):
                 raise ValueError('role requires configured provider and explicit model')
     routes = value.get('routing', {})
-    from .routing import KINDS
+    from .routing import KINDS, execution_preference
+    execution_preference(value)
     if not isinstance(routes, dict) or any(kind not in KINDS for kind in routes):
         raise ValueError('invalid routing kinds')
     for route in routes.values():

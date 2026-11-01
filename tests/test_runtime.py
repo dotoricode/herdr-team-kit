@@ -46,7 +46,8 @@ class PolicyTests(unittest.TestCase):
                              'seven_day': {'used_percentage': 51, 'resets_at': NOW+99}}}
         x = {'rateLimits': {'primary': {'usedPercent': 42, 'windowDurationMins': 300, 'resetsAt': NOW+9},
                             'secondary': {'usedPercent': 51, 'windowDurationMins': 10080, 'resetsAt': NOW+99}}}
-        self.assertEqual(normalize_quota('claude', c, NOW), normalize_quota('codex', x, NOW))
+        self.assertEqual(dict(normalize_quota('claude', c, NOW), source='codex-native-quota'),
+                         normalize_quota('codex', x, NOW))
         x['rateLimits']['primary']['windowDurationMins'] = 15
         self.assertNotIn('five_hour', normalize_quota('codex', x, NOW))
 
