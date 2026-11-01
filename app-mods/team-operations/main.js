@@ -565,7 +565,7 @@ export default class TeamOperations extends View {
         .when(cards.length === 0 && holds.length === 0, x => x.child(div().flex_none().px(4).py(8).text_size(11).text_color(t.dim).child("항목 없음")))
         .when(definition.id === "complete" && cards.length > 0 && !this.showCompleted, x => x.child(div().flex_none().text_size(11).text_color(t.dim).child(`완료된 항목 ${cards.length}건 · 전체 진척률과 별도`)));
     };
-    const accountRows = accounts.map(account => {
+    const accountRow = account => {
       const key = `account-${account.provider}-${account.account}`, open = this.expanded.has(key);
       const usage = (value, name) => value == null ? (account.windows?.[name]?.status === "not_provided" ? "미제공" : "확인 필요") : `${display(value)}%${account.windows?.[name]?.status === "stale" ? "*" : ""}`;
       const usageCell = (label, value, name) => {
@@ -591,7 +591,15 @@ export default class TeamOperations extends View {
           .child(div().w(92).flex_none().truncate().text_color(t.dim).child(duration(account.age))))
         .when(open && Boolean(meta), el => el.child(div().text_size(10).text_color(t.muted).child(meta)))
         .when(Boolean(this.usageMessage), el => el.child(div().text_size(10).text_color(/⚠|실패|오류/i.test(this.usageMessage) ? t.blocked : t.muted).child(this.usageMessage)));
-    });
+    };
+    const accountSections = [
+      { id: "team", title: "회사", rows: accounts.filter(account => account.account === "team") },
+      { id: "personal", title: "개인", rows: accounts.filter(account => account.account === "personal") },
+      { id: "other", title: "기타 계정", rows: accounts.filter(account => !["team", "personal"].includes(account.account)) }
+    ].filter(section => section.rows.length > 0).map(section =>
+      v_flex().id(`account-section-${section.id}`).w_full().flex_none().gap(3).p(6).rounded(6).border_1().border_color(t.border)
+        .child(div().whitespace_nowrap().font_semibold().text_size(12).text_color(t.foreground).child(section.title))
+        .children(section.rows.map(accountRow)));
     const actionRows = (data?.actions ?? []).map(action => {
       const failed = /실패|오류|fail|error/i.test(`${action.status ?? ""} ${action.message ?? ""}`);
       return h_flex().gap(8).p(6).rounded(6).bg(t.surface).text_size(11)
@@ -601,7 +609,7 @@ export default class TeamOperations extends View {
     });
     const board = h_flex().id("operations-kanban").w_full().flex_1().min_h(0).items_stretch().gap(8).overflow_x_scrollbar()
       .children(boardColumns.map(column));
-    const accountArea = v_flex().id("account-area").w_full().max_h(150).flex_none().min_h(0).gap(3).overflow_y_scrollbar()
+    const accountArea = v_flex().id("account-area").w_full().max_h(250).flex_none().min_h(0).gap(6).overflow_y_scrollbar()
       .child(h_flex().flex_none().justify_between().items_center()
         .child(div().font_semibold().text_size(12).text_color(t.accent).child("계정 · 보조 정보"))
         .child(h_flex().flex_1().min_w(0).gap(10).px(12).text_size(10)
@@ -611,7 +619,7 @@ export default class TeamOperations extends View {
           .child(div().text_color(t.dim).child("지난 기록")))
         .child(button("refresh-usage", this.usageBusy || data?.usage_refreshing ? "사용량 갱신 중" : "사용량 갱신", cx => cx.spawn(async cx => this.refreshUsage(cx)), this.usageBusy || data?.usage_refreshing).text_size(11)))
       .when(Boolean(this.usageMessage), x => x.child(div().flex_none().text_size(10).text_color(/⚠|실패|오류/i.test(this.usageMessage) ? t.blocked : t.muted).child(this.usageMessage)))
-      .children(accountRows);
+      .children(accountSections);
     return v_flex().id("team-operations").size_full().min_h(0).overflow_hidden().bg(t.background).text_color(t.foreground).text_size(13)
       .font_family(this.config?.font_family || settings().font_family || "monospace")
       .child(h_flex().h(48).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
