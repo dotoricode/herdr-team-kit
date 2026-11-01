@@ -125,9 +125,20 @@ def _spec(config_path, state, config, task, role, owner):
     return spec
 
 
-def _verify(slot, task, spec, pristine=True):
+def _hint_guard(slot, native):
+    labels = native.get('labels') or {}
+    return (slot['provider'] == 'claude' and slot['phase'] in ('preparing', 'uncertain')
+            and native.get('turn') == 0 and type(native.get('turn')) is int
+            and not any(key in labels for key in ('herdr.space', 'herdr.tab')))
+
+
+def _verify(slot, task, spec, pristine=True, learn_hint=False):
     if slot['task'] != task['id'] or slot['team'] != task['team'] or slot['root'] != task['root'] or slot['spec'] != spec:
         raise ValueError('pool task or immutable launch specification changed')
+    if (not isinstance(slot.get('runtime'), dict)
+            or slot['runtime'].get('terminal') != slot.get('terminal')
+            or slot['runtime'].get('native_pid') != slot.get('native_pid')):
+        raise ValueError('pool recorded native identity is incomplete or ambiguous')
     actor = {**task, 'provider': slot['provider'], 'owner': slot['owner'], 'runtime': slot['runtime']}
     native = CoreRuntime(actor)._native(slot['name'], ready=True)
     foreground = native.get('foreground') or {}
@@ -141,10 +152,21 @@ def _verify(slot, task, spec, pristine=True):
         raise ValueError('pool native generation, cwd, argv or turn changed')
     text = subprocess.run(['hc', 'read', '--lines', '24', slot['terminal']], capture_output=True,
                           text=True, timeout=5, check=True).stdout
-    prompts = re.findall(r'^[ \t]*[›❯][^\S\r\n]*(.*)$', text, re.M)
-    if not prompts or prompts[-1].strip() not in ('', 'Ask Codex to do anything'):
-        raise ValueError('pool terminal has a draft or unknown prompt')
-    return native
+    prompts = list(re.finditer(r'^[ \t]*[›❯][^\S\r\n]*(.*)$', text, re.M))
+    prompt = prompts[-1].group(1).strip() if prompts else None
+    from .prompt_state import empty_input
+    hint=slot.get('empty_prompt')
+    if empty_input(text,hint):return native
+    if (hint is None and learn_hint and _hint_guard(slot, native) and empty_input(text,prompt)
+            and isinstance(prompt, str) and re.fullmatch(r'Try "[^"\r\n]{1,200}"', prompt)
+            and prompt.isprintable()):
+        # A read must not bless a turn or App attachment that raced that read.
+        after = CoreRuntime(actor)._native(slot['name'], ready=True)
+        if not _hint_guard(slot, after) or after.get('foreground') != foreground:
+            raise ValueError('native changed while reading initial hint')
+        slot['empty_prompt'] = prompt
+        return after
+    raise ValueError('pool terminal has a draft or unknown prompt')
 
 
 def status(config, state):
@@ -214,7 +236,7 @@ def prepare(config_path, state, only=None):
                             _write(state, manifest)
                         runtime = CoreRuntime().launch(task, slot['spec'], slot['name'], record)
                         slot.update(runtime); slot['runtime'] = runtime
-                        native = _verify(slot, task, slot['spec'])
+                        native = _verify(slot, task, slot['spec'], learn_hint=True)
                         slot.update(phase='prepared', turn_baseline=native['turn'], native_verified_at=time.time())
                         created += 1
                     except Exception as error:
@@ -222,6 +244,41 @@ def prepare(config_path, state, only=None):
                     slot['updated_at'] = time.time()
                     _write(state, manifest)
     return {**status(config, state), 'created': created}
+
+
+def recheck(config_path, state):
+    """Revalidate an uncertain pristine native in place; never create or prompt."""
+    config_path, state = Path(config_path).resolve(), Path(state).resolve()
+    config = load(config_path)
+    if not enabled(config):
+        return {**status(config, state), 'rechecked': 0}
+    require_managed()
+    repaired = 0
+    with _locked(state):
+        manifest = _read(state)
+        for slot in manifest['slots'].values():
+            if (slot['phase'] != 'uncertain' or slot.get('reason') != 'ValueError'
+                    or not isinstance(slot.get('runtime'), dict) or type(slot.get('native_pid')) is not int):
+                continue
+            try:
+                task = _task(state, slot['task'])
+                if not managed(config, task) or task.get('owner') or task['state'] not in ('queued', 'handed_off'):
+                    continue
+                if slot['binding'] != binding(profile(config, slot['provider'], slot['account'])):
+                    raise ValueError('pool profile changed')
+                role = {key: slot[key] for key in ('provider', 'account', 'model', 'effort')}
+                spec = _spec(config_path, state, config, task, role, slot['owner'])
+                native = _verify(slot, task, spec, learn_hint=True)
+                if not _hint_guard(slot, native):
+                    raise ValueError('uncertain native is no longer pristine and unattached')
+                slot.update(phase='prepared', turn_baseline=0, native_verified_at=time.time())
+                slot.pop('reason', None)
+                repaired += 1
+            except Exception as error:
+                slot['reason'] = type(error).__name__
+            slot['updated_at'] = time.time()
+            _write(state, manifest)
+    return {**status(config, state), 'rechecked': repaired}
 
 
 def _candidate(config, state, manifest, task, role):
@@ -275,7 +332,8 @@ def activate(config, state, slot, task, spec):
         current.update(phase='leased', updated_at=time.time(), native_verified_at=time.time())
         _write(state, manifest)
         return {**slot['runtime'], 'pool_slot': _key(slot['team'], slot['provider'], slot['account']),
-                'pool_generation': slot['generation'], 'pool_owner': slot['owner']}
+                'pool_generation': slot['generation'], 'pool_owner': slot['owner'],
+                'pool_empty_prompt': slot.get('empty_prompt')}
 
 
 def mark_uncertain(state, slot, reason):
@@ -286,6 +344,20 @@ def mark_uncertain(state, slot, reason):
             raise ValueError('pool generation changed')
         current.update(phase='uncertain', reason=str(reason)[:160], updated_at=time.time())
         _write(state, manifest)
+
+
+def _wait_for_tab(space,tab,terminal):
+    deadline=time.monotonic()+3
+    while True:
+        remaining=deadline-time.monotonic()
+        if remaining<=0:raise ValueError('prepared native tab adoption is pending; keep the existing native')
+        reply=subprocess.run(['herdr-app','ls'],capture_output=True,text=True,timeout=remaining,check=True)
+        data=json.loads(reply.stdout)
+        if any(s.get('id')==space and t.get('id')==tab and any(r.get('terminal')==terminal for r in t.get('terminals',[]))
+               for s in data.get('spaces',[]) for t in s.get('tabs',[])):
+            return
+        if time.monotonic()>=deadline:raise ValueError('prepared native tab adoption is pending; keep the existing native')
+        time.sleep(.05)
 
 
 def present(config, state, only=None):
@@ -305,7 +377,8 @@ def present(config, state, only=None):
             CoreRuntime(actor)._native(slot['name'])
             tab = 'tbpool'+slot['owner'][:16]
             _call('label', slot['terminal'], 'herdr.space='+space, 'herdr.tab='+tab)
-            label = ('개인' if slot['account'] == 'personal' else '회사')+' · '+slot['provider']
+            _wait_for_tab(space,tab,slot['terminal'])
+            label = ('개인' if slot['account'] == 'personal' else '회사')+' · '+slot['provider'].capitalize()
             subprocess.run(['herdr-app', 'do', 'tab.rename', json.dumps({'id': tab, 'name': label})],
                            capture_output=True, text=True, timeout=5, check=True)
             count += 1

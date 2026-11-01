@@ -57,6 +57,19 @@ def prepare(config_path,state):
     return pool.prepare(config_path,state)
 
 
+def refresh_choice(config_path,state,task):
+    """Refresh earlier unknown candidates before selecting a lower-priority account."""
+    config=load(config_path)
+    from .routing import execution_policy,execution_candidates
+    from .policy import account_order
+    from .context_handoff import refresh_candidates
+    role=execution_policy(config,task)
+    if role['action']!='dispatch':return
+    candidates=execution_candidates(config,task,role,time.time())
+    pairs=[(c['provider'],c['account']) for c in candidates] if candidates is not None else [(role['provider'],a) for a in account_order(config,time.time())]
+    refresh_candidates(config_path,state,pairs)
+
+
 def plan(config_path,state,team):
     if not Path(state).is_file():raise ValueError('existing pool task store required')
     config=load(config_path)
@@ -133,6 +146,12 @@ def advance(config_path,state,ident):
                     return save('uncertain','기존 담당 인계 확인이 필요합니다. 요청은 보존했습니다.')
                 if handoff['phase']!='done':return
                 save('pending','새 담당 수신을 확인했습니다.')
+            if time.time()-job.get('last_refresh',0)>=300:
+                store=Store(state)
+                try:task=store.get(job['task'])
+                finally:store.close()
+                refresh_choice(config_path,state,task)
+                job['last_refresh']=time.time();context.write(path,job)
             route=plan(config_path,state,job['team'])
             if route['action']=='wait':return save('pending',route['reason'])
             if route['action']=='handoff':
@@ -192,6 +211,7 @@ def handle(args):
     from .core_runtime import require_managed
     require_managed()
     if args.action=='prepare':return prepare(args.config,args.state)
+    if args.action=='recheck':return pool.recheck(args.config,args.state)
     if args.action=='present':return pool.present(config,args.state)
     if args.action=='refresh':
         from .context_handoff import refresh_candidates
@@ -204,6 +224,10 @@ def handle(args):
         ensure(args.config,args.state)
         return enqueue(args.config,args.state,args.team,args.message_file)
     if not args.team:raise ValueError('team required')
+    store=Store(args.state)
+    try:task=store.get(pool.task_id(config,args.team))
+    finally:store.close()
+    refresh_choice(args.config,args.state,task)
     route=plan(args.config,args.state,args.team)
     store=Store(args.state)
     try:task=store.get(route['task'])

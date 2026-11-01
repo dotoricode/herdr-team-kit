@@ -140,7 +140,7 @@ def parser():
     x.add_argument('--publish',action='store_true');x.add_argument('--interval',type=float,default=3)
     x.add_argument('--color',choices=['auto','always','never'],default='auto')
     x=commands.add_parser('pool')
-    x.add_argument('action',choices=('prepare','present','status','plan','bootstrap','assign','refresh'))
+    x.add_argument('action',choices=('prepare','recheck','present','status','plan','bootstrap','assign','refresh'))
     x.add_argument('--team')
     x.add_argument('--message-file')
     x=commands.add_parser('auto-context')
@@ -274,6 +274,12 @@ def run(args):
                 raise KitError('terminal adoption is limited to unlinked plain core leaders')
             from .workflow import check_task
             work=check_task(config,store,task)
+            from . import session_pool
+            if session_pool.managed(config,task):
+                from .pool_control import refresh_choice
+                refresh_choice(args.config,args.state,task)
+                config=load(args.config)
+                now=time.time()
             role = select_execution(config, store, task, now)
             if role['action'] == 'wait':
                 if work:

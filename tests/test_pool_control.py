@@ -160,3 +160,18 @@ class PoolControlTests(Fixture):
         self.assertEqual(len(result['accounts']),4)
         self.assertTrue(all(not row['eligible'] for row in result['accounts']))
         self.assertFalse(missing.parent.exists())
+
+    def test_dispatch_checks_unknown_preferred_provider_before_using_cached_lower_priority(self):
+        self.value['execution_preference']={'provider_order':['claude','codex'],'weekend_account_first':True}
+        self.config.write_text(json.dumps(self.value));self.prepare()
+        self.assertEqual(control.plan(self.config,self.state,'alpha')['selection']['provider'],'codex')
+        def fresh(*args):
+            now=time.time();store=Store(self.state)
+            store.quota('claude/team',{'source':'claude-statusline-response','binding':binding(self.value['profiles']['claude']['team']),
+                'observed_at':now,'five_hour':{'used':1,'resets_at':now+3600},'weekly':{'used':1,'resets_at':now+86400}});store.close()
+        def stop(config,state,task,role):
+            self.assertEqual(role['provider'],'claude')
+            raise ValueError('stopped before claim')
+        with patch.object(context,'refresh_candidates',side_effect=fresh) as refresh,patch.object(pool,'reserve',side_effect=stop),patch.object(context,'ensure'):
+            with self.assertRaisesRegex(ValueError,'stopped before claim'):self.call('dispatch','L1')
+            refresh.assert_called_once()

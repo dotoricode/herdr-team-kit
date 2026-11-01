@@ -110,7 +110,8 @@ def targets(config, state, starting=False):
                 'terminal':runtime['terminal'], 'pid':runtime.get('native_pid'),
                 'session_cwd':runtime.get('session_cwd',task['root']),
                 'binding':binding(profile(config, task['provider'], task['account'])),
-                'session_id':runtime.get('context_session_id'), 'was_ready':task['state'] == 'ready'})
+                'session_id':runtime.get('context_session_id'), 'was_ready':task['state'] == 'ready',
+                'empty_prompt':runtime.get('pool_empty_prompt')})
     from .app_coordinator import read_record
     record = read_record(state)
     if (record.get('phase') == 'ready' or starting and record.get('phase') == 'launching') and record.get('terminal') and record.get('native_pid'):
@@ -246,10 +247,8 @@ def clean_prompt(value, target):
         return False
     text = subprocess.run(['hc', 'read', '--lines', '24', target['terminal']],
                           capture_output=True, text=True, timeout=5, check=True).stdout
-    prompts = re.findall(r'^[ \t]*[›❯][^\S\r\n]*(.*)$', text, re.M)
-    if not prompts:
-        return False
-    return prompts[-1].strip() in ('', 'Ask Codex to do anything')
+    from .prompt_state import empty_input
+    return empty_input(text,target.get('empty_prompt'))
 
 
 def cli(config_path, state, *args):
@@ -558,6 +557,13 @@ def _advance(config_path, state, job):
                     selection={'action':'dispatch' if account else 'wait','account':account}
                     pairs=[(role['provider'],a) for a in account_order(config,time.time())]
             finally:store.close()
+            from . import session_pool
+            if target['kind']=='task' and session_pool.managed(config,task) and time.time()-job.get('last_refresh',0)>=300:
+                refresh_candidates(config_path,state,pairs)
+                job['last_refresh']=time.time()
+                store=Store(state)
+                try:selection=select_execution(config,store,store.get(target['id']),time.time())
+                finally:store.close()
             if selection['action']!='dispatch':
                 if time.time()-job.get('last_refresh',0)>=300:
                     refresh_candidates(config_path,state,pairs)

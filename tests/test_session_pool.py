@@ -18,6 +18,7 @@ class FakeNative:
         self.commands = []
         self.drafts = {}
         self.fail_run = False
+        self.claude_hint = None
 
     def call(self, *args, timeout=45):
         if timeout <= 0:raise AssertionError("positive native deadline required")
@@ -39,6 +40,9 @@ class FakeNative:
                 'status': {'state': 'idle', 'app': 'claude-code' if provider == 'claude' else provider},
                 'foreground': {'name': provider, 'pid': 100+len(self.rows), 'cwd': cwd,
                                'argv': command[provider_index:]}}
+            if provider == 'claude' and self.claude_hint is not None:
+                self.rows[address]['turn'] = 0
+                self.drafts[address] = '❯ '+self.claude_hint+'\n────────────────\nContext 0% used\n'
             return {'address': address}
         if args[0] == 'wait':
             return {'terminal': args[-1], 'ended': True, 'reason': 'status', 'status': 'idle'}
@@ -51,6 +55,16 @@ class FakeNative:
         self.commands.append(args)
         if args[:2] == ['hc', 'read']:
             return subprocess.CompletedProcess(args, 0, self.drafts.get(args[-1], '❯ \n'), '')
+        if args == ['herdr-app','ls']:
+            self.app_reads=getattr(self,'app_reads',0)+1
+            if self.app_reads<=getattr(self,'adoption_delay_reads',0):
+                return subprocess.CompletedProcess(args,0,json.dumps({'spaces':[]}), '')
+            spaces={}
+            for row in self.rows.values():
+                labels=row.get('labels',{})
+                if labels.get('herdr.space') and labels.get('herdr.tab'):
+                    spaces.setdefault(labels['herdr.space'],[]).append({'id':labels['herdr.tab'],'terminals':[{'terminal':row['address']}]})
+            return subprocess.CompletedProcess(args,0,json.dumps({'spaces':[{'id':key,'tabs':tabs} for key,tabs in spaces.items()]}), '')
         if Path(args[0]).name == 'ensure-atlassian-mcp' or args[:3] == ['herdr-app', 'do', 'tab.rename']:
             return subprocess.CompletedProcess(args, 0, '', '')
         raise AssertionError('unexpected external command: '+repr(args))
@@ -169,6 +183,104 @@ class SessionPoolTests(Fixture):
         with self.assertRaises(ValueError): self.slot()
         self.assertTrue(all(row['phase'] == 'prepared' for row in pool.status(self.value, self.state)['slots']))
 
+    def test_fresh_claude_ghost_hint_is_saved_exactly_without_model_turn(self):
+        self.fake.claude_hint = 'Try "write a fixture helper"'
+        self.assertEqual(self.prepare()['counts'], {'prepared': 16})
+        role = dict(self.role, provider='claude', model='claude-fixture')
+        slot = pool.preview(self.value, self.state, self.task, role)
+        self.assertEqual(slot['empty_prompt'], self.fake.claude_hint)
+        reserved = pool.reserve(self.value, self.state, self.task, role)
+        claimed = self.claimed(reserved)
+        detail = pool.activate(self.value, self.state, reserved, claimed, reserved['spec'])
+        self.assertEqual(detail['pool_empty_prompt'], self.fake.claude_hint)
+        self.assertFalse(any(call[0] == 'send' for call in self.fake.calls))
+
+    def test_saved_hint_does_not_authorize_different_quoted_try_draft(self):
+        self.fake.claude_hint = 'Try "write a fixture helper"'; self.prepare()
+        role = dict(self.role, provider='claude', model='claude-fixture')
+        slot = pool.preview(self.value, self.state, self.task, role)
+        self.fake.drafts[slot['terminal']] = '❯ Try "different unsent user draft"\n'
+        with self.assertRaises(ValueError): pool.reserve(self.value, self.state, self.task, role)
+        self.assertEqual(pool._read(self.state)['slots']['alpha/claude/personal']['empty_prompt'], self.fake.claude_hint)
+
+    def uncertain_claude(self, hint='Try "write a fixture helper"'):
+        self.prepare()
+        manifest = pool._read(self.state)
+        slot = manifest['slots']['alpha/claude/personal']
+        slot.update(phase='uncertain', reason='ValueError')
+        slot.pop('turn_baseline', None)
+        self.fake.rows[slot['terminal']]['turn'] = 0
+        self.fake.drafts[slot['terminal']] = '❯ '+hint+'\n'
+        pool._write(self.state, manifest)
+        return slot
+
+    def test_recheck_repairs_only_recorded_native_without_run_prompt_or_mcp(self):
+        old = self.uncertain_claude()
+        self.assertEqual(self.prepare()['created'], 0)  # Unknown hint never causes recreation.
+        self.fake.calls.clear(); self.fake.commands.clear()
+        result = pool.recheck(self.config, self.state)
+        slot = pool._read(self.state)['slots']['alpha/claude/personal']
+        self.assertEqual(result['rechecked'], 1)
+        self.assertEqual(slot['phase'], 'prepared')
+        self.assertEqual(slot['owner'], old['owner'])
+        self.assertEqual(slot['terminal'], old['terminal'])
+        self.assertEqual(slot['turn_baseline'], 0)
+        self.assertEqual(slot['empty_prompt'], 'Try "write a fixture helper"')
+        self.assertTrue(all(call[0] == 'get' for call in self.fake.calls))
+        self.assertTrue(all(args[:2] == ['hc', 'read'] for args in self.fake.commands))
+
+    def test_user_turn_racing_hint_read_is_not_blessed_as_empty(self):
+        slot = self.uncertain_claude()
+        original_run = self.fake.run
+        def read_and_type(args, **kwargs):
+            result = original_run(args, **kwargs)
+            if args[:2] == ['hc', 'read'] and args[-1] == slot['terminal']:
+                self.fake.rows[slot['terminal']]['turn'] = 1
+            return result
+        with patch('teamkit.session_pool.subprocess.run', side_effect=read_and_type):
+            self.assertEqual(pool.recheck(self.config, self.state)['rechecked'], 0)
+        row = pool._read(self.state)['slots']['alpha/claude/personal']
+        self.assertEqual(row['phase'], 'uncertain')
+        self.assertNotIn('empty_prompt', row)
+
+    def test_recheck_preserves_user_turn_app_label_pid_dialog_and_unknown_run(self):
+        original = self.uncertain_claude()
+        pristine = copy.deepcopy(self.fake.rows[original['terminal']])
+        for changed in ('turn', 'space', 'tab', 'pid', 'dialog', 'missing-runtime', 'claimed-owner', 'unknown-run'):
+            manifest = pool._read(self.state); slot = manifest['slots']['alpha/claude/personal'] = copy.deepcopy(original)
+            native = self.fake.rows[original['terminal']] = copy.deepcopy(pristine)
+            self.fake.drafts[original['terminal']] = '❯ Try "write a fixture helper"\n'
+            if changed == 'turn': native['turn'] = 1
+            elif changed == 'space': native['labels']['herdr.space'] = 'space-alpha'
+            elif changed == 'tab': native['labels']['herdr.tab'] = 'tab-alpha'
+            elif changed == 'pid': native['foreground']['pid'] += 1
+            elif changed == 'dialog': native['status']['state'] = 'blocked'
+            elif changed == 'missing-runtime': slot.pop('runtime')
+            elif changed == 'unknown-run': slot['reason'] = 'OSError'
+            else: self.claimed(slot)
+            pool._write(self.state, manifest)
+            with self.subTest(changed=changed):
+                self.assertEqual(pool.recheck(self.config, self.state)['rechecked'], 0)
+                row = pool._read(self.state)['slots']['alpha/claude/personal']
+                self.assertEqual(row['phase'], 'uncertain')
+                self.assertNotIn('empty_prompt', row)
+            if changed == 'claimed-owner':
+                task = self.store.get(self.task['id']); task['state'] = 'queued'; task['owner'] = None
+                self.store._save(task, 'fixture_reset', {})
+
+    def test_hint_learning_requires_bounded_single_quoted_line_and_no_reserved_learning(self):
+        for hint in ('Try unquoted input', 'Try ""', 'Try "'+('x'*201)+'"', 'Try "first" trailing', 'Try "first"\nuser draft'):
+            slot = self.uncertain_claude(hint)
+            with self.subTest(hint=hint):
+                self.assertEqual(pool.recheck(self.config, self.state)['rechecked'], 0)
+        for phase in ('prepared', 'reserved', 'leased'):
+            slot = self.uncertain_claude()
+            slot['phase'] = phase
+            self.fake.rows[slot['terminal']]['turn'] = 0
+            with self.subTest(phase=phase), self.assertRaises(ValueError):
+                pool._verify(slot, self.task, slot['spec'], learn_hint=True)
+            self.assertNotIn('empty_prompt', slot)
+
     def test_empty_claude_prompt_does_not_consume_following_footer_lines(self):
         footer = '  ❯ \u00a0\n────────────────\nContext 18% used\n'
         self.fake.drafts.update({'t'+str(index): footer for index in range(1, 17)})
@@ -285,3 +397,10 @@ class SessionPoolTests(Fixture):
         self.value['execution_preference']={'provider_order':['codex'],'weekend_account_first':True}
         self.config.write_text(json.dumps(self.value))
         self.assertEqual(self.prepare()['counts'],{'prepared':16})
+
+    def test_present_waits_for_exact_app_adoption_without_new_native_or_focus(self):
+        self.prepare();self.fake.adoption_delay_reads=1
+        self.assertEqual(pool.present(self.value,self.state,only=('alpha','codex','personal')),1)
+        self.assertEqual(self.fake.app_reads,2)
+        self.assertEqual(sum(c[0]=='run' for c in self.fake.calls),16)
+        self.assertFalse(any('focus' in ' '.join(a) for a in self.fake.commands))

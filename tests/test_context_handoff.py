@@ -72,6 +72,15 @@ class ContextHandoffTests(unittest.TestCase):
             self.assertEqual(call.call_count,1)
         self.assertEqual(context.read(context.job_path(self.state,job['id']))['phase'],'uncertain')
 
+    def test_multiline_draft_after_hint_never_receives_handoff_message(self):
+        self.target.update(kind='coordinator',empty_prompt='Try "write a fixture helper"')
+        job=self.request()
+        screen=type('R',(),{'stdout':'❯ Try "write a fixture helper"\n  unfinished multiline user draft'})()
+        with patch.object(context,'load',return_value=self.config),patch.object(context,'current_target',return_value=self.target),patch.object(context,'native',return_value={'status':{'state':'done'}}),patch.object(context,'observe',return_value=self.observation),patch.object(context,'capacity_available',return_value=True),patch.object(context.subprocess,'run',return_value=screen),patch.object(context,'_call') as call:
+            context.advance(self.config_path,self.state,job)
+            call.assert_not_called()
+        self.assertEqual(context.read(context.job_path(self.state,job['id']))['phase'],'pending')
+
     def test_changed_owner_cancels_before_native_input(self):
         job=self.request()
         with patch.object(context,'load',return_value=self.config),patch.object(context,'current_target',return_value=None),patch.object(context,'_call') as call:
@@ -258,7 +267,7 @@ class NativePromptTests(unittest.TestCase):
         value={'status':{'state':'done'}}
         for text,expected in [('response\n❯\u00a0\n────────\nContext 使用18%',True),
                               ('response\n❯ user draft\n────────',False),
-                              ('response\n› Ask Codex to do anything\nContext',True)]:
+                              ('response\n› Ask Codex to do anything\n  Context 93% left · weekly 52% left',True)]:
             with self.subTest(text=text),patch.object(context.subprocess,'run',return_value=type('Result',(),{'stdout':text})()):
                 self.assertEqual(context.clean_prompt(value,target),expected)
 
@@ -339,3 +348,21 @@ class ClaudeNativeExitTests(unittest.TestCase):
             with self.subTest(actual=actual),patch.object(context,'current_target',return_value=target),patch.object(context,'observe',return_value={'session_id':session,'observed_at':0}),patch.object(context,'_call') as call,patch.object(context.subprocess,'run',side_effect=[type('R',(),{'stdout':'old response'})(),type('R',(),{'stdout':after})()]):
                 self.assertEqual(context.exit_session_matches({},None,job),expected)
                 self.assertIn(unittest.mock.call('keys','t1','escape'),call.call_args_list)
+
+
+class RegisteredEmptyHintTests(unittest.TestCase):
+    def test_only_the_registered_slot_hint_is_an_empty_prompt(self):
+        hint='Try "edit <filepath> to..."'
+        for actual,expected in ((hint,True),('Try "please overwrite my draft"',False)):
+            with patch.object(context.subprocess,'run',return_value=type('R',(),{'stdout':'❯ '+actual+'\n──────\nContext'})()):
+                self.assertEqual(context.clean_prompt({'status':{'state':'idle'}},{'terminal':'t1','empty_prompt':hint}),expected)
+
+
+class MultilineDraftGuardTests(unittest.TestCase):
+    def test_registered_hint_and_blank_first_line_do_not_hide_multiline_drafts(self):
+        from teamkit.prompt_state import empty_input
+        hint='Try "edit <filepath> to..."'
+        for text in ('❯ '+hint+'\n  unfinished multiline user draft','❯ \n  unfinished multiline user draft','› Ask Codex to do anything\n  my multiline request','› \n  Context please keep this draft'):
+            self.assertFalse(empty_input(text,hint))
+        self.assertTrue(empty_input('❯ '+hint+'\n────────\nContext',hint))
+        self.assertTrue(empty_input('› Ask Codex to do anything\n  Context 100% left · weekly 40% left'))

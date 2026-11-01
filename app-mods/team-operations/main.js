@@ -1,6 +1,6 @@
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex, Popover, Scrollbar, Textarea, TextareaState, TextView, Editor, EditorState } from "gpui-base";
-import { appHome, readTextFile, exec, agents, terminals, theme, settings, run, nextCommand, props as getModProps, openOverlay, closeOverlay } from "herdr";
+import { appHome, readTextFile, exec, agents, terminals, theme, settings, layout, run, nextCommand, props as getModProps, openOverlay, closeOverlay } from "herdr";
 
 const LOCAL = "/mods/team-operations/local.json";
 const DUMMY = "—";
@@ -60,7 +60,17 @@ const WORK_PHASES = {
 function phaseText(phase) { return WORK_PHASES[phase]?.text ?? display(phase); }
 const TASK_STATES = { queued: "배정 대기", claimed: "담당자 지정", launching: "시작 준비", submitted: "수신 확인 중", running: "요청 수신됨", ready: "대기", uncertain: "결과 확인 필요", handed_off: "인계됨", awaiting_review: "검토 대기", done: "완료" };
 function taskStateText(state) { return TASK_STATES[state] ?? display(state); }
-const OVERVIEW = { height: 166, rail: 98, card: 94 };
+const OVERVIEW = { height: 166, rail: 98, card: 94, cardMinWidth: 210, gap: 6, padding: 8 };
+const overviewColumnsFor = width => width - 2 * OVERVIEW.padding >= 4 * OVERVIEW.cardMinWidth + 3 * OVERVIEW.gap ? 4
+  : width - 2 * OVERVIEW.padding >= 2 * OVERVIEW.cardMinWidth + OVERVIEW.gap ? 2 : 1;
+function findLayoutNode(node, id) {
+  if (node?.id === id) return node;
+  for (const child of node?.children ?? []) {
+    const found = findLayoutNode(child, id);
+    if (found) return found;
+  }
+  return null;
+}
 const STATUS_TEXT = { unknown: "미확인", working: "실행 중", running: "실행 중", blocked: "사용자 답변 필요", done: "응답 완료", idle: "대기 중", pending: "대기 중", failed: "실패", error: "오류", success: "성공", healthy: "정상", not_measured: "측정 전", not_available: "미제공", unavailable: "미제공", missing: "미확인", current: "최신 기록", stale: "지난 기록" };
 function statusText(status) { return STATUS_TEXT[status] ?? (status == null ? "미확인" : display(status)); }
 function statusColor(status, t) { return status === "working" ? t.working : status === "blocked" ? t.blocked : status === "done" ? t.done : status === "idle" ? t.idle : t.unknown; }
@@ -470,6 +480,50 @@ export default class TeamOperations extends View {
     finally { this.actionBusy = false; await this.refresh(cx); cx.notify(); }
   }
 
+  syncOverviewHeight(width, height, cx) {
+    const props = getModProps() ?? this.viewProps;
+    if (props.role !== "overview" || props.overlay || props.pane || props.overview_layout_id !== "team-overview") return;
+    const node = findLayoutNode(layout(), "team-overview");
+    if (node?.content?.mod !== "team-overview" || node.content.props?.role !== "overview"
+        || node.content.props?.overview_layout_id !== "team-overview") return;
+    this.overviewResizeWanted = { width, height };
+    if (node.size?.px === height) {
+      this.overviewResizeFailureKey = null;
+      if (this.overviewResizeError) { this.overviewResizeError = null; cx.notify(); }
+      return;
+    }
+    const key = JSON.stringify([width, height, node.max ?? null]);
+    if (this.overviewResizePending || this.overviewResizeFailureKey === key) return;
+    if (Number.isFinite(node.max) && node.max < height) {
+      this.overviewResizeFailureKey = key;
+      this.overviewResizeError = "상단 보드 크기를 조정하지 못했습니다.";
+      console.error("team-overview layout height exceeds max", { width, height, max: node.max });
+      cx.notify(); return;
+    }
+    this.overviewResizePending = true;
+    cx.spawn(async cx => {
+      try {
+        const result = await exec("herdr-app", ["do", "layout.resize", JSON.stringify({ id: "team-overview", px: height })]);
+        if (result.code !== 0) throw new Error(result.stderr || `종료 코드 ${result.code}`);
+        const reply = result.stdout.trim() ? JSON.parse(result.stdout) : null;
+        if (reply?.error || reply?.ok === false) throw new Error(reply.error || "레이아웃 변경이 거절됐습니다.");
+        this.overviewResizeFailureKey = null;
+        this.overviewResizeError = null;
+      } catch (error) {
+        this.overviewResizeFailureKey = key;
+        this.overviewResizeError = "상단 보드 크기를 조정하지 못했습니다.";
+        console.error("team-overview layout resize failed", { width, height, max: node.max }, error);
+      } finally {
+        this.overviewResizePending = false;
+        if (!this.closed) {
+          cx.notify();
+          const wanted = this.overviewResizeWanted;
+          if (wanted.width !== width || wanted.height !== height) this.syncOverviewHeight(wanted.width, wanted.height, cx);
+        }
+      }
+    });
+  }
+
   render(cx) {
     const t = theme(), data = this.data;
     const button = (id, text, fn, disabled = false) => div().id(id).px(10).py(6).rounded(6).cursor_pointer().bg(disabled ? t.chrome : t.raised).text_color(disabled ? t.dim : t.foreground).on_click((_e, cx) => { if (!disabled) fn(cx); }).child(text);
@@ -539,7 +593,7 @@ export default class TeamOperations extends View {
     const teamCard = team => {
       const live = liveFor(team), status = live.status, presence = teamPresence(status, team.ledger_state, team.id, data?.observed_at, team.context_handoff);
       const activate = cx => run("agent.focus", { terminal: team.context_handoff?.new_terminal ?? team.terminal });
-      return v_flex().id(`rail-${team.id}`).flex_1().min_w(210).h(OVERVIEW.card).gap(3).p(8).rounded(7).hover(s => s.bg(t.raised))
+      return v_flex().id(`rail-${team.id}`).flex_1().min_w(0).h(OVERVIEW.card).gap(3).p(8).rounded(7).hover(s => s.bg(t.raised))
         .when(live.present || Boolean(team.context_handoff?.new_terminal), el => el.cursor_pointer().on_click((_e, cx) => activate(cx)))
         .bg(t.surface)
         .child(h_flex().h(28).flex_none().gap(6).items_center()
@@ -562,17 +616,31 @@ export default class TeamOperations extends View {
         button("cancel-coordinator-recovery", "취소", cx => { this.coordinatorConfirm = false; cx.notify(); }, this.coordinatorBusy).text_size(12)
       ]));
     const overview = (getModProps()?.role ?? this.viewProps.role) === "overview";
-    if (overview) return v_flex().id("team-operations-overview").w_full().h(OVERVIEW.height).flex_none().gap(4).px(8).py(5).bg(t.background).text_color(t.foreground)
+    const overviewColumns = overviewColumnsFor(this.overviewWidth ?? 0);
+    const overviewRows = [];
+    for (let index = 0; index < teams.length; index += overviewColumns) overviewRows.push(teams.slice(index, index + overviewColumns));
+    const overviewRailHeight = Math.max(1, overviewRows.length) * OVERVIEW.card + Math.max(0, overviewRows.length - 1) * OVERVIEW.gap + 4;
+    if (overview) return v_flex().id("team-operations-overview").w_full().min_w(0).h_auto().min_h(overviewRailHeight + OVERVIEW.height - OVERVIEW.rail).flex_none().gap(4).px(OVERVIEW.padding).py(5).bg(t.background).text_color(t.foreground)
       .font_family(this.config?.overview_font || settings().font_family || "monospace").text_size(13)
-      .child(h_flex().h(32).flex_none().items_center().gap(10)
+      .on_size_change((size, cx) => {
+        const width = Math.floor(size.width);
+        if (this.overviewWidth !== width) { this.overviewWidth = width; cx.notify(); }
+        const rows = Math.max(1, Math.ceil(teams.length / overviewColumnsFor(width)));
+        const railHeight = rows * OVERVIEW.card + (rows - 1) * OVERVIEW.gap + 4;
+        const overhead = Math.max(OVERVIEW.height - OVERVIEW.rail, Math.ceil(size.height) - overviewRailHeight);
+        this.syncOverviewHeight(width, railHeight + overhead, cx);
+      })
+      .child(h_flex().min_h(32).flex_none().flex_wrap().items_center().gap(10)
         .child(div().font_semibold().text_size(16).child("팀 운영"))
         .child(div().flex_1().text_size(12).text_color(t.muted).child(summary))
         .when(Boolean(data?.context_handoff?.enabled), el => el.child(badge(data.context_handoff.label, data.context_handoff.healthy ? t.muted : t.blocked)))
         .child(coordinatorButton)
         .child(button("open-dashboard", "전체 현황", () => run("tab.select", { id: this.config?.dashboard_tab }), !this.config?.dashboard_tab).text_size(12)))
       .when(Boolean(this.coordinatorMessage), el => el.child(div().h(16).flex_none().line_height("16px").text_size(10).text_color(/⚠|실패|오류/i.test(this.coordinatorMessage) ? t.blocked : t.muted).truncate().child(this.coordinatorMessage)))
+      .when(Boolean(this.overviewResizeError), el => el.child(div().h(16).flex_none().line_height("16px").truncate().text_size(10).text_color(t.blocked).tooltip(this.overviewResizeError).child(this.overviewResizeError)))
       .when(this.coordinatorConfirm, el => el.child(coordinatorConfirm))
-      .when(!this.coordinatorConfirm, el => el.child(h_flex().id("team-operations-rail").w_full().h(OVERVIEW.rail).flex_none().min_w(0).gap(6).overflow_x_scrollbar().children(teams.map(teamCard))));
+      .when(!this.coordinatorConfirm, el => el.child(v_flex().id("team-operations-rail").w_full().h(overviewRailHeight).flex_none().min_w(0).gap(OVERVIEW.gap)
+        .children(overviewRows.map((row, index) => h_flex().id(`team-operations-rail-row-${index}`).w_full().min_w(0).h(OVERVIEW.card).flex_none().gap(OVERVIEW.gap).children(row.map(teamCard))))));
     const overlay = this.viewProps.overlay ?? getModProps()?.overlay;
     if (this.role === "detail") {
       const detail = this.detailData;
