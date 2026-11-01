@@ -1,5 +1,6 @@
 """Local app boundary: independent GUI ledger, read-only views, explicit actions."""
 import argparse
+from contextlib import closing
 import fcntl
 import hashlib
 import json
@@ -502,6 +503,13 @@ def card_send_job(config_path, state, binding_path, request):
         dest = destination(config_path, state, binding_path, payload['kind'], payload['work_id'])
         if dest != stored['destination']:
             raise Refusal('보내기 직전 담당 팀장·소유자·시도·터미널 연결이 달라졌습니다.')
+        from .store import Store
+        from .workflow import check_task
+        try:
+            with closing(Store(state)) as store:
+                check_task(load(config_path), store, store.get(dest['task']))
+        except ValueError as error:
+            raise Refusal('기존 전달 조건이 거절했습니다: ' + str(error)) from error
         message = folder / 'message.txt'
         fd = os.open(message, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, 'w') as out:
@@ -522,7 +530,7 @@ def card_send_job(config_path, state, binding_path, request):
         journal(state, rid, 'not_sent' if known else 'unknown',
                 {'reason': '전송 전에 거절되었습니다: ' + str(error) if known else '호출 뒤 결과를 확인하지 못했습니다: ' + str(error)})
     except ValueError as error:
-        journal(state, rid, 'not_sent', {'reason': '기존 전달 조건이 거절했습니다: ' + str(error)})
+        journal(state, rid, 'unknown', {'reason': '호출 뒤 결과를 확인하지 못했습니다: ' + str(error)})
     except BaseException as error:
         journal(state, rid, 'unknown', {'reason': '호출 뒤 결과를 확인하지 못했습니다: ' + type(error).__name__})
         raise

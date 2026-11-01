@@ -399,6 +399,25 @@ class DeliveryBridgeTests(FeedbackFixture):
         self.submit();self.job();seen=self.summary()
         self.assertEqual(seen['state'],'not_sent');self.assertIn('기존 전달 조건이 거절했습니다',seen['reason']);self.assertEqual(self.sent,[])
 
+    def test_park_race_after_send_failure_remains_unknown_and_blocks_new_id(self):
+        from teamkit.store import Store
+        from teamkit.runtime import RuntimeError as KitError
+        self.submit()
+        self.send_error = KitError('Core outcome unknown; inspect before retry')
+        note = Store.note
+
+        def late_park(store, task, owner, detail):
+            store.park(task, owner)
+            return note(store, task, owner, detail)
+
+        with patch.object(Store, 'note', late_park):
+            self.job()
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.summary()['state'], 'unknown')
+        with self.assertRaisesRegex(ValueError, '이전 전달 결과'):
+            self.submit(client_request_id='req-0002-bbbb')
+        self.assertEqual(len(self.sent), 1)
+
     def test_timeout_or_unconfirmed_wait_is_unknown_and_never_resent(self):
         from teamkit.runtime import RuntimeError as KitError
         for index,error in enumerate((KitError('Core outcome unknown; inspect before retry'),KitError('Core command failed; inspect local runtime before retry'),OSError('pipe'))):

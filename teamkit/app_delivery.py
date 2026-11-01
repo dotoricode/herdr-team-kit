@@ -40,8 +40,10 @@ def _base(state, create=False):
     if not base.exists():
         if not create:
             return base
-        base.mkdir(mode=0o700)
+        base.mkdir(mode=0o700, exist_ok=True)
         _sync(root)
+    if base.is_symlink():
+        raise ValueError('전달 기록 폴더가 바뀌었습니다. 경로를 확인하세요.')
     info = base.stat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
         raise ValueError('전달 기록 폴더의 소유권과 비공개 권한을 확인하세요.')
