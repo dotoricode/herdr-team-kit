@@ -175,3 +175,15 @@ class PoolControlTests(Fixture):
         with patch.object(context,'refresh_candidates',side_effect=fresh) as refresh,patch.object(pool,'reserve',side_effect=stop),patch.object(context,'ensure'):
             with self.assertRaisesRegex(ValueError,'stopped before claim'):self.call('dispatch','L1')
             refresh.assert_called_once()
+
+    def test_bootstrap_replaces_existing_representative_only_after_receipt(self):
+        self.prepare()
+        binding_path=Path(self.value['session_pool']['bindings'])
+        binding_path.write_text(json.dumps({'teams':{'alpha':{'terminal':'told','space':'spalpha'}}}))
+        def received(*args):
+            store=Store(self.state);task=store.get('L1');store.close()
+            return {**task,'state':'ready','runtime':{'terminal':'tnew','identity_checked':True}}
+        with patch.object(control,'refresh_choice'),patch.object(context,'capacity_available',return_value=True),patch.object(control,'official',side_effect=received),patch.object(context,'attach') as attach:
+            self.call('pool','bootstrap','--team','alpha')
+        self.assertEqual(attach.call_args.args[2],{'kind':'task','id':'L1','terminal':'told'})
+        self.assertEqual(attach.call_args.args[3],'tnew')

@@ -236,6 +236,16 @@ def prepare(config_path, state, only=None):
                             _write(state, manifest)
                         runtime = CoreRuntime().launch(task, slot['spec'], slot['name'], record)
                         slot.update(runtime); slot['runtime'] = runtime
+                        if provider=='codex':
+                            deadline=time.monotonic()+3
+                            actor={**task,'provider':provider,'owner':owner,'runtime':runtime}
+                            while True:
+                                remaining=deadline-time.monotonic()
+                                if remaining<=0:raise ValueError('Codex initial status has not settled')
+                                initial=CoreRuntime(actor)._native(slot['name'],ready=True,timeout=remaining)
+                                if time.monotonic()>=deadline:raise ValueError('Codex initial status has not settled')
+                                if initial.get('turn',0)>=1:break
+                                time.sleep(.1)
                         native = _verify(slot, task, slot['spec'], learn_hint=True)
                         slot.update(phase='prepared', turn_baseline=native['turn'], native_verified_at=time.time())
                         created += 1
@@ -257,7 +267,7 @@ def recheck(config_path, state):
     with _locked(state):
         manifest = _read(state)
         for slot in manifest['slots'].values():
-            if (slot['phase'] != 'uncertain' or slot.get('reason') != 'ValueError'
+            if (slot['phase'] != 'uncertain' or slot.get('reason') not in ('ValueError','TimeoutExpired')
                     or not isinstance(slot.get('runtime'), dict) or type(slot.get('native_pid')) is not int):
                 continue
             try:

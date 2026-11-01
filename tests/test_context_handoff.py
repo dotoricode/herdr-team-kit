@@ -366,3 +366,11 @@ class MultilineDraftGuardTests(unittest.TestCase):
             self.assertFalse(empty_input(text,hint))
         self.assertTrue(empty_input('❯ '+hint+'\n────────\nContext',hint))
         self.assertTrue(empty_input('› Ask Codex to do anything\n  Context 100% left · weekly 40% left'))
+
+
+class NativeDetailedFooterTests(unittest.TestCase):
+    def test_installed_model_path_footer_is_distinct_from_following_user_draft(self):
+        from teamkit.prompt_state import empty_input
+        footer='› Ask Codex to do anything\n  GPT-6.1-Sol medium Fast · ~/example/work · Context 81% left · weekly 37% left\n  ← for agents · / for shortcuts'
+        self.assertTrue(empty_input(footer))
+        self.assertFalse(empty_input(footer+'\n  unfinished user draft'))

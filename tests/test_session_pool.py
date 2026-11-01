@@ -404,3 +404,31 @@ class SessionPoolTests(Fixture):
         self.assertEqual(self.fake.app_reads,2)
         self.assertEqual(sum(c[0]=='run' for c in self.fake.calls),16)
         self.assertFalse(any('focus' in ' '.join(a) for a in self.fake.commands))
+
+    def test_recheck_retries_read_timeout_without_creating_or_prompting(self):
+        original=self.fake.call
+        def zero(*args,**kwargs):
+            out=original(*args,**kwargs)
+            if args[0]=='run':self.fake.rows[out['address']]['turn']=0 if self.fake.rows[out['address']]['foreground']['name']=='claude' else 1
+            return out
+        with patch('teamkit.core_runtime._call',side_effect=zero),patch('teamkit.session_pool._call',side_effect=zero):self.prepare()
+        manifest=pool._read(self.state);slot=manifest['slots'][pool._key('alpha','claude','personal')]
+        slot.update(phase='uncertain',reason='TimeoutExpired');pool._write(self.state,manifest)
+        self.assertEqual(pool.recheck(self.config,self.state)['rechecked'],1)
+        self.assertEqual(sum(c[0]=='run' for c in self.fake.calls),16)
+        self.assertFalse(any(c[0]=='send' for c in self.fake.calls))
+
+    def test_codex_late_initial_status_cannot_become_prepared(self):
+        from teamkit.core_runtime import CoreRuntime
+        clock=[0.0];seen=[];counts={};original=CoreRuntime._native
+        def late(actor,name,ready=False,timeout=45):
+            native=original(actor,name,ready=ready,timeout=timeout)
+            counts[name]=counts.get(name,0)+1
+            if actor.task.get('provider')=='codex' and counts[name]==2:
+                seen.append(timeout);clock[0]+=4
+            return native
+        with patch.object(CoreRuntime,'_native',new=late),patch.object(pool.time,'monotonic',side_effect=lambda:clock[0]):
+            result=self.prepare()
+        self.assertEqual(result['counts'],{'uncertain':8,'prepared':8})
+        self.assertTrue(seen)
+        self.assertTrue(all(0<t<=3 for t in seen))

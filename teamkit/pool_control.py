@@ -236,10 +236,13 @@ def handle(args):
     if task['state']!='queued' or task.get('attempt_count',0)!=0:raise ValueError('bootstrap is only for an unused pool leader')
     if route['action']!='dispatch':return route
     from .context_handoff import locked,directory,capacity_available,attach
+    from .context_handoff import read
+    previous=read(Path(config['session_pool']['bindings']))
+    previous_terminal=(previous or {}).get('teams',{}).get(args.team,{}).get('terminal')
     with locked(directory(args.state)/'model-start'):
         if not capacity_available(args.state):return {'action':'wait','reason':'global model capacity'}
         result=official(args.config,args.state,'dispatch',route['task'],'--expected-attempt','0')
     if result.get('state')=='ready' and result.get('runtime',{}).get('identity_checked') is True:
         attach({**config,'context_bindings':config['session_pool']['bindings']},args.state,
-               {'kind':'task','id':result['id'],'terminal':None},result['runtime']['terminal'])
+               {'kind':'task','id':result['id'],'terminal':previous_terminal},result['runtime']['terminal'])
     return result
