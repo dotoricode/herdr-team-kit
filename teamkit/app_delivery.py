@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import stat
 import time
+import uuid
 
 from .app_feedback import REQUEST_ID, _key, _open, _root
 
@@ -161,8 +162,11 @@ def receipt(folder, request):
             or value.get('destination')!=dest or not isinstance(value.get('summary'),str)
             or value.get('outcome') not in ('responded','deferred') or not isinstance(value.get('recorded_at'),(int,float))):
         raise ValueError('담당자 처리 기록의 요청·내용·소유권을 확인해야 합니다.')
-    evidence=path.with_name('receipt-evidence.txt')
-    with os.fdopen(_open(evidence,os.O_RDONLY),'r') as source:body=source.read()
+    body=value.get('evidence')
+    if body is None:
+        # Earlier host-verified recoveries kept evidence beside the receipt.
+        with os.fdopen(_open(path.with_name('receipt-evidence.txt'),os.O_RDONLY),'r') as source:body=source.read()
+    if not isinstance(body,str):raise ValueError('담당자 응답 근거 형식을 확인해야 합니다.')
     if hashlib.sha256(body.encode()).hexdigest()!=value.get('evidence_digest'):
         raise ValueError('담당자 응답 근거가 바뀌었습니다.')
     return value
@@ -185,9 +189,13 @@ def record_receipt(state,rid,outcome,text,evidence,verifier):
             raise ValueError('전달하지 않은 요청에는 응답을 연결할 수 없습니다.')
         value={'request_id':rid,'payload_hash':req['payload_hash'],'destination':req['destination'],
                'outcome':outcome,'summary':text.strip(),'recorded_at':time.time(),'verifier':verifier,
-               'evidence_digest':hashlib.sha256(evidence.encode()).hexdigest()}
-        _write_new(folder/'receipt-evidence.txt',evidence.encode())
-        _write_new(folder/'receipt.json',canonical(value).encode());_sync(folder)
+               'evidence':evidence,'evidence_digest':hashlib.sha256(evidence.encode()).hexdigest()}
+        temporary=folder/('.receipt-'+uuid.uuid4().hex)
+        try:
+            _write_new(temporary,canonical(value).encode())
+            os.replace(temporary,folder/'receipt.json');_sync(folder)
+        finally:
+            if temporary.exists():temporary.unlink()
         return value
 
 
@@ -201,6 +209,7 @@ def summary(folder, now=None):
         effective, orphaned = 'unknown', True
     dest = request.get('destination') or {}
     response=receipt(folder,request)
+    if response is not None:response={k:v for k,v in response.items() if k!='evidence'}
     return {'request_id': request['client_request_id'], 'kind': request['payload']['kind'], 'work_id': request['payload']['work_id'],
             'state': last['state'], 'effective_state': effective, 'receipt': response, 'orphaned': orphaned, 'label': LABELS[effective],
             'reason': last['detail'].get('reason', '') if not orphaned else '제어 프로세스의 마지막 기록 뒤 결과를 확인하지 못했습니다. 자동 재전송 없이 보존합니다.',

@@ -517,7 +517,13 @@ export default class TeamOperations extends View {
     } else if (card.needs_decision || this.choiceStarted) option = card.decision?.options.find(o => o.id === selected.id);
     if (!option || option.intent === "approve" && (card.kind !== "work" || card.status !== "awaiting_approval")) return null;
     const recipient = option.intent === "confirmed" ? "팀 총괄" : card.leader?.label ?? card.team_label ?? "담당 팀장";
-    const unresolved = (card.deliveries ?? []).some(d => !d.receipt && ["pending", "sending", "unknown"].includes(d.effective_state ?? d.state));
+    const unresolved = (card.deliveries ?? []).some(d => {
+      if (d.receipt || !["pending", "sending", "unknown"].includes(d.effective_state ?? d.state)) return false;
+      const b = d.binding;
+      if (!b) return true;
+      return b.card_revision === card.revision && b.document_revision === card.document_revision && b.document_digest === card.document_digest
+        && (!card.question || b.question_id === card.question.question_id && b.question_revision === card.question.question_revision);
+    });
     const next = option.intent === "approve" ? `설계 v${card.document_revision}의 진행 허가를 기록합니다. 다음 단계는 ${recipient}의 작업 배정이며, 이번 확인은 설계 승인까지입니다.`
       : option.intent === "confirmed" ? "확인 결과를 총괄에게 남깁니다. 추가 작업을 시작하지 않습니다."
         : `${recipient}에게 이 요청을 전달합니다. 전달 후 담당자의 처리 결과를 확인합니다.`;
@@ -910,12 +916,11 @@ export default class TeamOperations extends View {
       const body = v_flex().id("detail-body").size_full().min_h(0).gap(9).overflow_y_scroll()
         .when(this.detailBusy || this.cardBusy && !card && !this.cardError, x => x.child(div().p(8).text_color(t.dim).child("카드 정보를 읽는 중입니다.")))
         .when(Boolean(this.detailError || this.cardError), x => x.child(words(`정보를 읽지 못했습니다 · ${this.detailError ?? this.cardError}`).text_color(t.blocked)))
-        .child(summarySection)
-        .child(needsDecision ? (q ? questionSection : fallbackSection) : progressSection)
+        .when(Boolean(card), el => el.child(summarySection).child(needsDecision ? (q ? questionSection : fallbackSection) : progressSection))
         .when(Boolean(this.sendMessage), el => el.child(words(this.sendMessage).text_size(11).text_color(this.sendMessage.startsWith("⚠") ? t.blocked : t.muted)))
         .when(Boolean(current), el => el.child(words(current.label ?? sendLabel("전달 상태")).text_size(11).text_color(sendColor(current.state))))
         .when(Boolean(this.answerMessage), el => el.child(words(this.answerMessage).text_size(11).text_color(this.answerMessage.startsWith("⚠") ? t.blocked : t.accent)))
-        .child(extraButtons)
+        .when(Boolean(card), el => el.child(extraButtons))
         .when((this.viewProps.kind !== "inventory" || Boolean(this.viewProps.linkedWorkId)) && (this.docBusy || this.docEditor != null || Boolean(this.message)), el => el.child(documentSection))
         .when(this.infoOpen, el => el.child(informationSection))
         .when(this.historyOpen, el => el.child(historySection));

@@ -90,7 +90,7 @@ class ProjectionTests(FeedbackFixture):
         card=self.detail('W1','work');req=request()
         req['payload'].update(card_revision=card['revision'],document_revision=card['document_revision'],document_digest=card['document_digest'],
                               question_id=first['question_id'],question_revision=1,option_id='proceed',choice=None)
-        req['payload_hash']=delivery.digest(req['payload']);delivery.submit(self.state,req);delivery.claim(self.state,req['client_request_id'],'t9');delivery.record(self.state,req['client_request_id'],'sent',{})
+        req['payload_hash']=delivery.digest(req['payload']);delivery.submit(self.state,req);delivery.claim(self.state,req['client_request_id'],'t9');delivery.record(self.state,req['client_request_id'],'unknown',{})
         self.assertFalse(self.detail('W1','work')['needs_decision'])
         question_set(self.config,self.state,self.links,'work','W1',AUTHOR,{'prompt':'새 범위도 확인할까요?','options':OPTIONS},1)
         self.assertTrue(self.detail('W1','work')['needs_decision'])
@@ -101,10 +101,9 @@ class ProjectionTests(FeedbackFixture):
         req=self.setup_delivery('unknown');rid=req['client_request_id']
         delivery.record_receipt(self.state,rid,'responded','처리 확인',rid,{'host':'fixture'})
         folder=delivery.request_dir(self.state,rid)
-        (folder/'receipt-evidence.txt').write_text('changed')
+        path=folder/'receipt.json';value=json.loads(path.read_text());evidence=value['evidence'];value['evidence']='changed';path.write_text(json.dumps(value))
         with self.assertRaisesRegex(ValueError,'근거'):delivery.summary(folder)
-        (folder/'receipt-evidence.txt').write_text(rid)
-        path=folder/'receipt.json';value=json.loads(path.read_text());value['destination']['owner']='another';path.write_text(json.dumps(value))
+        value['evidence']=evidence;value['destination']['owner']='another';path.write_text(json.dumps(value))
         with self.assertRaisesRegex(ValueError,'소유권'):delivery.summary(folder)
 
     def test_concurrent_inventory_change_is_partial_and_blocks_actions(self):
@@ -132,4 +131,16 @@ class ProjectionTests(FeedbackFixture):
         actor={k:req['destination'][k] for k in ('task','owner','attempt','terminal')}
         with patch('teamkit.app_bridge.verify_author',return_value=actor):
             card_receipt(self.config,self.state,self.links,rid,'L1','leader-owner',1,'responded','응답 확인')
+        self.assertEqual(self.detail('W1','work')['interaction']['state'],'responded')
+
+    def test_interrupted_receipt_can_be_recorded_again_without_resending(self):
+        req=self.setup_delivery('unknown');rid=req['client_request_id'];write=delivery._write_new
+        def interrupted(path,body):
+            if path.name=='receipt.json' or path.name.startswith('.receipt-'):raise OSError('interrupted write')
+            return write(path,body)
+        with patch('teamkit.app_delivery._write_new',side_effect=interrupted):
+            with self.assertRaises(OSError):delivery.record_receipt(self.state,rid,'responded','처리 확인',rid,{'host':'fixture'})
+        self.assertIsNone(delivery.summary(delivery.request_dir(self.state,rid))['receipt'])
+        delivery.record_receipt(self.state,rid,'responded','처리 확인',rid,{'host':'fixture'})
+        self.assertEqual(delivery.summary(delivery.request_dir(self.state,rid))['state'],'unknown')
         self.assertEqual(self.detail('W1','work')['interaction']['state'],'responded')
