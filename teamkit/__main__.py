@@ -118,6 +118,13 @@ def parser():
     x.add_argument('--once',action='store_true');x.add_argument('--json',action='store_true')
     x.add_argument('--publish',action='store_true');x.add_argument('--interval',type=float,default=3)
     x.add_argument('--color',choices=['auto','always','never'],default='auto')
+    x=commands.add_parser('auto-context')
+    x.add_argument('action',choices=('serve','status','register','enroll','checkpoint','verify-request'))
+    x.add_argument('--once',action='store_true')
+    x.add_argument('--task')
+    x.add_argument('--job')
+    x.add_argument('--evidence-file')
+    x.add_argument('--writer-stopped',action='store_true')
     return p
 
 
@@ -127,6 +134,15 @@ def run(args):
     args.config = str(Path(args.config).expanduser().resolve())
     args.state = str(Path(args.state).expanduser().resolve())
     config = load(args.config)
+    if args.command == 'auto-context':
+        from . import context_handoff as context
+        if args.action == 'serve':return context.serve(args.config,args.state,args.once)
+        if args.action == 'status':return {'jobs':context.jobs(args.state),'targets':context.targets(config,args.state)}
+        if args.action == 'register':return context.register(config,args.state)
+        if args.action == 'enroll':return context.enroll(config,args.state,args.task)
+        if args.action == 'checkpoint':return context.checkpoint(args.config,args.state,args.job,args.evidence_file,args.writer_stopped)
+        target=next(t for t in context.targets(config,args.state) if t['id']==args.task)
+        return context.request(config,args.state,target,None,manual=True)
     if args.command=='dashboard':
         from .dashboard import run as dashboard
         return dashboard(args,config)
@@ -220,6 +236,9 @@ def run(args):
                 require_managed()
             elif os.environ.get('HERDR_ENV') != '1':
                 raise KitError('dispatch must run inside Herdr')
+            if config.get('runtime_backend') == 'core':
+                from .context_handoff import ensure
+                ensure(args.config,args.state)
             if args.terminal and (config.get('runtime_backend', 'tui') != 'core'
                     or task['role'] != 'leader' or task.get('work_id')
                     or task.get('classification', {}).get('kind') == 'design'):
@@ -309,6 +328,12 @@ def run(args):
                            '\nRead only the relevant approved contract sections. Keep changes inside approved paths and preserve result, failure, ownership and lifetime contracts. Add files/classes only for a concrete responsibility boundary. Report semantic changes for user approval; never approve your own design. Report milestones through work record with real evidence. Avoid status-only model requests, full-history copies and repeated unchanged reads.' if work else '')+
                           ('\nPLANNING ONLY: product source is read-only. Write design artifacts only in the private working directory. Compare alternatives and failure conditions; ask the user for consequential contract choices. Never implement or approve the product design.' if designing else '')+
                           ('\nAfter processing, park this leader with the same CLI: park '+args.task+' --owner '+owner if task['role'] == 'leader' else ''))
+                continuation=task.get('checkpoint',{}).get('context_continuation')
+                if continuation:
+                    prompt += ('\nAUTOMATIC CONTEXT CONTINUATION: Use checkpoint.next and pending_approvals; never infer new approval. '
+                               'Historical provider/account/onboarding wording in goal does not override this dispatched identity. '
+                               + ('The previous leader was ready: restore its notes, do not resume product work, then park.'
+                                  if continuation['was_ready'] else 'Continue only the remaining approved work after successful receipt.'))
                 if provider=='codex':
                     from .receipt import prompt as host_receipt_prompt
                     host_receipt_prompt(runtime,store,args.config,store.get(args.task),owner,prompt)
@@ -368,7 +393,10 @@ def run(args):
                 raise ValueError('running process profile does not match dispatch')
             if task['provider']=='codex' and task.get('runtime',{}).get('receipt_protocol')=='host-fresh-v1':
                 from .receipt import wait_for_confirmation
-                return wait_for_confirmation(store,args.task,args.owner,binding(pr))
+                result=wait_for_confirmation(store,args.task,args.owner,binding(pr))
+                from .context_handoff import maybe_register
+                maybe_register(config,args.state)
+                return result
             providers.identity(task['provider'], pr)
             return store.receipt(args.task, args.owner)
         evidence = json.loads(Path(args.evidence_file).read_text())

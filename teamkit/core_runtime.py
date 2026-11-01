@@ -155,6 +155,7 @@ class CoreRuntime:
         if not isinstance(address, str) or not ADDRESS.fullmatch(address):
             raise RuntimeError('Core terminal address unavailable; inspect before retry')
         detail = {'backend':'core', 'name':name, 'terminal':address, 'pane':address,
+                  'session_cwd':task['root'],
                   'managed_workspace':False, 'ephemeral':task['role'] != 'leader'
                   or task.get('classification', {}).get('kind') == 'design'}
         if on_created:

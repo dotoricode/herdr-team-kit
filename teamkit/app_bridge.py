@@ -87,6 +87,10 @@ def view(config_path, state, binding_path):
                       'ledger_state':bound['state'] if bound else '새 요청 대기 · 수신 확인 전',
                       'binding_status':'GUI 작업 기록 연결됨' if bound else '앱 대화 확인 · 작업 소유권 미등록',
                       'reason':error or ('' if bound else 'TUI 작업·소유권을 가져오지 않습니다.')})
+    from .context_handoff import summary as context_summary
+    context_status=context_summary(config,state)
+    for team in teams:
+        team['context_handoff']=next((j for j in context_status['active'] if j['terminal']==team['terminal']),None)
     rows, holds = inventory(linked.get('inventory'))
     feedback_error=''
     try:decorate_feedback(config_path,state,binding_path,rows,value['rows'])
@@ -119,7 +123,7 @@ def view(config_path, state, binding_path):
     from .app_coordinator import status as coordinator_status
     return {'observed_at':time.time(), 'teams':teams, 'accounts':value['accounts'],
             'works':value['rows'], 'inventory':rows, 'holds':holds,
-            'actions':actions,'feedback_error':feedback_error,
+            'actions':actions,'feedback_error':feedback_error,'context_handoff':context_status,
             'usage_refreshing':refresh.get('phase') in ('queued','running'),
             'usage_message':refresh.get('message',''),
             'actions_enabled':linked.get('actions_enabled') is True and not error,

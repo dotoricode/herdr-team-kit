@@ -41,6 +41,10 @@ def load(path):
         raise ValueError('quota TTL must be 1..300 seconds')
     value['quota_ttl_seconds'] = ttl
     account_order(value, time.time())
+    from .context_handoff import settings as context_settings
+    if context_settings(value)['enabled']:
+        if value.get('runtime_backend') != 'core' or not isinstance(value.get('context_bindings'), str) or not Path(value['context_bindings']).is_absolute():
+            raise ValueError('enabled context_handoff requires core and absolute context_bindings')
     if value.get('runtime_backend', 'tui') not in ('tui', 'core'):
         raise ValueError('runtime_backend must be tui or core')
     if type(value.get('require_design_approval',False)) is not bool:

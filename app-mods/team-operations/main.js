@@ -70,7 +70,8 @@ const PRESENCE_TITLES = {
   done: ["답변을 남겼어요", "새 답변 도착했어요", "대화에 답변 두고 왔어요", "답변 확인해 주세요"],
   idle: ["다음 업무 대기", "다음 일 받을 준비됐어요", "다음 타자 주세요", "부르면 바로 여기요", "새 요청 기다리는 중", "준비됐어요, 말씀하세요"]
 };
-function teamPresence(status, taskState, teamId = "", observedAt = 0) {
+function teamPresence(status, taskState, teamId = "", observedAt = 0, handoff = null) {
+  if (handoff) return { title: handoff.title, detail: handoff.detail };
   const titles = PRESENCE_TITLES[status];
   const offset = Array.from(String(teamId)).reduce((value, char) => (value * 31 + char.charCodeAt(0)) >>> 0, 0);
   const slot = Number.isFinite(observedAt) ? Math.floor(observedAt / 45) : 0;
@@ -496,7 +497,7 @@ export default class TeamOperations extends View {
       const terminal = liveTerminals.find(x => x.address === team.terminal);
       // Core done is a turn result; agents().status also tracks whether this screen saw it.
       const raw = team.app_state ?? terminal?.status ?? null;
-      const status = agent?.status ?? (raw === "done" ? "unknown" : raw);
+      const status = team.context_handoff?.status ?? agent?.status ?? (raw === "done" ? "unknown" : raw);
       return { agent, terminal, status, present: Boolean(team.terminal && (agent || terminal)) };
     };
     const appStates = ["blocked", "working", "done", "idle"];
@@ -524,7 +525,7 @@ export default class TeamOperations extends View {
               run("agent.focus", { terminal: team.terminal });
             })
             .child(div().whitespace_nowrap().font_semibold().text_size(14).child(display(team.label)))
-            .child(div().whitespace_nowrap().text_size(11).text_color(t.muted).child(teamPresence(status, team.ledger_state, team.id, data?.observed_at).title))))
+            .child(div().whitespace_nowrap().text_size(11).text_color(t.muted).child(teamPresence(status, team.ledger_state, team.id, data?.observed_at, team.context_handoff).title))))
           .when(matches.length === 0, el => el.child(div().p(10).text_size(12).text_color(t.muted).child("해당 상태의 팀장이 없습니다."))));
       return Popover.new(`status-popover-${status}`).open(open).anchor("top_left").overlay_closable(true)
         .on_open_change((next, cx) => this.setStatusOpen(status, next, cx))
@@ -536,10 +537,10 @@ export default class TeamOperations extends View {
     const summary = `업무 중 ${appCounts.working} · 확인 필요 ${appCounts.blocked}`;
     const coordinator = data?.coordinator;
     const teamCard = team => {
-      const live = liveFor(team), status = live.status, presence = teamPresence(status, team.ledger_state, team.id, data?.observed_at);
-      const activate = cx => run("agent.focus", { terminal: team.terminal });
+      const live = liveFor(team), status = live.status, presence = teamPresence(status, team.ledger_state, team.id, data?.observed_at, team.context_handoff);
+      const activate = cx => run("agent.focus", { terminal: team.context_handoff?.new_terminal ?? team.terminal });
       return v_flex().id(`rail-${team.id}`).flex_1().min_w(210).h(OVERVIEW.card).gap(3).p(8).rounded(7).hover(s => s.bg(t.raised))
-        .when(live.present, el => el.cursor_pointer().on_click((_e, cx) => activate(cx)))
+        .when(live.present || Boolean(team.context_handoff?.new_terminal), el => el.cursor_pointer().on_click((_e, cx) => activate(cx)))
         .bg(t.surface)
         .child(h_flex().h(28).flex_none().gap(6).items_center()
           .child(div().h(28).line_height("28px").truncate().font_semibold().text_size(19).child(display(team.label))))
@@ -566,6 +567,7 @@ export default class TeamOperations extends View {
       .child(h_flex().h(32).flex_none().items_center().gap(10)
         .child(div().font_semibold().text_size(16).child("팀 운영"))
         .child(div().flex_1().text_size(12).text_color(t.muted).child(summary))
+        .when(Boolean(data?.context_handoff?.enabled), el => el.child(badge(data.context_handoff.label, data.context_handoff.healthy ? t.muted : t.blocked)))
         .child(coordinatorButton)
         .child(button("open-dashboard", "전체 현황", () => run("tab.select", { id: this.config?.dashboard_tab }), !this.config?.dashboard_tab).text_size(12)))
       .when(Boolean(this.coordinatorMessage), el => el.child(div().h(16).flex_none().line_height("16px").text_size(10).text_color(/⚠|실패|오류/i.test(this.coordinatorMessage) ? t.blocked : t.muted).truncate().child(this.coordinatorMessage)))

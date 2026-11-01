@@ -179,6 +179,11 @@ def render(args):
     status = 'pending'
     try:
         config = load(args.config)
+        try:
+            from .context_handoff import capture_claude
+            capture_claude(config, args.state, args.account, json.loads(payload))
+        except Exception:
+            pass  # Context collection cannot replace the person's status display.
         result = collect(config, args.state, args.account, json.loads(payload))
         if eligible(result.get('quota'), time.time(), config['quota_ttl_seconds']):
             status = 'ready'

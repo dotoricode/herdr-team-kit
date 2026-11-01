@@ -46,16 +46,17 @@ class PolicyTests(unittest.TestCase):
                              'seven_day': {'used_percentage': 51, 'resets_at': NOW+99}}}
         x = {'rateLimits': {'primary': {'usedPercent': 42, 'windowDurationMins': 300, 'resetsAt': NOW+9},
                             'secondary': {'usedPercent': 51, 'windowDurationMins': 10080, 'resetsAt': NOW+99}}}
-        self.assertEqual(normalize_quota('claude', c, NOW), normalize_quota('codex', x, NOW))
+        self.assertEqual(dict(normalize_quota('claude', c, NOW), source='codex-native-quota'),
+                         normalize_quota('codex', x, NOW))
         x['rateLimits']['primary']['windowDurationMins'] = 15
         self.assertNotIn('five_hour', normalize_quota('codex', x, NOW))
 
     def test_context_unknown_and_safe_boundary(self):
         self.assertEqual(context_action(None, True), 'unknown')
-        self.assertEqual(context_action(60, False), 'prepare')
-        self.assertEqual(context_action(75, False), 'prepare')
-        self.assertEqual(context_action(70, True), 'handoff')
-        self.assertEqual(context_action(59, True), 'keep')
+        self.assertEqual(context_action(80, False), 'prepare')
+        self.assertEqual(context_action(90, False), 'prepare')
+        self.assertEqual(context_action(90, True), 'handoff')
+        self.assertEqual(context_action(79, True), 'keep')
 
 
 class StoreTests(unittest.TestCase):

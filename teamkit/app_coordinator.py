@@ -81,9 +81,13 @@ def status(state, linked, terminals=None, unavailable=False):
                 'reason':'core 연결 또는 총괄 소유권을 확인하지 못했습니다. 종료로 추정하지 않습니다.'}
 
 
-def start(config_path, state, binding_path, confirmed):
+def start(config_path, state, binding_path, confirmed, context_job=None):
     if not confirmed:raise ValueError('GUI 기록에서 총괄을 다시 여는 확인이 필요합니다.')
     state=Path(state).resolve()
+    from .context_handoff import jobs as context_jobs, FINISHED
+    pending=[j for j in context_jobs(state) if j['target']['kind']=='coordinator' and j['phase'] not in FINISHED]
+    if pending and not any(j['id']==context_job and j['phase']=='dispatching' for j in pending):
+        return {'message':'총괄 자동 인계를 진행 중입니다. 기존 요청에서 이어갑니다.'}
     lock=os.open(state.with_name('coordinator.lock'),os.O_CREAT|os.O_WRONLY|os.O_NOFOLLOW,0o600)
     try:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -103,6 +107,8 @@ def start(config_path, state, binding_path, confirmed):
         if previous:save(folder/'previous.json',previous)
         record={'phase':'recovering','nonce':nonce,'at':time.time(),
                 'reason':'GUI 체크포인트에서 새 총괄을 준비하고 있습니다. 제품 업무는 자동 재개하지 않습니다.'}
+        if previous.get('context_checkpoint'):
+            record['context_checkpoint']=previous['context_checkpoint']
         save(record_path(state),record)
         try:
             child=_call('run','--json','--bg','--no-parent','--no-notify','--name','gui-recover-'+nonce[:12],
@@ -132,6 +138,9 @@ def run_job(request):
         if hashlib.sha256(Path(packet['config']).read_bytes()).hexdigest()!=packet['config_digest']:
             raise ValueError('복구할 계정·실행 설정이 바뀌었습니다.')
         config=load(packet['config'])
+        from .context_handoff import ensure, settings as context_settings
+        if context_settings(config)['enabled']:
+            ensure(packet['config'],state)
         policy=config.get('coordinator')
         if config.get('runtime_backend')!='core' or not isinstance(policy,dict) or policy.get('provider')!='codex':
             raise ValueError('GUI 총괄의 core·Codex 정책을 먼저 설정하세요.')
@@ -188,6 +197,8 @@ def run_job(request):
         runtime={'backend':'core','name':name,'terminal':record['terminal'],'native_pid':pid}
         actor=CoreRuntime({'id':'GUI-COORDINATOR','owner':packet['nonce'],'provider':'codex','runtime':runtime})
         actor._native(name,ready=True)
+        record['native_pid']=pid
+        save(record_path(state),record)
         for command,values in [('space.rename',{'id':sp,'name':'GUI 총괄'}),('tab.rename',{'id':tab,'name':'총괄'})]:
             subprocess.run(['herdr-app','do',command,json.dumps(values)],capture_output=True,text=True,timeout=5)
         # Read the checkpoint; this is initialization, never a product resume.
@@ -196,6 +207,13 @@ def run_job(request):
                 '제품 코드 조사/수정·작업 재개·다른 agent 생성·기억 전체 조회·외부 게시를 하지 마세요. '+
                 'GUI 기록에서 이어갈 준비가 됐는지와 미완료 항목을 짧게 보고하고 사용자 요청을 기다리세요. '+
                 '이것은 새 총괄 대화이며 과거 대화 전문 복원이나 제품 구현 승인이 아닙니다.')
+        if record.get('context_checkpoint'):
+            prompt += (' 자동 컨텍스트 인계 기록 '+record['context_checkpoint']+
+                       '의 checkpoint만 추가로 읽고 미완료·승인 대기를 보존하세요. 제품 업무를 자동 재개하지 마세요.')
+        from .context_handoff import settings as context_settings, cli as context_cli
+        if context_settings(config)['enabled']:
+            import shlex
+            prompt += ' 먼저 실제 세션 식별자를 등록하세요: '+shlex.join(context_cli(packet['config'],state,'auto-context','register'))
         actor.prompt(name,prompt)
         record.update(phase='ready',native_pid=pid,reason='GUI 체크포인트에서 새 총괄 대화를 열었습니다. 제품 업무는 자동 재개하지 않았습니다.')
         save(record_path(state),record);save(Path(request).with_name('result.json'),{'terminal':record['terminal'],'phase':'ready'})

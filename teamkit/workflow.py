@@ -7,6 +7,7 @@ import re
 import sqlite3
 import subprocess
 import time
+from contextlib import closing
 
 from .checkpoint import fingerprint, revision_guard
 from .store import ACTIVE
@@ -276,7 +277,7 @@ def snapshot(state):
     """Read-only: a status refresh never creates a DB or starts a model."""
     path=Path(state).expanduser().resolve()
     if not path.is_file():return {'works':[],'tasks':[],'quotas':{},'monitor':None,'event_sequence':0,'observed_at':time.time()}
-    with sqlite3.connect(path.as_uri()+'?mode=ro',uri=True) as db:
+    with closing(sqlite3.connect(path.as_uri()+'?mode=ro',uri=True)) as db:
         db.execute('BEGIN')
         tasks=[json.loads(r[0]) for r in db.execute('SELECT body FROM tasks')]
         exists=db.execute("SELECT 1 FROM sqlite_master WHERE name='work_items'").fetchone()
