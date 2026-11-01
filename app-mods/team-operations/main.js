@@ -257,9 +257,9 @@ export default class TeamOperations extends View {
         .when(live.present, el => el.cursor_pointer().on_click((_e, cx) => activate(cx)))
         .bg(t.surface)
         .child(h_flex().h(28).flex_none().gap(6).items_center()
-          .child(div().w(10).line_height("28px").flex_none().text_color(statusColor(status, t)).when(status === "working" && live.present && !this.error && !data?.native_error, el => el.frames(["●", "◉", "●", "◉"], 180)).child(status === "working" ? "●" : "·"))
           .child(div().h(28).line_height("28px").truncate().font_semibold().text_size(19).child(display(team.label))))
-        .child(h_flex().h(20).flex_none().child(badge(status === "done" ? "새 응답 · 확인 전" : statusText(status), statusColor(status, t))))
+        .child(h_flex().h(20).flex_none().child(badge(status === "done" ? "새 응답 · 확인 전" : statusText(status), statusColor(status, t))
+          .when(status === "working" && live.present && !this.error && !data?.native_error, el => el.frames(["실행 중 ◐", "실행 중 ◓", "실행 중 ◑", "실행 중 ◒"], 180))))
         .child(div().h(20).flex_none().line_height("20px").truncate().text_size(12).text_color(t.muted).child(`작업 상태 · ${taskStateText(team.ledger_state)}`));
     };
     const coordinatorStateText = { live: "연결됨", missing: "총괄 종료", recovering: "복구 중", unknown: "상태 미확인" }[coordinator?.state] ?? "상태 미확인";
