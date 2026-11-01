@@ -95,6 +95,14 @@ def collect_and_save(state,config_path,account,pr):
     save_quotas(state,load(config_path),result)
 
 
+def collect_gui(state,config_path):
+    from .app_usage import collect,UsageUnavailable
+    try:return collect(load(config_path),state)
+    except UsageUnavailable as error:
+        if str(error)!='busy':raise
+        return {'busy':True}
+
+
 def run(args,config):
     if not Path(args.state).is_file():raise ValueError('monitor requires an existing ledger')
     if not 1<=args.interval<=60 or not 15<=args.quota_interval<=300:
@@ -115,9 +123,10 @@ def run(args,config):
                 config=load(args.config)
                 for account,future in list(futures.items()):
                     if future.done():future.result();del futures[account]
-                for account,pr in config['profiles'].get('codex',{}).items():
+                profiles={'gui':None} if config.get('runtime_backend')=='core' else config['profiles'].get('codex',{})
+                for account,pr in profiles.items():
                     if account not in futures and time.monotonic()>=next_quota.get(account,0):
-                        futures[account]=pool.submit(collect_and_save,args.state,args.config,account,pr)
+                        futures[account]=pool.submit(collect_gui,args.state,args.config) if account=='gui' and config.get('runtime_backend')=='core' else pool.submit(collect_and_save,args.state,args.config,account,pr)
                         next_quota[account]=time.monotonic()+args.quota_interval
                 observed_at=time.time()
                 try:agents=read_native(config);error=''

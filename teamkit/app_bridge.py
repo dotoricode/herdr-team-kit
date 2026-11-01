@@ -87,6 +87,19 @@ def view(config_path, state, binding_path):
                       'binding_status':'GUI 장부 연결됨' if bound else '앱 대화 확인 · 작업 소유권 미등록',
                       'reason':error or ('' if bound else 'TUI 작업·소유권을 가져오지 않습니다.')})
     rows, holds = inventory(linked.get('inventory'))
+    from .app_usage import read_coverage
+    coverage=read_coverage(config,state).get('accounts',{})
+    for account in value['accounts']:
+        measured=coverage.get(account['provider']+'/'+account['account'])
+        if not measured:continue
+        account['coverage']=measured.get('status_label','확인 필요')+(' · 표시 전용' if measured.get('display_only') else '')
+        missing=[w.get('reason_label','제공 안 함') for w in measured.get('windows',{}).values() if w.get('status')=='not_provided']
+        account['reason']=' '.join([measured.get('reason_label',''),*missing]).strip()
+        account['action']=measured.get('action',{}).get('label','사용량 다시 확인')
+        account['windows']=measured.get('windows',{})
+    refresh_record=Path(state).resolve().with_name('usage-refresh.json')
+    refresh={}
+    if refresh_record.exists():refresh=json.loads(refresh_record.read_text())
     actions=[]
     action_root=Path(state).resolve().parent/'app-actions'
     if action_root.is_dir():
@@ -99,11 +112,15 @@ def view(config_path, state, binding_path):
                 if (folder/filename).exists():
                     status=label;message=json.loads((folder/filename).read_text()).get('message','')
             actions.append({'id':folder.name,'task':request['task'],'status':status,'message':message})
+    from .app_coordinator import status as coordinator_status
     return {'observed_at':time.time(), 'teams':teams, 'accounts':value['accounts'],
             'works':value['rows'], 'inventory':rows, 'holds':holds,
             'actions':actions,
+            'usage_refreshing':refresh.get('phase') in ('queued','running'),
+            'usage_message':refresh.get('message',''),
             'actions_enabled':linked.get('actions_enabled') is True and not error,
-            'native_error':error, 'independent':True}
+            'native_error':error, 'independent':True,
+            'coordinator':coordinator_status(state,linked,list(native.values()),bool(error))}
 
 
 def document_view(config_path, state, ident):
@@ -233,7 +250,7 @@ def resume_job(path):
             raise ValueError('재개 소유권이 바뀌었습니다.')
         from .__main__ import parser, run
         message = path.parent/'message.txt'
-        message.write_text('사용자가 확인한 동일 설계의 허용 범위에서 작업을 이어가세요. 새 계약 변경이나 구현 승인을 추정하지 마세요. 기존 owner와 체크포인트를 유지하세요.')
+        message.write_text('GUI 재개 요청입니다. 원래 배정된 목표의 후속 동작을 이어가세요. 기존 수신이 확인된 같은 owner이므로 receipt를 다시 호출하지 않습니다. 새 계약 변경이나 제품 구현 승인을 추정하지 말고 기존 체크포인트를 유지하세요.')
         message.chmod(0o600)
         command = ['dispatch',packet['task']] if packet['owner'] == '-' else ['tell',packet['task'],'--message-file',str(message),'--expected-owner',packet['owner']]
         command += ['--expected-attempt',str(packet['attempt'])]
@@ -244,12 +261,73 @@ def resume_job(path):
         raise
 
 
+def start_usage_refresh(config_path,state,binding_path):
+    config=load(config_path);bindings(binding_path,config)
+    state=Path(state).resolve();target=state.with_name('usage-refresh.json')
+    lock=os.open(state.with_name('usage-refresh.lock'),os.O_CREAT|os.O_WRONLY|os.O_NOFOLLOW,0o600)
+    try:
+        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        if target.exists() and json.loads(target.read_text()).get('phase') in ('queued','running'):
+            return {'message':'사용량을 이미 확인 중입니다. 완료 상태를 기다려 주세요.'}
+        nonce=uuid.uuid4().hex;jobs=state.parent/'usage-jobs';jobs.mkdir(mode=0o700,exist_ok=True)
+        folder=jobs/nonce;folder.mkdir(mode=0o700)
+        request=folder/'request.json'
+        private_json(request,{'config':str(Path(config_path).resolve()),'state':str(state),'nonce':nonce})
+        from .app_coordinator import save
+        record={'nonce':nonce,'phase':'queued','at':time.time(),'message':'모델 호출 없이 구독 사용량을 확인하고 있습니다.'}
+        save(target,record)
+        try:
+            value=subprocess.run(['hc','run','--json','--bg','--no-parent','--no-notify','--name','gui-usage-'+nonce[:12],
+                                  '--',sys.executable,str(Path(__file__).resolve().parent.parent/'teamkit_app.py'),
+                                  'usage-job','--request',str(request)],capture_output=True,text=True,timeout=10,check=True)
+            result=json.loads(value.stdout)
+            if not re.fullmatch(r't[0-9a-z]+',result.get('address','')):raise ValueError('사용량 controller를 확인하지 못했습니다.')
+            record['controller']=result['address'];save(target,record)
+        except Exception:
+            record.update(phase='uncertain',message='사용량 조회 시작 결과를 확인해야 합니다. 중복 시작하지 않았습니다.')
+            save(target,record);raise
+        return {'message':'네 계정 사용량 갱신을 시작했습니다. Claude는 공식 /usage 관측만 표시합니다.'}
+    except BlockingIOError as error:
+        raise ValueError('사용량 갱신 요청을 기록 중입니다.') from error
+    finally:os.close(lock)
+
+
+def usage_job(request):
+    packet=json.loads(Path(request).read_text());state=Path(packet['state']);config=load(packet['config'])
+    from .app_usage import collect,refresh_native_usage,UsageUnavailable
+    from .app_coordinator import save
+    target=state.with_name('usage-refresh.json')
+    lock=os.open(state.with_name('usage-refresh.lock'),os.O_CREAT|os.O_WRONLY|os.O_NOFOLLOW,0o600)
+    try:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        record=json.loads(target.read_text())
+        if record.get('nonce')!=packet['nonce'] or record.get('phase')!='queued':raise ValueError('사용량 갱신 요청이 바뀌었습니다.')
+        record['phase']='running';save(target,record)
+    finally:os.close(lock)
+    try:
+        observations=[]
+        for account in config['profiles'].get('claude',{}):
+            try:refresh_native_usage(config,state,account)
+            except Exception as error:observations.append(str(error))
+        for retry in range(40):
+            try:
+                result=collect(config,state);break
+            except UsageUnavailable as error:
+                if str(error)!='busy' or retry==39:raise
+                time.sleep(.25)
+        record.update(phase='done',message='구독 사용량 조회를 마쳤습니다.' if not observations else '일부 CLI 관측을 확인하지 못했습니다. 계정별 사유와 관측 시각을 확인하세요.',at=time.time())
+        save(target,record);private_json(Path(request).with_name('result.json'),{'model_requests':0,'observation_errors':len(observations),'coverage':result})
+    except Exception as error:
+        record.update(phase='failed',message='사용량 갱신 실패: '+str(error),at=time.time());save(target,record)
+        private_json(Path(request).with_name('error.json'),{'message':str(error)});raise
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', default=str(Path.home()/'.config/herdr-team-kit-app/config.json'))
     parser.add_argument('--state', default=str(Path.home()/'.local/state/herdr-team-kit-app/state.sqlite'))
     parser.add_argument('--bindings', default=str(Path.home()/'.config/herdr-team-kit-app/bindings.json'))
-    parser.add_argument('action', choices=('view','document','approve','resume','resume-job'))
+    parser.add_argument('action', choices=('view','document','approve','resume','resume-job','recover-coordinator','coordinator-job','refresh-usage','usage-job'))
     parser.add_argument('--work'); parser.add_argument('--revision', type=int); parser.add_argument('--digest')
     parser.add_argument('--task'); parser.add_argument('--owner'); parser.add_argument('--request')
     parser.add_argument('--attempt',type=int)
@@ -260,6 +338,15 @@ def main():
         elif args.action == 'document': result = document_view(args.config, args.state, args.work)
         elif args.action == 'approve': result = approve(args.config, args.state, args.bindings, args.work, args.revision, args.digest, args.confirmed)
         elif args.action == 'resume': result = resume(args.config, args.state, args.bindings, args.work, args.revision, args.digest, args.task, args.owner, args.confirmed, args.attempt)
+        elif args.action == 'recover-coordinator':
+            config=load(args.config);bindings(args.bindings,config)
+            from .app_coordinator import start
+            result=start(args.config,args.state,args.bindings,args.confirmed)
+        elif args.action == 'coordinator-job':
+            from .app_coordinator import run_job
+            run_job(args.request);result={'message':'총괄 복구 확인을 마쳤습니다.'}
+        elif args.action == 'refresh-usage':result=start_usage_refresh(args.config,args.state,args.bindings)
+        elif args.action == 'usage-job':usage_job(args.request);result={'message':'사용량 확인을 마쳤습니다.'}
         else: resume_job(args.request); result = {'message':'재개 확인을 마쳤습니다.'}
         print(json.dumps(result, ensure_ascii=False))
     except Exception as error:

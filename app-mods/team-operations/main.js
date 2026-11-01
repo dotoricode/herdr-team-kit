@@ -22,11 +22,11 @@ function percent(work) {
     return `미정${work.reason ? ` · ${work.reason}` : " · 승인된 진행률 없음"}`;
   const p = Math.max(0, Math.min(100, Math.round(work.percent)));
   const bars = Math.round(p / 10);
-  return `${"█".repeat(bars)}${" ".repeat(10 - bars)} ${p}% · ${work.steps_done}/${work.steps_total} 단계`;
+  return `[${"█".repeat(bars)}${" ".repeat(10 - bars)}] ${p}% · ${work.steps_done}/${work.steps_total} 단계`;
 }
-const PHASE_TEXT = { awaiting_approval: "설계 확인 필요", planning: "설계 중", approved: "승인됨", executing: "진행 중", blocked: "대기 중", complete: "완료 보고됨" };
+const PHASE_TEXT = { awaiting_approval: "🟨 설계 확인 필요", planning: "▶ 설계 중", approved: "✓ 승인됨", executing: "▶ 진행 중", blocked: "⚠ 대기 중", complete: "✓ 완료 보고됨" };
 function phaseText(phase) { return PHASE_TEXT[phase] ?? display(phase); }
-const STATUS_TEXT = { working: "실행 중", blocked: "사용자 답변 필요", done: "완료 보고됨", idle: "대기 중" };
+const STATUS_TEXT = { working: "실행 중", running: "실행 중", blocked: "사용자 답변 필요", done: "완료 보고됨", idle: "대기 중", pending: "대기 중", failed: "실패", error: "오류", success: "성공", healthy: "정상", not_measured: "측정 전", not_available: "미제공", unavailable: "미제공", missing: "미확인", current: "최신 기록", stale: "지난 기록" };
 function statusText(status) { return STATUS_TEXT[status] ?? (status == null ? "미확인" : display(status)); }
 function statusColor(status, t) { return status === "working" ? t.working : status === "blocked" ? t.blocked : status === "done" ? t.done : status === "idle" ? t.idle : t.unknown; }
 
@@ -36,6 +36,8 @@ export default class TeamOperations extends View {
     this.data = null; this.error = null; this.busy = false; this.seq = 0;
     this.expanded = new Set(); this.doc = null; this.docBusy = false;
     this.confirm = null; this.actionBusy = false; this.message = null;
+    this.showCompleted = false; this.showAllInventory = false; this.coordinatorConfirm = false; this.coordinatorBusy = false; this.coordinatorMessage = null;
+    this.usageBusy = false; this.usageMessage = null;
     this.config = null; this.configError = null;
     cx.spawn(async cx => {
       try {
@@ -122,6 +124,33 @@ export default class TeamOperations extends View {
 
   closeDocument(cx) { this.doc = null; this.docEditor?.release(); this.docEditor = null; this.confirm = null; this.message = null; cx.notify(); }
 
+  async recoverCoordinator(cx) {
+    if (this.coordinatorBusy || this.data?.coordinator?.state !== "missing" || !this.data?.coordinator?.can_recover) return;
+    this.coordinatorBusy = true; this.coordinatorConfirm = false; this.coordinatorMessage = null; cx.notify();
+    let accepted = false;
+    try {
+      const result = await this.args("recover-coordinator", ["--confirmed"]);
+      if (result.code !== 0) throw new Error(result.stderr || `총괄 복구 요청이 실패했습니다 (종료 코드 ${result.code}).`);
+      const response = JSON.parse(result.stdout);
+      accepted = true;
+      if (this.data) this.data = { ...this.data, coordinator: { ...this.data.coordinator, state: "recovering", terminal: null } };
+      this.coordinatorMessage = String(response.message ?? "총괄 복구 요청을 마쳤습니다.");
+    } catch (e) { this.coordinatorMessage = `⚠ ${String(e)}`; }
+    finally { await this.refresh(cx); this.coordinatorBusy = false; if (accepted && this.data?.coordinator?.state === "missing") this.data = { ...this.data, coordinator: { ...this.data.coordinator, state: "recovering", terminal: null } }; cx.notify(); }
+  }
+
+  async refreshUsage(cx) {
+    if (this.usageBusy) return;
+    this.usageBusy = true; this.usageMessage = null; cx.notify();
+    try {
+      const result = await this.args("refresh-usage", []);
+      if (result.code !== 0) throw new Error(result.stderr || `사용량 갱신 요청이 실패했습니다 (종료 코드 ${result.code}).`);
+      const response = JSON.parse(result.stdout);
+      this.usageMessage = String(response.message ?? "사용량 갱신 요청을 마쳤습니다.");
+    } catch (e) { this.usageMessage = `⚠ ${String(e)}`; }
+    finally { await this.refresh(cx); this.usageBusy = false; cx.notify(); }
+  }
+
   async close(_cx) { this.docEditor?.release(); this.docEditor = null; this.confirm = null; }
 
   begin(kind, value, cx) {
@@ -164,34 +193,40 @@ export default class TeamOperations extends View {
     const waiting = [...teams.map(x => x.reason), ...works.map(x => x.reason), ...inventory.filter(x => !String(x.status ?? "").startsWith("완료")).map(x => x.condition), ...(data?.holds ?? []).map(x => x.reason)]
       .filter(Boolean).map(display);
     const summary = `실행 ${appCounts.working} · 사용자 답변 필요 ${appCounts.blocked}`;
+    const coordinator = data?.coordinator;
     const teamCard = team => {
       const live = liveFor(team), status = live.status;
       const activate = cx => run("agent.focus", { terminal: team.terminal });
       return v_flex().id(`rail-${team.id}`).flex_1().min_w(180).h(82).gap(4).p(8).rounded(7).hover(s => s.bg(t.raised))
         .when(live.present, el => el.cursor_pointer().on_click((_e, cx) => activate(cx)))
         .bg(t.surface)
-        .child(div().truncate().font_semibold().child(display(team.label)))
+        .child(div().truncate().font_semibold().text_size(19).child(display(team.label)))
         .child(div().truncate().text_size(12).text_color(statusColor(status, t)).child(statusText(status)))
-        .child(div().truncate().text_size(11).text_color(t.muted).child(`장부 · ${display(team.ledger_state)}`));
+        .child(div().truncate().text_size(12).text_color(t.muted).child(`장부 · ${display(team.ledger_state)}`));
     };
+    const coordinatorStateText = { live: "연결됨", missing: "총괄 종료", recovering: "복구 중", unknown: "상태 미확인" }[coordinator?.state] ?? "상태 미확인";
+    const coordinatorButton = coordinator?.state === "live" && coordinator.terminal
+      ? button("open-coordinator", display(coordinator.label ?? "총괄"), () => run("agent.focus", { terminal: coordinator.terminal })).text_size(12)
+      : coordinator?.state === "missing" && coordinator.can_recover
+        ? button("open-coordinator-recovery", this.coordinatorBusy ? "총괄 복구 중" : "총괄 복구", cx => { if (!this.coordinatorBusy) { this.coordinatorConfirm = true; this.coordinatorMessage = null; cx.notify(); } }, this.coordinatorBusy).text_size(12)
+        : div().text_size(12).text_color(coordinator?.state === "recovering" ? t.working : t.muted).child(`총괄 · ${display(coordinator?.reason ?? coordinatorStateText)}`);
+    const coordinatorConfirm = v_flex().h(82).flex_none().justify_center().gap(6).px(10).rounded(7).bg(t.surface)
+      .child(div().text_size(12).child("닫힌 총괄을 GUI 기록에서 다시 엽니다. 제품 업무 자동 재개 없음"))
+      .child(h_flex().gap(6).children([
+        button("confirm-coordinator-recovery", this.coordinatorBusy ? "복구 중" : "복구", cx => cx.spawn(async cx => this.recoverCoordinator(cx)), this.coordinatorBusy || !coordinator?.can_recover).text_size(12),
+        button("cancel-coordinator-recovery", "취소", cx => { this.coordinatorConfirm = false; cx.notify(); }, this.coordinatorBusy).text_size(12)
+      ]));
     const overview = (getModProps()?.role ?? this.viewProps.role) === "overview";
     if (overview) return v_flex().id("team-operations-overview").w_full().h(146).flex_none().gap(4).px(8).py(5).bg(t.background).text_color(t.foreground)
       .font_family(this.config?.overview_font || settings().font_family || "monospace").text_size(13)
-      .child(h_flex().h(34).flex_none().items_center().gap(10)
-        .child(div().font_semibold().child("팀 운영"))
+      .child(h_flex().h(32).flex_none().items_center().gap(10)
+        .child(div().font_semibold().text_size(16).child("팀 운영"))
         .child(div().flex_1().text_size(12).text_color(t.muted).child(summary))
-        .child(button("open-coordinator", "총괄", () => run("agent.focus", { terminal: this.config?.coordinator_terminal }), !this.config?.coordinator_terminal).text_size(12))
+        .child(coordinatorButton)
         .child(button("open-dashboard", "전체 현황", () => run("tab.select", { id: this.config?.dashboard_tab }), !this.config?.dashboard_tab).text_size(12)))
-      .child(h_flex().id("team-operations-rail").w_full().h(98).min_w(0).gap(6).overflow_x_scrollbar().children(teams.map(teamCard)));
-
-    const teamCards = teams.map(team => {
-      const live = liveFor(team), status = live.status;
-      return h_flex().h(62).flex_1().min_w(0).gap(8).p(8).rounded(7).bg(t.surface)
-        .when(live.present, el => el.cursor_pointer().hover(s => s.bg(t.raised)).on_click((_e, cx) => run("agent.focus", { terminal: team.terminal })))
-        .child(v_flex().flex_1().min_w(0).gap(3).child(div().truncate().font_semibold().child(display(team.label)))
-          .child(div().truncate().text_size(11).text_color(statusColor(status, t)).child(`앱 · ${statusText(status)}`))
-          .child(div().truncate().text_size(11).text_color(t.muted).child(`장부 · ${display(team.ledger_state)}`)));
-    });
+      .when(Boolean(this.coordinatorMessage), el => el.child(div().h(14).flex_none().text_size(10).text_color(/⚠|실패|오류/i.test(this.coordinatorMessage) ? t.blocked : t.muted).truncate().child(this.coordinatorMessage)))
+      .when(this.coordinatorConfirm, el => el.child(coordinatorConfirm))
+      .when(!this.coordinatorConfirm, el => el.child(h_flex().id("team-operations-rail").w_full().h(82).min_w(0).gap(6).overflow_x_scrollbar().children(teams.map(teamCard))));
     const workRows = works.map(work => {
       const id = `work-${work.id}`, open = this.expanded.has(id);
       return v_flex().gap(4).p(8).rounded(7).bg(t.surface)
@@ -207,16 +242,28 @@ export default class TeamOperations extends View {
       const status = display(item.status), complete = typeof item.status === "string" && item.status.startsWith("완료");
       return v_flex().gap(2).p(7).rounded(7).bg(t.surface)
         .child(h_flex().gap(8).items_center().child(div().w(52).flex_none().font_semibold().child(display(item.id))).child(div().flex_1().min_w(0).truncate().child(display(item.name))).child(div().w(100).flex_none().text_color(t.muted).child(status)))
-        .when(complete, el => el.child(h_flex().gap(8).items_center().text_size(11).child(div().text_color(t.accent).child("|██████████| 100% 1/1")).child(div().text_color(t.dim).child("완료 조건 확인 · 전체 진척률 아님"))))
+        .when(complete, el => el.child(h_flex().gap(8).items_center().text_size(11).child(div().text_color(t.accent).child("|██████████| 100% 1/1")).child(div().text_color(t.dim).child(`✓ 완료 조건 확인 · 전체 진척률 아님 · ${display(item.condition)}`))))
         .when(!complete, el => el.child(div().text_size(11).text_color(t.dim).child(`대기 이유 · ${display(item.condition)}`)));
     });
     const remaining = inventory.filter(item => !(typeof item.status === "string" && item.status.startsWith("완료"))).length;
-    const accountRows = accounts.map(account => h_flex().h(28).flex_none().gap(8).items_center().px(8).rounded(6).bg(t.surface).text_size(12)
-      .child(div().w(100).flex_none().truncate().font_semibold().child(display(account.label)))
-      .child(div().w(64).flex_none().truncate().child(account.five_hour == null ? "미확인" : `${display(account.five_hour)}%`))
-      .child(div().w(64).flex_none().truncate().child(account.weekly == null ? "미확인" : `${display(account.weekly)}%`))
-      .child(div().w(80).flex_none().truncate().child(statusText(account.status)))
-      .child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(duration(account.age))));
+    const completedCount = inventory.length - remaining;
+    const currentInventoryRows = inventoryRows.filter((_, index) => !(typeof inventory[index].status === "string" && inventory[index].status.startsWith("완료")));
+    const completedInventoryRows = inventoryRows.filter((_, index) => typeof inventory[index].status === "string" && inventory[index].status.startsWith("완료"));
+    const accountRows = accounts.map(account => {
+      const key = `account-${account.provider}-${account.account}`, open = this.expanded.has(key);
+      const usage = (value, name) => value == null ? (account.windows?.[name]?.status === "not_provided" ? "미제공" : "확인 필요") : `${display(value)}%${account.windows?.[name]?.status === "stale" ? "*" : ""}`;
+      const meta = [account.coverage == null ? null : `측정 범위 · ${display(account.coverage)}`, account.reason == null ? null : `사유 · ${display(account.reason)}`, account.action == null ? null : `요청 · ${display(account.action)}`].filter(Boolean).join(" · ");
+      return v_flex().id(key).gap(2).py(2).px(8).rounded(6).bg(t.surface).cursor_pointer()
+        .on_click((_e, cx) => { open ? this.expanded.delete(key) : this.expanded.add(key); cx.notify(); })
+        .child(h_flex().h(24).flex_none().gap(8).items_center().text_size(11)
+          .child(div().w(92).flex_none().truncate().font_semibold().child(display(account.label)))
+          .child(div().w(84).flex_none().truncate().text_color(account.five_hour >= 90 ? t.blocked : t.foreground).child(`5시간 ${usage(account.five_hour, "five_hour")}`))
+          .child(div().w(84).flex_none().truncate().text_color(account.weekly >= 90 ? t.blocked : t.foreground).child(`주간 ${usage(account.weekly, "weekly")}`))
+          .child(div().flex_1().min_w(0).truncate().child(display(account.coverage ?? statusText(account.status))))
+          .child(div().w(92).flex_none().truncate().text_color(t.dim).child(duration(account.age))))
+        .when(open && Boolean(meta), el => el.child(div().text_size(10).text_color(t.muted).child(meta)))
+        .when(Boolean(this.usageMessage), el => el.child(div().text_size(10).text_color(/⚠|실패|오류/i.test(this.usageMessage) ? t.blocked : t.muted).child(this.usageMessage)));
+    });
     const doc = this.doc;
     const confirmText = this.confirm?.kind === "approve" ? `설계 v${this.confirm.revision}의 범위와 검증 기준을 확인했고 이 버전의 진행을 허락합니다` : `설계 v${this.confirm?.revision}의 범위와 검증 기준을 확인했고 선택한 작업의 재개를 허락합니다`;
     const actionRows = (data?.actions ?? []).map(action => {
@@ -230,8 +277,12 @@ export default class TeamOperations extends View {
       .child(div().flex_none().font_semibold().text_color(t.accent).child("제품 작업"))
       .when(workRows.length > 0, x => x.children(workRows))
       .when(workRows.length === 0, x => x.child(div().p(8).text_size(12).text_color(t.muted).child("등록된 GUI 제품 작업 없음 · TUI 업무는 자동으로 가져오지 않음")))
-      .child(div().pt(4).flex_none().font_semibold().text_color(t.accent).child(`전환 목록 · 전체 진행률 미정 · 남은 작업 ${remaining}건`))
-      .children(inventoryRows)
+      .when(workRows.length === 0 && remaining === 0, x => x.child(div().p(7).text_size(11).text_color(t.muted).child("현재 진행 중인 제품 작업과 구축 항목이 없습니다.")))
+      .child(h_flex().pt(4).flex_none().justify_between().items_center().gap(4)
+        .child(div().min_w(0).font_semibold().text_color(t.accent).child(`전환 목록 · 전체 진행률 미정 · 남은 작업 ${remaining}건`))
+        .when(completedCount > 0 && !this.showAllInventory, x => x.child(button("toggle-completed", `완료된 구축 항목 ${completedCount}${this.showCompleted ? " 접기" : ""}`, cx => { this.showCompleted = !this.showCompleted; cx.notify(); }).text_size(11)))
+        .child(button("toggle-inventory", this.showAllInventory ? "현재 목록" : "전체 목록", cx => { this.showAllInventory = !this.showAllInventory; cx.notify(); }).text_size(11)))
+      .children(this.showAllInventory ? inventoryRows : [...currentInventoryRows, ...(this.showCompleted ? completedInventoryRows : [])])
       .children((data?.holds ?? []).map(hold => v_flex().p(7).rounded(7).bg(t.surface).child(pair("보류", `${display(hold.id)} · ${display(hold.reason)}`))));
     const designPane = v_flex().id("design-pane").h_full().flex_1().min_w(0).min_h(0).gap(6).p(8).rounded(8).border_1().border_color(t.border).bg(t.surface)
       .child(h_flex().flex_none().items_center().justify_between().gap(8)
@@ -252,30 +303,27 @@ export default class TeamOperations extends View {
         ]))));
     const mainPanels = h_flex().id("operations-main").w_full().flex_1().min_h(0).items_stretch().gap(8)
       .child(workPanel).child(designPane);
-    const accountArea = v_flex().id("account-area").w_full().flex_none().gap(3)
-      .child(div().font_semibold().text_size(12).text_color(t.accent).child("계정 · 보조 정보"))
-      .when(accountRows.length > 0, x => x.child(h_flex().w_full().h(22).flex_none().gap(8).items_center().px(8).text_size(10).text_color(t.muted)
-        .child(div().w(100).flex_none().child("계정")).child(div().w(64).flex_none().child("5시간"))
-        .child(div().w(64).flex_none().child("주간")).child(div().w(80).flex_none().child("상태"))
-        .child(div().flex_1().min_w(0).child("경과 시간"))))
+    const accountArea = v_flex().id("account-area").w_full().max_h(150).flex_none().min_h(0).gap(3).overflow_y_scrollbar()
+      .child(h_flex().flex_none().justify_between().items_center()
+        .child(div().font_semibold().text_size(12).text_color(t.accent).child("계정 · 보조 정보"))
+        .child(button("refresh-usage", this.usageBusy || data?.usage_refreshing ? "사용량 갱신 중" : "사용량 갱신", cx => cx.spawn(async cx => this.refreshUsage(cx)), this.usageBusy || data?.usage_refreshing).text_size(11)))
+      .when(Boolean(this.usageMessage), x => x.child(div().flex_none().text_size(10).text_color(/⚠|실패|오류/i.test(this.usageMessage) ? t.blocked : t.muted).child(this.usageMessage)))
       .children(accountRows);
     return v_flex().id("team-operations").size_full().min_h(0).overflow_hidden().bg(t.background).text_color(t.foreground).text_size(13)
+      .font_family(this.config?.font_family || settings().font_family || "monospace")
       .child(h_flex().h(48).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
-        .child(div().font_semibold().text_size(15).child("GUI 운영 현황")).child(div().flex_1())
+        .child(div().font_semibold().text_size(16).child("GUI 운영 현황")).child(div().flex_1())
         .child(div().text_size(11).text_color(t.dim).child(`마지막 관찰: ${clock(data?.observed_at)}`))
         .child(button("refresh", this.busy ? "불러오는 중" : "새로고침", cx => cx.spawn(async cx => this.refresh(cx)), this.busy)))
       .when(Boolean(this.error), el => el.child(div().px(12).py(7).text_color(t.blocked).child(`갱신에 실패했습니다. 기존 자료는 이전 관찰값입니다: ${this.error}`)))
       .when(Boolean(this.configError), el => el.child(div().px(12).py(7).text_color(t.blocked).child(`로컬 backend 설정을 읽을 수 없습니다: ${this.configError}`)))
       .when(this.busy && !data, el => el.child(div().p(14).text_color(t.dim).child("운영 현황을 읽는 중입니다.")))
       .child(v_flex().id("operations-content").w_full().flex_1().min_h(0).gap(6).p(8)
-        .child(h_flex().flex_none().justify_between().items_center().gap(8)
-          .child(div().text_size(12).text_color(t.muted).child("GUI 전용 장부 · TUI 업무를 가져오지 않음"))
-          .child(div().text_size(12).font_semibold().child(summary)))
-        .child(h_flex().flex_none().gap(8).when(teamCards.length > 0, el => el.child(teamCards[0])).when(teamCards.length > 1, el => el.child(teamCards[1])))
-        .child(h_flex().flex_none().gap(8).when(teamCards.length > 2, el => el.child(teamCards[2])).when(teamCards.length > 3, el => el.child(teamCards[3])))
-        .when(unknownTeams > 0 || waiting.length > 0, el => el.child(v_flex().flex_none().gap(2).text_size(11)
-          .when(unknownTeams > 0, x => x.child(div().text_color(t.unknown).child(`미확인 팀 상태 ${unknownTeams}개`)))
-          .when(waiting.length > 0, x => x.child(div().text_color(t.muted).child(`대기 이유 · ${waiting.join(" · ")}`)))))
+        .child(h_flex().w_full().flex_none().justify_between().items_center().gap(8)
+          .child(div().min_w(0).truncate().text_size(12).text_color(t.muted).child("GUI 전용 장부 · TUI 업무를 가져오지 않음"))
+          .child(div().text_size(12).font_semibold().child(`${summary} · 미확인 ${unknownTeams}개 · 총괄 ${display(coordinator?.reason ?? coordinatorStateText)}`)))
+        .when(waiting.length > 0, el => el.child(div().w_full().flex_none().min_w(0).truncate().text_size(11).text_color(t.muted).child(`⚠ 대기 이유 · ${waiting.join(" · ")}`)))
+        .when(Boolean(this.coordinatorMessage), el => el.child(div().flex_none().text_size(11).text_color(/⚠|실패|오류/i.test(this.coordinatorMessage) ? t.blocked : t.muted).child(this.coordinatorMessage)))
         .when(actionRows.length > 0, el => el.child(v_flex().flex_none().gap(3).children(actionRows)))
         .child(mainPanels)
         .child(accountArea));

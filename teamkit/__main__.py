@@ -251,6 +251,10 @@ def run(args):
             if checkpoint and checkpoint.get('worktree_fingerprint') != task_fingerprint(task, config):
                 raise ValueError('checkpoint worktree changed; reconcile before dispatch')
             spec = launch_spec(provider, pr, None)
+            if provider=='claude' and config.get('runtime_backend')=='core':
+                if args.terminal:raise KitError('existing Claude statusline scope cannot be changed by adoption; use a fresh GUI execution')
+                from .core_runtime import claude_gui_settings
+                spec=claude_gui_settings(spec,args.config,args.state,account,config.get('claude_display_commands',{}).get(account,''))
             spec['args'] += ['--add-dir', str(Path(args.state).parent)]
             launch_task=task
             designing=work and task['role']=='leader'
@@ -341,8 +345,15 @@ def run(args):
                 raise KitError('leader is not idle; inspect before sending')
             store.wake(args.task, task['owner'], approval_config=config)
             try:
-                runtime.prompt(task['runtime']['name'], Path(args.message_file).read_text()+
-                               '\nAfter processing, park the leader through the task ledger.')
+                import shlex
+                park=[sys.executable,str(Path(__file__).resolve().parent.parent/'teamkit_cli.py'),
+                      '--config',args.config,'--state',args.state,'park',args.task,'--owner',task['owner']]
+                runtime.prompt(task['runtime']['name'],
+                               'CONTINUATION OF AN ALREADY RECEIPTED TASK. The same owner is now running. '
+                               'Do not execute the initial receipt command again; it only applies to a new submitted dispatch.\n'+
+                               'Task '+args.task+' / owner '+task['owner']+' / attempt '+str(task.get('attempt_count',0))+'\n'+
+                               Path(args.message_file).read_text()+
+                               '\nAfter processing and stopping task work, run this exact park command:\n'+shlex.join(park))
             except BaseException:
                 current = store.get(args.task)
                 if current['state'] == 'running':

@@ -5,12 +5,22 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
+import shlex
 import tomllib
 
 from .runtime import RuntimeError
 
 
 ADDRESS = re.compile(r't[0-9a-z]+\Z')
+
+
+def claude_gui_settings(spec,config_path,state,account,renderer=''):
+    command=[sys.executable,str(Path(__file__).resolve().parent.parent/'teamkit_cli.py'),
+             '--config',str(config_path),'--state',str(state),'statusline','--account',account]
+    if renderer:command+=['--display-command',renderer]
+    settings={'statusLine':{'type':'command','command':shlex.join(command)}}
+    return {**spec,'args':[*spec['args'],'--settings',json.dumps(settings)]}
 
 
 def _call(*args):
@@ -76,6 +86,14 @@ def _model_effort(provider, argv):
     return model[0], effort[0]
 
 
+def _process_matches(provider, name):
+    return name in ({'claude', 'claude.exe'} if provider == 'claude' else {provider})
+
+
+def _detector_matches(provider, name):
+    return name in ({'claude', 'claude-code'} if provider == 'claude' else {provider})
+
+
 class CoreRuntime:
     def __init__(self, task=None):
         self.task = task
@@ -93,14 +111,14 @@ class CoreRuntime:
                 or labels.get('teamkit.owner') != self.task.get('owner')
                 or labels.get('teamkit.task') != self.task.get('id')
                 or labels.get('teamkit.name') != name
-                or foreground.get('name') != self.task.get('provider')
+                or not _process_matches(self.task.get('provider'), foreground.get('name'))
                 or type(foreground.get('pid')) is not int or foreground['pid'] <= 0
                 or type(target.get('native_pid')) is not int or target['native_pid'] <= 0
                 or target['native_pid'] != foreground['pid']):
             raise RuntimeError('Core terminal owner/process changed; preserve it and inspect')
         status = native.get('status') or {}
         word = status.get('state', 'unknown')
-        if ready and (word not in ('idle','done') or status.get('app') != self.task.get('provider')):
+        if ready and (word not in ('idle','done') or not _detector_matches(self.task.get('provider'), status.get('app'))):
             raise RuntimeError('Core agent is not idle and ready; inspect before sending')
         return native
 
@@ -150,8 +168,8 @@ class CoreRuntime:
         status = native.get('status') or {}
         cwd = foreground.get('cwd') or native.get('cwd')
         if (native.get('address') != address or native.get('state') != 'live'
-                or status.get('state') not in ('idle','done') or status.get('app') != spec['kind']
-                or foreground.get('name') != spec['kind']
+                or status.get('state') not in ('idle','done') or not _detector_matches(spec['kind'], status.get('app'))
+                or not _process_matches(spec['kind'], foreground.get('name'))
                 or type(foreground.get('pid')) is not int or foreground['pid'] <= 0
                 or any(key in labels for key in ('teamkit.owner','teamkit.task','teamkit.name'))
                 or not isinstance(cwd, str) or Path(cwd).resolve() != Path(task['root']).resolve()
@@ -159,6 +177,10 @@ class CoreRuntime:
             raise RuntimeError('Core adoption terminal is owned, changed or not idle; preserve it and inspect')
         if spec['kind'] not in ('codex','claude') or _model_effort(spec['kind'], foreground.get('argv')) != _model_effort(spec['kind'], spec['args']):
             raise RuntimeError('Core adoption model/effort metadata differs from admission')
+        required = [Path(value).resolve() for value in _values(spec['args'], '--add-dir')]
+        writable = [Path(cwd).resolve(), *[Path(value).resolve() for value in _values(foreground['argv'], '--add-dir')]]
+        if any(not any(path.is_relative_to(root) for root in writable) for path in required):
+            raise RuntimeError('Core adoption lacks the requested GUI writable directory; use a fresh execution')
         return native
 
     def adopt(self, task, spec, name, address, on_created=None):
@@ -202,7 +224,7 @@ class CoreRuntime:
         require_managed()
         native = self._native(args[2])
         reported = native.get('status') or {}
-        status = reported.get('state', 'unknown') if reported.get('app') == self.task.get('provider') else 'unknown'
+        status = reported.get('state', 'unknown') if _detector_matches(self.task.get('provider'), reported.get('app')) else 'unknown'
         return {'agent':{'name':args[2], 'agent_status':status, 'pane_id':native['address'],
                          'interactive_ready':status in ('idle','done'), 'completion_seq':native.get('turn')}}
 

@@ -90,6 +90,15 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn('--force',sends[0])
         self.assertNotIn('--if',sends[0])
 
+    def test_native_claude_process_and_detector_names_are_distinct(self):
+        self.task['provider']='claude'
+        self.hc.agent['foreground']['name']='claude.exe'
+        self.hc.agent['status']['app']='claude-code'
+        CoreRuntime(self.task).prompt('tk-owner','next bounded task')
+        self.assertEqual(CoreRuntime(self.task).call('agent','get','tk-owner')['agent']['agent_status'],'idle')
+        self.hc.agent['foreground']['name']='zsh'
+        with self.assertRaises(KitError):CoreRuntime(self.task).prompt('tk-owner','no')
+
     def test_send_timeout_not_started_and_blocked_are_not_success(self):
         for result in ({'started':False,'wait':{**self.hc.wait,'reason':'not_started'}},
                        {'started':True,'wait':{**self.hc.wait,'ended':False,'reason':'timeout'}},
@@ -141,6 +150,13 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(any(a[1] in ('run','send') for a,_ in self.hc.calls))
         self.task['runtime']=result
         self.assertEqual(CoreRuntime(self.task).call('agent','get','tk-owner')['agent']['agent_status'],'idle')
+
+    def test_adoption_rejects_missing_requested_writable_directory(self):
+        task,spec=self.adoption()
+        spec['args']+=['--add-dir','/private/gui-state']
+        with self.assertRaises(KitError):CoreRuntime.validate_adoption(task,spec,'t8')
+        self.hc.agent['foreground']['argv']+=['--add-dir','/private/gui-state']
+        CoreRuntime.validate_adoption(task,spec,'t8')
 
     def test_adoption_metadata_or_ownership_mismatch_is_read_only(self):
         task,spec=self.adoption();original=copy.deepcopy(self.hc.agent)
