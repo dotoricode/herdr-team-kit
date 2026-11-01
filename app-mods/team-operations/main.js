@@ -557,7 +557,7 @@ export default class TeamOperations extends View {
       const holds = definition.id === "waiting" ? (data?.holds ?? []).map(hold => v_flex().flex_none().gap(4).p(8).rounded(7).bg(t.surface)
         .child(div().font_semibold().child(`보류 · ${display(hold.id)}`))
         .child(words(hold.reason).text_size(11).text_color(t.blocked))) : [];
-      return v_flex().id(`kanban-${definition.id}`).w(270).h_full().flex_none().min_h(0).gap(6).p(7).rounded(8).bg(t.chrome)
+      return v_flex().id(`kanban-${definition.id}`).min_w(270).h_full().flex_1().min_h(0).gap(6).p(7).rounded(8).bg(t.chrome)
         .child(h_flex().flex_none().items_center().justify_between().gap(6)
           .child(h_flex().items_center().gap(6).child(div().w(8).h(8).rounded_full().bg(definition.color)).child(div().whitespace_nowrap().font_semibold().child(definition.title)).child(badge(String(cards.length), cards.length > 0 ? definition.color : t.dim)))
           .when(definition.id === "complete", x => x.child(button("toggle-completed", this.showCompleted ? "접기" : "펼치기", cx => { this.showCompleted = !this.showCompleted; cx.notify(); }).text_size(10))))
