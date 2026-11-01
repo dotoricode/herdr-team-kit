@@ -488,7 +488,7 @@ export default class TeamOperations extends View {
           ])))
         .when(Boolean(this.message), x => x.child(div().flex_none().text_color(/실패|오류|fail|error/i.test(this.message) ? t.blocked : t.muted).child(this.message)))
         .when(this.docBusy, x => x.child(div().flex_none().text_color(t.dim).child("설계를 읽는 중입니다.")))
-        .when(Boolean(doc) && !this.docSource, x => x.child(TextView.markdown(`design-preview-${doc.id}-${doc.revision}-${doc.digest}`, documentPreview(doc.body)).selectable(true).scrollable(false).w_full().max_w(880).flex_none().px(10).font_family(this.config?.document_font || "Pretendard").font_normal().text_size(13).line_height("22px")
+        .when(Boolean(doc) && !this.docSource, x => x.child(TextView.markdown(`design-preview-${doc.id}-${doc.revision}-${doc.digest}`, documentPreview(doc.body)).selectable(true).scrollable(false).w_full().max_w(880).flex_none().px(10).font_family(this.config?.document_font || "Pretendard").font_normal().text_size(14).line_height("23px")
           .on_link_click((url, cx) => {
             try {
               const target = new URL(url);
