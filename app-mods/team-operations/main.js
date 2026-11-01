@@ -1,5 +1,5 @@
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, Popover, Textarea, TextareaState, Editor, EditorState } from "gpui-base";
+import { v_flex, h_flex, Popover, Scrollbar, Textarea, TextareaState, Editor, EditorState } from "gpui-base";
 import { appHome, readTextFile, exec, agents, terminals, theme, settings, run, nextCommand, props as getModProps, openOverlay, closeOverlay } from "herdr";
 
 const LOCAL = "/mods/team-operations/local.json";
@@ -476,7 +476,7 @@ export default class TeamOperations extends View {
         .child(h_flex().gap(8).items_center()
           .child(div().flex_1().text_size(10).text_color(t.muted).child("저장한 답변은 총괄 확인 대기입니다. 작업 완료·설계 승인으로 자동 처리하지 않습니다."))
           .child(button("save-card-answer", this.answerBusy ? "저장 중" : "답변 저장", cx => cx.spawn(async cx => this.saveAnswer(cx)), this.answerBusy || this.cardBusy || Boolean(this.cardError) || !this.answerChoice || this.answerRevision != null && this.answerRevision !== card?.revision).text_size(11)));
-      const body = v_flex().id("detail-body").h(Math.max(0, (this.detailHeight ?? 440) - 84)).flex_none().min_h(0).gap(9).overflow_y_scrollbar().mode("always")
+      const body = v_flex().id("detail-body").size_full().min_h(0).gap(9).overflow_y_scroll()
         .when(this.detailBusy || this.cardBusy && !card, x => x.child(div().p(8).text_color(t.dim).child("카드 정보를 읽는 중입니다.")))
         .when(Boolean(this.detailError || this.cardError), x => x.child(words(`정보를 읽지 못했습니다 · ${this.detailError ?? this.cardError}`).text_color(t.blocked)))
         .child(v_flex().flex_none().gap(4).p(9).rounded(7).bg(t.surface)
@@ -510,7 +510,9 @@ export default class TeamOperations extends View {
           if (this.detailHeight !== height) { this.detailHeight = height; cx.notify(); }
         })
         .child(detailHeader)
-        .child(body);
+        .child(v_flex().relative().h(Math.max(0, (this.detailHeight ?? 440) - 84)).flex_none().min_h(0)
+          .child(body)
+          .child(Scrollbar.vertical("detail-body").absolute().inset_0().mode("always")));
     }
     const categoryForWork = work => WORK_PHASES[work.phase]?.column ?? "review";
     const categoryForInventory = item => {
