@@ -25,7 +25,7 @@ def core_read():
 
 def bindings(path, config):
     if config.get('runtime_backend') != 'core':
-        raise ValueError('앱은 core 전용 설정과 GUI 전용 장부를 사용해야 합니다.')
+        raise ValueError('앱은 core 전용 설정과 GUI 전용 작업 기록을 사용해야 합니다.')
     value = json.loads(Path(path).read_text())
     if value.get('version') != 1 or not isinstance(value.get('teams'), dict):
         raise ValueError('앱 팀장 연결 설정을 확인하세요.')
@@ -37,11 +37,11 @@ def bindings(path, config):
 def readonly_snapshot(state):
     path = Path(state)
     if not path.is_file():
-        raise ValueError('GUI 전용 장부를 먼저 준비하세요.')
+        raise ValueError('GUI 전용 작업 기록을 먼저 준비하세요.')
     with path.open('rb') as source:
         header = source.read(20)
     if 2 in header[18:20] or Path(str(path)+'-wal').exists() or Path(str(path)+'-shm').exists():
-        raise ValueError('보조 파일을 쓰지 않는 rollback 장부만 조회할 수 있습니다.')
+        raise ValueError('보조 파일을 쓰지 않는 rollback 작업 기록만 조회할 수 있습니다.')
     return snapshot(path)
 
 
@@ -83,8 +83,8 @@ def view(config_path, state, binding_path):
         teams.append({'id':ident, 'label':setting.get('label', ident), 'terminal':terminal,
                       'space':setting.get('space'),
                       'app_state':observed.get('status', '미확인') if observed.get('state') == 'live' else '미확인',
-                      'ledger_state':bound['state'] if bound else '새 요청 대기 · 장부 수신 확인 전',
-                      'binding_status':'GUI 장부 연결됨' if bound else '앱 대화 확인 · 작업 소유권 미등록',
+                      'ledger_state':bound['state'] if bound else '새 요청 대기 · 수신 확인 전',
+                      'binding_status':'GUI 작업 기록 연결됨' if bound else '앱 대화 확인 · 작업 소유권 미등록',
                       'reason':error or ('' if bound else 'TUI 작업·소유권을 가져오지 않습니다.')})
     rows, holds = inventory(linked.get('inventory'))
     from .app_usage import read_coverage
@@ -128,7 +128,7 @@ def document_view(config_path, state, ident):
     data = readonly_snapshot(state)
     work = next((w for w in data['works'] if w['id'] == ident), None)
     if work is None:
-        raise ValueError('GUI 장부에 없는 작업입니다.')
+        raise ValueError('GUI 작업 기록에 없는 작업입니다.')
     folder, contract, digest = document(config, work)
     if work['phase'] == 'awaiting_approval' and digest != work.get('submitted_digest'):
         raise ValueError('확인 요청한 문서가 바뀌었습니다. 새 버전을 제출하세요.')
@@ -174,7 +174,7 @@ def work_detail(config_path, state, binding_path, ident):
     """Read one GUI work's purpose and current/historical execution sessions."""
     config=load(config_path);linked=bindings(binding_path,config);data=readonly_snapshot(state)
     row=next((w for w in model(data,config)['rows'] if w['id']==ident),None)
-    if row is None:raise ValueError('GUI 장부에 없는 작업입니다.')
+    if row is None:raise ValueError('GUI 작업 기록에 없는 작업입니다.')
     native_error=''
     try:native={t['address']:t for t in core_read()['terminals']}
     except (OSError,ValueError,subprocess.SubprocessError):
@@ -285,7 +285,7 @@ def enqueue_resume(folder, config_path, state, binding_path, ident, revision, di
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         private_json(job/'uncertain.json', {'message':'시작 결과 불명. 재실행 전에 작업과 실행 상태를 확인하세요.'})
         raise ValueError('재개 제어 실행 결과가 불명입니다. 자동으로 반복하지 않습니다.') from error
-    return {'message':'재개 요청을 접수했습니다. 수신·실행 결과는 장부에서 별도로 확인하세요.', 'job':job.name}
+    return {'message':'재개 요청을 접수했습니다. 수신·실행 결과는 작업 기록에서 별도로 확인하세요.', 'job':job.name}
 
 
 def resume_job(path):
