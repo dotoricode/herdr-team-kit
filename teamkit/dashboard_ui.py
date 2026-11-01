@@ -142,9 +142,9 @@ def frame(view, ui, width=100, now=0):
                 suffix=f"{row['percent']:>3}% {row['steps_done']}/{row['steps_total']}";length=max(0,min(20,width-len(suffix)-8));n=row['percent']*length//100
                 details.append(text('['+'█'*n+' '*(length-n)+'] '+suffix))
             if row['phase']=='awaiting_approval':details.extend([text('정할 내용: 어떤 방식으로 어디까지 바꿀지 · 어떻게 확인하고 통과로 볼지'),text('[설계 문서 읽기]',('review',row['id']),True),text('선택한 내용과 작업 시작 허락은 총괄 대화에서 알려 주세요. 팀장 창에 권한을 묻는 팝업이 뜨는 것은 아닙니다.')])
-            execution={'handed_off':'다음 담당자에게 전달 완료','ready':'대기','running':'요청 받음','submitted':'요청을 받았는지 확인 중','awaiting_review':'결과와 확인 내용 저장됨','uncertain':'확인 필요'}.get(row['execution_state'],row['execution_state'] or '담당자 정하기 전')
+            execution={'handed_off':'작업을 멈추고 이어갈 내용 저장함','ready':'대기','running':'요청 받음','submitted':'요청을 받았는지 확인 중','awaiting_review':'결과와 확인 내용 저장됨','uncertain':'확인 필요'}.get(row['execution_state'],row['execution_state'] or '담당자 정하기 전')
             prefix='앞으로 할 일(아직 허락받지 않음): ' if row['phase']=='awaiting_approval' else '남은 단계: '
-            details.extend([text(prefix+(' / '.join(row.get('remaining_steps',[])) or '마지막 동작 확인 · 다른 담당자의 코드 확인 · 완료 확인')),text('실행 기록: '+str(execution)+' · 작업 요청 '+str(row['attempts'])+'회')])
+            details.extend([text(prefix+(' / '.join(row.get('remaining_steps',[])) or '마지막 동작 확인 · 다른 담당자의 코드 확인 · 완료 확인')),text('실행 기록: '+str(execution)+' · 작업 시작 시도 '+str(row['attempts'])+'회')])
             if row['reason']:details.append(text('확인 사항: '+row['reason'],attention=True))
             if row['next']:details.append(text('다음: '+row['next']))
             items.extend([Padding(Group(*details),(0,1)),Text('')])

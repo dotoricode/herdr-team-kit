@@ -211,8 +211,8 @@ def render(view,color=False,now=None,width=80):
             pending=' / '.join(clean(title) for title in row.get('remaining_steps',[]))
             lines.append('  남은 단계: '+(pending or '마지막 동작 확인 · 다른 담당자의 코드 확인 · 완료 확인'))
         if row['execution_state']:
-            execution={'claimed':'담당자 정해짐','launching':'시작 준비','submitted':'요청을 받았는지 확인 중','running':'요청 받음','uncertain':'실행 결과 확인 필요','awaiting_review':'결과와 확인 내용 저장됨','handed_off':'다음 담당자에게 전달함','queued':'담당자 정하기 전','ready':'대기'}.get(row['execution_state'],row['execution_state'])
-            lines.append('  실행 기록: '+clean(execution)+f" · 작업 요청 {row['attempts']}회")
+            execution={'claimed':'담당자 정해짐','launching':'시작 준비','submitted':'요청을 받았는지 확인 중','running':'요청 받음','uncertain':'실행 결과 확인 필요','awaiting_review':'결과와 확인 내용 저장됨','handed_off':'작업을 멈추고 이어갈 내용 저장함','queued':'담당자 정하기 전','ready':'대기'}.get(row['execution_state'],row['execution_state'])
+            lines.append('  실행 기록: '+clean(execution)+f" · 작업 시작 시도 {row['attempts']}회")
         if row['reason']:lines.append('  주의: '+clean(row['reason']))
         if row['next']:lines.append('  다음: '+clean(row['next']))
     if not view['rows']:lines.append('등록된 제품 작업 없음 · 팀장 대기 세션은 작업 건수에서 제외')
