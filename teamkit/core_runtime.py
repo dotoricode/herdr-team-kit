@@ -24,9 +24,9 @@ def claude_gui_settings(spec,config_path,state,account,renderer=''):
     return {**spec,'args':[*spec['args'],'--settings',json.dumps(settings)]}
 
 
-def _call(*args):
+def _call(*args, timeout=45):
     try:
-        result = subprocess.run(['hc', *args], capture_output=True, text=True, timeout=45)
+        result = subprocess.run(['hc', *args], capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise RuntimeError('Core outcome unknown; inspect before retry') from error
     if result.returncode:
@@ -38,6 +38,13 @@ def _call(*args):
     if not isinstance(body, dict) or body.get('error') or body.get('ok') is False:
         raise RuntimeError('Core rejected command')
     return body
+
+
+def _budget(deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RuntimeError('Core wait deadline expired; inspect before further input')
+    return remaining
 
 
 def require_managed():
@@ -87,11 +94,13 @@ def _model_effort(provider, argv):
     return model[0], effort[0]
 
 
-def startup_native(address):
+def startup_native(address, outer_deadline=None):
     """Wait only for absent OS metadata on the same settled terminal."""
     deadline = time.monotonic() + 3
+    if outer_deadline is not None:
+        deadline = min(deadline, outer_deadline)
     while True:
-        native = _call('get', address)
+        native = _call('get', address, timeout=_budget(deadline))
         if (native.get('state') != 'live' or native.get('foreground') is not None
                 or (native.get('status') or {}).get('state') not in ('idle', 'done')
                 or time.monotonic() >= deadline):
@@ -112,12 +121,12 @@ class CoreRuntime:
         self.task = task
         self.target = dict(task.get('runtime', {})) if task else None
 
-    def _native(self, name, ready=False):
+    def _native(self, name, ready=False, timeout=45):
         target = self.target or {}
         address = target.get('terminal', '')
         if target.get('backend') != 'core' or target.get('name') != name or not ADDRESS.fullmatch(address):
             raise RuntimeError('Core task has no matching terminal identity; inspect')
-        native = _call('get', address)
+        native = _call('get', address, timeout=timeout)
         foreground = native.get('foreground') or {}
         labels = native.get('labels') or {}
         if (native.get('address') != address or native.get('state') != 'live' or native.get('name') != target.get('native_name', name)
@@ -163,21 +172,22 @@ class CoreRuntime:
         # hc owns readiness waiting. A timeout is a known terminal with an
         # uncertain startup, not permission to launch a replacement.
         deadline = time.monotonic() + 30
-        waited = _call('wait', '--json', '--timeout', '30', address)
+        waited = _call('wait', '--json', '--timeout', '30', address, timeout=_budget(deadline))
         while (waited.get('terminal') == address and waited.get('ended') is False
                and waited.get('reason') == 'message'):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            waited = _call('wait', '--json', '--timeout', str(max(1, int(remaining))), address)
+            remaining = _budget(deadline)
+            waited = _call('wait', '--json', '--timeout', str(max(1, int(remaining))), address, timeout=remaining)
             time.sleep(0.01)
         if waited.get('terminal') != address or waited.get('ended') is not True or waited.get('reason') != 'status' or waited.get('status') != 'idle':
             raise RuntimeError('Core startup not ready; inspect the recorded terminal')
-        native = startup_native(address)
+        _budget(deadline)
+        native = startup_native(address, deadline)
+        _budget(deadline)
         detail['native_pid'] = (native.get('foreground') or {}).get('pid')
         self.task = {**task, 'owner':owner, 'provider':spec['kind']}
         self.target = detail
-        self._native(name, ready=True)
+        self._native(name, ready=True, timeout=_budget(deadline))
+        _budget(deadline)
         if on_created:
             on_created(dict(detail))
         return detail
@@ -263,7 +273,7 @@ class CoreRuntime:
         # settled done agent use ordinary send; never force a blocked program.
         condition = ['--if','idle'] if native['status']['state']=='idle' else []
         deadline = time.monotonic() + 30
-        sent = _call('send', '--json', *condition, '--wait', '--timeout', '30', address, text)
+        sent = _call('send', '--json', *condition, '--wait', '--timeout', '30', address, text, timeout=_budget(deadline))
         waited = sent.get('wait') or {}
         resumed = False
         # A caller message or delayed status report ends hc's wait, not the
@@ -271,13 +281,16 @@ class CoreRuntime:
         while (waited.get('terminal') == address and waited.get('ended') is False
                and waited.get('reason') in ('message', 'not_started')
                and type(sent.get('started')) is bool):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            self._native(name)
-            waited = _call('wait', '--json', '--timeout', str(max(1, int(remaining))), address)
+            remaining = _budget(deadline)
+            try:
+                self._native(name, timeout=remaining)
+            except RuntimeError as error:
+                raise RuntimeError('Core post-send identity unconfirmed; inspect before further input') from error
+            remaining = _budget(deadline)
+            waited = _call('wait', '--json', '--timeout', str(max(1, int(remaining))), address, timeout=remaining)
             resumed = True
             time.sleep(0.01)
+        _budget(deadline)
         if ((sent.get('started') is not True and not resumed) or waited.get('terminal') != address
                 or waited.get('ended') is not True or waited.get('reason') != 'status'
                 or waited.get('status') not in ('idle','done')
@@ -286,7 +299,12 @@ class CoreRuntime:
             reason = reason if reason in ('status','exit','output','timeout','not_started','message') else 'unknown'
             raise RuntimeError(f'Core delivery/wait not confirmed ({reason}); inspect before further input')
         if resumed:
-            self._native(name)
+            remaining = _budget(deadline)
+            try:
+                self._native(name, timeout=remaining)
+            except RuntimeError as error:
+                raise RuntimeError('Core post-send identity unconfirmed; inspect before further input') from error
+            _budget(deadline)
             sent = {**sent, 'wait':waited}
         # This confirms the transport turn only. Receipt and verification remain
         # separate ledger events on the host/worker paths.

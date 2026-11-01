@@ -273,7 +273,9 @@ class CoreTests(unittest.TestCase):
             if argv[:2]==['hc','send']:self.hc.agent['labels']['teamkit.owner']='replacement'
             return result
         with patch('teamkit.core_runtime.subprocess.run',side_effect=changed):
-            with self.assertRaises(KitError):CoreRuntime(self.task).prompt('tk-owner','once')
+            with self.assertRaises(KitError) as error:CoreRuntime(self.task).prompt('tk-owner','once')
+        from teamkit.app_bridge import PRE_SEND
+        self.assertFalse(any(text in str(error.exception) for text in PRE_SEND))
         self.assertEqual(sum(a[:2]==['hc','wait'] for a,_ in self.hc.calls),0)
 
 
@@ -292,10 +294,25 @@ class CoreTests(unittest.TestCase):
 
     def test_repeated_checkin_obeys_the_original_deadline(self):
         self.hc.send['wait'].update(ended=False,reason='message',status='working')
-        with patch('teamkit.core_runtime.time.monotonic',side_effect=[0,31]):
-            with self.assertRaisesRegex(KitError,'message'):
+        with patch('teamkit.core_runtime.time.monotonic',side_effect=[0,0,31]):
+            with self.assertRaisesRegex(KitError,'deadline'):
                 CoreRuntime(self.task).prompt('tk-owner','once')
         self.assertEqual(sum(a[:2]==['hc','send'] for a,_ in self.hc.calls),1)
+        self.assertEqual(sum(a[:2]==['hc','wait'] for a,_ in self.hc.calls),0)
+
+
+    def test_followup_identity_cannot_turn_an_expired_deadline_into_success(self):
+        self.hc.send['wait'].update(ended=False,reason='message',status='working')
+        self.hc.wait.update(turn=2,status='done')
+        clock=[0]
+        original=self.hc.__call__
+        def slow(argv,**kwargs):
+            result=original(argv,**kwargs)
+            if argv[:2]==['hc','send']:clock[0]=29
+            elif argv[:3]==['hc','get','t8'] and clock[0]==29:clock[0]=60
+            return result
+        with patch('teamkit.core_runtime.subprocess.run',side_effect=slow),patch('teamkit.core_runtime.time.monotonic',side_effect=lambda:clock[0]):
+            with self.assertRaises(KitError):CoreRuntime(self.task).prompt('tk-owner','once')
         self.assertEqual(sum(a[:2]==['hc','wait'] for a,_ in self.hc.calls),0)
 
 
