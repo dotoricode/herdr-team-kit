@@ -343,7 +343,7 @@ def live(screen,args,config):
                 style=segment.style;attr=0
                 if style:
                     if style.bold:attr|=curses.A_BOLD
-                    if style.reverse:attr|=curses.A_REVERSE
+                    if style.underline:attr|=curses.A_UNDERLINE
                     if style.dim:attr|=curses.A_DIM
                     if colored and style.color:attr|=palette.get(style.color.name,0)
                 try:screen.addnstr(y,x,segment.text,max(0,width-1-x),attr)

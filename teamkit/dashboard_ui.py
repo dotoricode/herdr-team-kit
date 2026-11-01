@@ -54,7 +54,7 @@ def frame(view, ui, width=100, now=0):
 
     def text(value, action=None, attention=False):
         return Text('\n'.join(clean(line) for line in str(value).split('\n')),style=Style(color='yellow' if attention else None,bold=attention,
-                    reverse=bool(action and ui.focus==action),meta={'action':action} if action else {}))
+                    underline=bool(action and ui.focus==action),meta={'action':action} if action else {}))
 
     def table(headers):
         return Table(*headers,box=box.SQUARE,expand=True,padding=(0,1),
