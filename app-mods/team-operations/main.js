@@ -24,8 +24,19 @@ function percent(work) {
   const bars = Math.round(p / 10);
   return `[${"█".repeat(bars)}${" ".repeat(10 - bars)}] ${p}% · ${work.steps_done}/${work.steps_total} 단계`;
 }
-const PHASE_TEXT = { awaiting_approval: "🟨 설계 확인 필요", planning: "▶ 설계 중", approved: "✓ 승인됨", executing: "▶ 진행 중", blocked: "⚠ 대기 중", complete: "✓ 완료 보고됨" };
-function phaseText(phase) { return PHASE_TEXT[phase] ?? display(phase); }
+const WORK_PHASES = {
+  planning: { text: "▶ 설계 중", column: "progress" },
+  awaiting_approval: { text: "🟨 설계 확인 필요", column: "review" },
+  approved: { text: "✓ 승인됨", column: "waiting" },
+  in_progress: { text: "▶ 진행 중", column: "progress" },
+  awaiting_review: { text: "검토 대기", column: "review" },
+  blocked: { text: "⚠ 대기 중", column: "review" },
+  inspect: { text: "실행 결과 확인 필요", column: "review" },
+  quota: { text: "사용량 확인 필요", column: "review" },
+  environment: { text: "실행 준비 확인 필요", column: "review" },
+  complete: { text: "✓ 완료 보고됨", column: "complete" }
+};
+function phaseText(phase) { return WORK_PHASES[phase]?.text ?? display(phase); }
 const STATUS_TEXT = { unknown: "미확인", working: "실행 중", running: "실행 중", blocked: "사용자 답변 필요", done: "완료 보고됨", idle: "대기 중", pending: "대기 중", failed: "실패", error: "오류", success: "성공", healthy: "정상", not_measured: "측정 전", not_available: "미제공", unavailable: "미제공", missing: "미확인", current: "최신 기록", stale: "지난 기록" };
 function statusText(status) { return STATUS_TEXT[status] ?? (status == null ? "미확인" : display(status)); }
 function statusColor(status, t) { return status === "working" ? t.working : status === "blocked" ? t.blocked : status === "done" ? t.done : status === "idle" ? t.idle : t.unknown; }
@@ -344,13 +355,7 @@ export default class TeamOperations extends View {
         .when(tasks.length === 0 && !this.detailBusy && !this.detailError, x => x.child(div().flex_none().p(8).text_size(12).text_color(t.muted).child(this.viewProps.kind === "inventory" && !this.viewProps.linkedWorkId ? "구축 항목은 제품 작업이나 세션으로 자동 연결하지 않습니다." : "연결된 세션 정보가 없습니다.")))
         .when(this.viewProps.kind !== "inventory" || Boolean(this.viewProps.linkedWorkId), x => x.child(documentSection));
     }
-    const categoryForWork = work => {
-      if (work.phase === "complete") return "complete";
-      if (["awaiting_approval", "blocked", "inspect", "quota", "environment"].includes(work.phase)) return "review";
-      if (["planning", "executing"].includes(work.phase)) return "progress";
-      if (work.phase === "approved") return "waiting";
-      return "review";
-    };
+    const categoryForWork = work => WORK_PHASES[work.phase]?.column ?? "review";
     const categoryForInventory = item => {
       const status = String(item.status ?? "");
       if (status.startsWith("완료")) return "complete";
