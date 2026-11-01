@@ -1,6 +1,6 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
-import { appHome, readTextFile, exec, agents, terminals, theme, settings, run, nextCommand, props as getModProps } from "herdr";
+import { appHome, readTextFile, exec, agents, terminals, theme, settings, run, nextCommand, props as getModProps, openOverlay, closeOverlay } from "herdr";
 
 const LOCAL = "/mods/team-operations/local.json";
 const DUMMY = "—";
@@ -26,18 +26,20 @@ function percent(work) {
 }
 const PHASE_TEXT = { awaiting_approval: "🟨 설계 확인 필요", planning: "▶ 설계 중", approved: "✓ 승인됨", executing: "▶ 진행 중", blocked: "⚠ 대기 중", complete: "✓ 완료 보고됨" };
 function phaseText(phase) { return PHASE_TEXT[phase] ?? display(phase); }
-const STATUS_TEXT = { working: "실행 중", running: "실행 중", blocked: "사용자 답변 필요", done: "완료 보고됨", idle: "대기 중", pending: "대기 중", failed: "실패", error: "오류", success: "성공", healthy: "정상", not_measured: "측정 전", not_available: "미제공", unavailable: "미제공", missing: "미확인", current: "최신 기록", stale: "지난 기록" };
+const STATUS_TEXT = { unknown: "미확인", working: "실행 중", running: "실행 중", blocked: "사용자 답변 필요", done: "완료 보고됨", idle: "대기 중", pending: "대기 중", failed: "실패", error: "오류", success: "성공", healthy: "정상", not_measured: "측정 전", not_available: "미제공", unavailable: "미제공", missing: "미확인", current: "최신 기록", stale: "지난 기록" };
 function statusText(status) { return STATUS_TEXT[status] ?? (status == null ? "미확인" : display(status)); }
 function statusColor(status, t) { return status === "working" ? t.working : status === "blocked" ? t.blocked : status === "done" ? t.done : status === "idle" ? t.idle : t.unknown; }
 
 export default class TeamOperations extends View {
   init(props, cx) {
     this.viewProps = props ?? getModProps() ?? {};
+    this.role = this.viewProps.role ?? "full";
     this.data = null; this.error = null; this.busy = false; this.seq = 0;
     this.expanded = new Set(); this.doc = null; this.docBusy = false;
     this.confirm = null; this.actionBusy = false; this.message = null;
-    this.showCompleted = false; this.showAllInventory = false; this.coordinatorConfirm = false; this.coordinatorBusy = false; this.coordinatorMessage = null;
+    this.showCompleted = false; this.coordinatorConfirm = false; this.coordinatorBusy = false; this.coordinatorMessage = null;
     this.usageBusy = false; this.usageMessage = null;
+    this.detailData = null; this.detailError = null; this.detailBusy = false;
     this.config = null; this.configError = null;
     cx.spawn(async cx => {
       try {
@@ -49,25 +51,31 @@ export default class TeamOperations extends View {
         this.config = c;
       } catch (e) { this.configError = String(e); }
       await this.refresh(cx);
+      if (this.role === "detail") {
+        if (this.viewProps.kind === "work" || this.viewProps.linkedWorkId) await this.loadDetail(cx);
+        if (this.viewProps.readDocument && this.viewProps.kind === "work" && this.detailData) await this.document(this.detailData, cx);
+      }
     });
-    cx.spawn(async cx => {
+    if (this.role !== "detail") cx.spawn(async cx => {
       for (;;) {
         const command = await nextCommand();
         if (command === "refresh") cx.spawn(async cx => this.refresh(cx));
         else if (this.viewProps.role === "overview") continue;
         else if (command === "expand-all") {
-          for (const team of this.data?.teams ?? []) this.expanded.add(`team-${team.id}`);
-          for (const work of this.data?.works ?? []) this.expanded.add(`work-${work.id}`);
+          this.showCompleted = true;
           cx.notify();
         } else if (command === "read-first") {
           const work = this.data?.works?.[0];
-          if (work) cx.spawn(async cx => this.document(work, cx));
+          if (work) this.openDetail("work", work, true);
         } else if (command === "read-next") {
           const works = this.data?.works ?? [];
-          const current = works.findIndex(work => work.id === this.doc?.id);
+          const current = works.findIndex(work => String(work.id) === String(this.selectedWorkId));
           const work = works.length ? works[current < 0 || current + 1 >= works.length ? 0 : current + 1] : null;
-          if (work) cx.spawn(async cx => this.document(work, cx));
-        } else if (command === "close-document") this.closeDocument(cx);
+          if (work) this.openDetail("work", work, true);
+        } else if (command === "close-document") {
+          if (this.detailOverlay) closeOverlay(this.detailOverlay);
+          else this.closeDocument(cx);
+        }
         else if (command === "begin-approve") this.begin("approve", null, cx);
         else if (command === "begin-resume") {
           const task = this.doc?.resumable?.[0];
@@ -77,10 +85,32 @@ export default class TeamOperations extends View {
         else if (command === "cancel-action") { this.confirm = null; cx.notify(); }
       }
     });
-    cx.timer.every(5000, cx => cx.spawn(async cx => this.refresh(cx)));
+    cx.timer.every(5000, cx => cx.spawn(async cx => {
+      await this.refresh(cx);
+      if (this.role === "detail" && (this.viewProps.kind === "work" || this.viewProps.linkedWorkId)) await this.loadDetail(cx);
+    }));
   }
 
   update(props) { this.viewProps = props ?? getModProps() ?? {}; }
+
+  async loadDetail(cx) {
+    if (this.detailBusy || !this.viewProps.workId) return;
+    this.detailBusy = true; this.detailError = null; cx.notify();
+    try {
+      const workId = this.viewProps.linkedWorkId ?? this.viewProps.workId;
+      const r = await this.args("work-detail", ["--work", String(workId)]);
+      if (r.code !== 0) throw new Error(r.stderr || `작업 정보를 읽지 못했습니다 (종료 코드 ${r.code}).`);
+      const detail = JSON.parse(r.stdout);
+      if (String(detail.id) !== String(workId)) throw new Error("요청한 작업과 다른 정보를 받았습니다.");
+      this.detailData = detail;
+    } catch (e) { this.detailError = String(e); }
+    finally { this.detailBusy = false; cx.notify(); }
+  }
+
+  openDetail(kind, item, readDocument = false) {
+    this.selectedWorkId = item.id;
+    this.detailOverlay = openOverlay({ mod: "team-operations", props: { role: "detail", kind, workId: item.id, linkedWorkId: item.work_id, item, local: this.viewProps.local, readDocument }, kind: "dialog", modal: true, width: kind === "inventory" && !item.work_id ? 0.7 : 0.82, height: kind === "inventory" && !item.work_id ? 0.38 : 0.84 });
+  }
 
   args(action, fields = []) {
     const c = this.config;
@@ -155,6 +185,10 @@ export default class TeamOperations extends View {
 
   begin(kind, value, cx) {
     if (this.actionBusy || this.busy || this.docBusy || this.error || this.configError || !this.data || !this.data.actions_enabled || !this.doc) return;
+    const latest = (this.data.works ?? []).find(work => String(work.id) === String(this.doc.id));
+    if (!latest || latest.revision !== this.doc.revision || latest.phase !== this.doc.phase || (latest.digest != null && latest.digest !== this.doc.digest)) {
+      this.confirm = null; this.message = "작업 설계가 바뀌었습니다. 최신 문서를 다시 읽어 주세요."; cx.notify(); return;
+    }
     this.confirm = { kind, value, id: this.doc.id, revision: this.doc.revision, digest: this.doc.digest, phase: this.doc.phase };
     cx.notify();
   }
@@ -180,8 +214,12 @@ export default class TeamOperations extends View {
   render(cx) {
     const t = theme(), data = this.data;
     const button = (id, text, fn, disabled = false) => div().id(id).px(10).py(6).rounded(6).cursor_pointer().bg(disabled ? t.chrome : t.raised).text_color(disabled ? t.dim : t.foreground).on_click((_e, cx) => { if (!disabled) fn(cx); }).child(text);
-    const pair = (a, b) => h_flex().gap(6).items_center().child(div().text_color(t.muted).child(a)).child(div().flex_1().min_w(0).child(display(b)));
-    const actionsAllowed = Boolean(data?.actions_enabled && !this.busy && !this.actionBusy && !this.docBusy && !this.error && !this.configError);
+    const words = value => v_flex().min_w(0).gap(2).children(display(value).split("\n").map(line =>
+      h_flex().min_w(0).flex_wrap().items_start().gap_x(4).gap_y(2).children(line.split(/\s+/).filter(Boolean).map(word =>
+        div().max_w_full().whitespace_nowrap().truncate().child(word)))));
+    const pair = (a, b, scroll = false) => h_flex().gap(6).items_start()
+      .child(div().flex_none().whitespace_nowrap().text_color(t.muted).child(a))
+      .child(scroll ? div().flex_1().min_w(0).overflow_x_scrollbar().whitespace_nowrap().child(display(b)) : words(b).flex_1().min_w(0));
     const liveAgents = agents(), liveTerminals = terminals(), teams = data?.teams ?? [], works = data?.works ?? [], inventory = data?.inventory ?? [], accounts = data?.accounts ?? [];
     const liveFor = team => {
       const agent = liveAgents.find(a => a.address === team.terminal || a.pane === team.terminal || a.space === team.space);
@@ -190,8 +228,8 @@ export default class TeamOperations extends View {
     };
     const appCounts = teams.reduce((n, team) => { const s = liveFor(team).status; if (s === "working") n.working++; if (s === "blocked") n.blocked++; return n; }, { working: 0, blocked: 0 });
     const unknownTeams = teams.filter(team => !STATUS_TEXT[liveFor(team).status]).length;
-    const waiting = [...teams.map(x => x.reason), ...works.map(x => x.reason), ...inventory.filter(x => !String(x.status ?? "").startsWith("완료")).map(x => x.condition), ...(data?.holds ?? []).map(x => x.reason)]
-      .filter(Boolean).map(display);
+    const waiting = [...new Set([...teams.map(x => x.reason), ...works.map(x => x.reason), ...(data?.holds ?? []).map(x => x.reason)]
+      .filter(Boolean).map(display))];
     const summary = `실행 ${appCounts.working} · 사용자 답변 필요 ${appCounts.blocked}`;
     const coordinator = data?.coordinator;
     const teamCard = team => {
@@ -200,7 +238,9 @@ export default class TeamOperations extends View {
       return v_flex().id(`rail-${team.id}`).flex_1().min_w(180).h(82).gap(4).p(8).rounded(7).hover(s => s.bg(t.raised))
         .when(live.present, el => el.cursor_pointer().on_click((_e, cx) => activate(cx)))
         .bg(t.surface)
-        .child(div().truncate().font_semibold().text_size(19).child(display(team.label)))
+        .child(h_flex().gap(6).items_center()
+          .child(div().w(10).flex_none().text_color(statusColor(status, t)).when(status === "working" && live.present && !this.error && !data?.native_error, el => el.frames(["●", "◉", "●", "◉"], 180)).child(status === "working" ? "●" : "·"))
+          .child(div().truncate().font_semibold().text_size(19).child(display(team.label))))
         .child(div().truncate().text_size(12).text_color(statusColor(status, t)).child(statusText(status)))
         .child(div().truncate().text_size(12).text_color(t.muted).child(`장부 · ${display(team.ledger_state)}`));
     };
@@ -227,28 +267,139 @@ export default class TeamOperations extends View {
       .when(Boolean(this.coordinatorMessage), el => el.child(div().h(14).flex_none().text_size(10).text_color(/⚠|실패|오류/i.test(this.coordinatorMessage) ? t.blocked : t.muted).truncate().child(this.coordinatorMessage)))
       .when(this.coordinatorConfirm, el => el.child(coordinatorConfirm))
       .when(!this.coordinatorConfirm, el => el.child(h_flex().id("team-operations-rail").w_full().h(82).min_w(0).gap(6).overflow_x_scrollbar().children(teams.map(teamCard))));
-    const workRows = works.map(work => {
-      const id = `work-${work.id}`, open = this.expanded.has(id);
-      return v_flex().gap(4).p(8).rounded(7).bg(t.surface)
-        .child(h_flex().justify_between().gap(8).child(div().flex_1().min_w(0).font_semibold().child(`${display(work.id)} · ${display(work.title)}`)).child(div().text_color(t.dim).child(phaseText(work.phase))))
-        .child(div().text_size(12).text_color(t.accent).child(percent(work)))
-        .child(h_flex().gap(6).children([
-          button(`read-${work.id}`, this.doc?.id === work.id ? "설계 표시 중" : "설계 읽기", cx => cx.spawn(async cx => this.document(work, cx)), this.actionBusy || this.docBusy),
-          button(`expand-${work.id}`, open ? "세부 접기" : "세부 보기", cx => { open ? this.expanded.delete(id) : this.expanded.add(id); cx.notify(); })
-        ]))
-        .when(open, el => el.child(v_flex().gap(4).pt(5).child(pair("남은 단계", Array.isArray(work.remaining_steps) ? work.remaining_steps.map(display).join(" / ") : work.remaining_steps)).child(pair("다음", work.next)).child(pair("실행 상태", work.execution_state)).child(pair("앱 상태", work.native_state)).child(pair("수정본", work.revision)).child(pair("갱신", clock(work.updated_at))).when(Boolean(work.reason), x => x.child(pair("대기 이유", work.reason)))));
+    const overlay = this.viewProps.overlay ?? getModProps()?.overlay;
+    if (this.role === "detail") {
+      const detail = this.detailData;
+      const detailWork = detail ?? this.viewProps.item ?? { id: this.viewProps.workId };
+      const tasks = detail?.tasks ?? [];
+      const leader = detail?.leader;
+      const doc = this.doc;
+      const detailSessions = tasks.map(task => {
+        const verified = task.session_present === true && task.identity_verified === true;
+        const canFocus = verified && !this.detailError && !this.error && Boolean(task.can_focus && task.terminal && task.current_owner);
+        const sessionStatus = task.session_present == null ? "실행 상태 확인 불가 · 종료 여부 미확인"
+          : task.session_present === false ? "현재 연결된 세션 없음"
+            : verified ? "실행 신원 확인됨" : "세션은 있으나 실행 신원 미확인";
+        return v_flex().gap(3).p(8).rounded(7).bg(t.surface)
+          .child(h_flex().justify_between().items_center().gap(8)
+            .child(div().flex_1().min_w(0).font_semibold().child(`${display(task.id)} · ${display(task.session_name ?? task.role ?? task.owner)}`))
+            .when(canFocus, x => x.child(button(`focus-task-${task.id}`, "세션 열기", () => { run("agent.focus", { terminal: task.terminal }); closeOverlay(overlay); }))))
+          .when(Boolean(task.goal), x => x.child(pair("목적", task.goal)))
+          .child(pair("앱 상태", statusText(task.native_state)))
+          .child(pair("장부 상태", ({ queued: "배정 대기", claimed: "담당자 지정", launching: "시작 준비", submitted: "수신 확인 중", running: "요청 수신됨", ready: "대기", uncertain: "결과 확인 필요", handed_off: "인계됨", awaiting_review: "검토 대기", done: "완료" })[task.state] ?? task.state))
+          .child(pair("세션", task.session_present === true ? `${display(task.session_location)} · ${sessionStatus}` : sessionStatus))
+          .when(Boolean(task.provider || task.account || task.model_requested || task.effort_requested), x => x.child(pair("요청 환경", [task.provider, task.account, task.model_requested, task.effort_requested].filter(Boolean).map(display).join(" · "))))
+          .when(Boolean(task.root), x => x.child(pair("작업 위치", task.root, true)))
+          .when(!canFocus, x => x.child(div().text_size(11).text_color(t.dim).child(sessionStatus)));
+      });
+      const selectedActionAllowed = Boolean(this.data?.actions_enabled && !this.busy && !this.actionBusy && !this.docBusy && !this.error && !this.configError);
+      const actionText = this.confirm?.kind === "approve" ? `설계 v${this.confirm.revision}의 범위와 검증 기준을 확인했고 이 버전의 진행을 허락합니다` : `설계 v${this.confirm?.revision}의 범위와 검증 기준을 확인했고 선택한 작업의 재개를 허락합니다`;
+      const confirmButtons = h_flex().gap(7).children([
+        button("detail-confirm-action", this.actionBusy ? "처리 중" : "실행", cx => cx.spawn(async cx => this.executeConfirmed(cx)), !selectedActionAllowed),
+        button("detail-cancel-action", "취소", cx => { this.confirm = null; cx.notify(); }, this.actionBusy)
+      ]);
+      const confirmBox = v_flex().flex_none().gap(6).p(8).rounded(6).bg(t.chrome)
+        .child(div().text_size(12).child(actionText))
+        .child(confirmButtons);
+      const approvalButtons = h_flex().flex_none().gap(6)
+        .when(Boolean(doc?.can_approve), el => el.child(button("detail-approve", "이 설계 승인", cx => this.begin("approve", null, cx), !doc.can_approve)))
+        .children((doc?.resumable ?? []).map(task => button(`detail-resume-${task.id}`, `재개 · ${task.id}`, cx => this.begin("resume", task, cx))));
+      const documentSection = v_flex().min_h(0).gap(6).pt(4)
+        .when(this.docBusy || this.docEditor != null, x => x.flex_1())
+        .when(!this.docBusy && this.docEditor == null, x => x.flex_none())
+        .child(h_flex().flex_none().items_center().justify_between().gap(8)
+          .child(div().whitespace_nowrap().font_semibold().text_color(t.accent).child(doc ? `${display(doc.title)} · v${display(doc.revision)}` : "설계 문서"))
+          .child(h_flex().gap(6).children([
+            button("detail-read-document", this.docBusy ? "읽는 중" : doc ? "설계 다시 읽기" : "설계 읽기", cx => cx.spawn(async cx => this.document(detailWork, cx)), this.docBusy || this.actionBusy),
+            ...(doc ? [button("detail-close-document", "문서 닫기", cx => this.closeDocument(cx))] : [])
+          ])))
+        .when(Boolean(this.message), x => x.child(div().flex_none().text_color(/실패|오류|fail|error/i.test(this.message) ? t.blocked : t.muted).child(this.message)))
+        .when(this.docBusy, x => x.child(div().flex_none().text_color(t.dim).child("설계를 읽는 중입니다.")))
+        .when(this.docEditor != null, x => x.child(Editor.new(this.docEditor).flex_1().min_h(0)))
+        .when(Boolean(doc) && !this.confirm && selectedActionAllowed, x => x.child(approvalButtons))
+        .when(Boolean(this.confirm), x => x.child(confirmBox));
+      const detailCategory = h_flex().gap(8).text_size(12).text_color(t.muted)
+        .child(div().whitespace_nowrap().child(this.viewProps.kind === "inventory" ? display(detail?.category ?? "구축 항목") : "제품 작업"))
+        .when(Boolean(detail?.phase ?? detailWork.phase ?? detailWork.status), x => x.child(div().whitespace_nowrap().child(phaseText(detail?.phase ?? detailWork.phase ?? detailWork.status))));
+      const titleBlock = v_flex().flex_1().min_w(0).gap(3)
+        .child(div().truncate().whitespace_nowrap().text_size(18).font_semibold().child(display(this.viewProps.kind === "inventory" ? detailWork.name ?? detailWork.title ?? detailWork.id : detail?.title ?? detailWork.title ?? detail?.name ?? detailWork.id)))
+        .child(detailCategory);
+      const detailHeader = h_flex().flex_none().items_center().justify_between().gap(10)
+        .child(titleBlock)
+        .child(button("detail-close", "닫기", () => closeOverlay(overlay)));
+      const leaderIsLive = Boolean(!this.detailError && !this.error && leader?.terminal && (liveAgents.some(agent => agent.address === leader.terminal || agent.pane === leader.terminal)
+        || liveTerminals.some(terminal => terminal.address === leader.terminal || terminal.name === leader.terminal)));
+      return v_flex().id("team-operations-detail").size_full().min_h(0).gap(8).p(14).bg(t.background).text_color(t.foreground).font_family(this.config?.font_family || settings().font_family || "monospace")
+        .child(detailHeader)
+        .when(this.detailBusy, x => x.child(div().p(10).text_color(t.dim).child("작업 정보를 읽는 중입니다.")))
+        .when(Boolean(this.detailError), x => x.child(div().p(8).text_color(t.blocked).child(`작업 정보를 읽지 못했습니다: ${this.detailError}`)))
+        .when(Boolean(detail?.goal || detail?.purpose || detail?.description || detail?.reason || detailWork.reason || detailWork.condition), x => x.child(v_flex().gap(4).p(8).rounded(7).bg(t.surface)
+          .child(div().font_semibold().child(this.viewProps.kind === "inventory" ? "구축 항목 조건" : "작업 목적"))
+          .child(words(detail?.goal ?? detail?.purpose ?? detail?.description ?? detailWork.reason ?? detailWork.condition ?? detailWork.title).text_size(12))))
+        .when(Boolean(leader), x => x.child(h_flex().gap(8).items_center().child(div().flex_1().whitespace_nowrap().child(`담당 팀장 · ${display(leader.label)}`)).when(leaderIsLive, x => x.child(button("focus-leader", "팀장 이동", () => run("agent.focus", { terminal: leader.terminal }))))))
+        .when(tasks.length > 0, x => x.child(v_flex().min_h(0).flex_1().gap(5).overflow_y_scrollbar()
+          .child(div().flex_none().font_semibold().text_color(t.accent).child(`연결된 세션 · ${tasks.length}`))
+          .children(detailSessions)))
+        .when(detail?.observed_at != null, x => x.child(div().flex_none().text_size(10).text_color(t.dim).child(`세션 마지막 확인 · ${clock(detail.observed_at)}`)))
+        .when(tasks.length === 0 && !this.detailBusy && !this.detailError, x => x.child(div().flex_none().p(8).text_size(12).text_color(t.muted).child(this.viewProps.kind === "inventory" && !this.viewProps.linkedWorkId ? "구축 항목은 제품 작업이나 세션으로 자동 연결하지 않습니다." : "연결된 세션 정보가 없습니다.")))
+        .when(this.viewProps.kind !== "inventory" || Boolean(this.viewProps.linkedWorkId), x => x.child(documentSection));
+    }
+    const categoryForWork = work => {
+      if (work.phase === "complete") return "complete";
+      if (["awaiting_approval", "blocked", "inspect", "quota", "environment"].includes(work.phase)) return "review";
+      if (["planning", "executing"].includes(work.phase)) return "progress";
+      if (work.phase === "approved") return "waiting";
+      return "review";
+    };
+    const categoryForInventory = item => {
+      const status = String(item.status ?? "");
+      if (status.startsWith("완료")) return "complete";
+      if (/진행|실행 중/.test(status)) return "progress";
+      if (/확인|승인|검토/.test(status)) return "review";
+      return "waiting";
+    };
+    const boardColumns = [
+      { id: "waiting", title: "대기", color: t.idle },
+      { id: "progress", title: "진행 중", color: t.working },
+      { id: "review", title: "확인 필요", color: t.blocked },
+      { id: "complete", title: "완료", color: t.done }
+    ];
+    const workCards = works.map(work => {
+      const category = categoryForWork(work);
+      const reason = work.reason || (category === "waiting" ? work.next : null);
+      return { id: work.id, category, kind: "work", label: "제품", title: work.title, state: phaseText(work.phase), reason, reasonLabel: work.reason ? "대기 이유" : "다음", percent: percent(work), raw: work };
     });
-    const inventoryRows = inventory.map(item => {
-      const status = display(item.status), complete = typeof item.status === "string" && item.status.startsWith("완료");
-      return v_flex().gap(2).p(7).rounded(7).bg(t.surface)
-        .child(h_flex().gap(8).items_center().child(div().w(52).flex_none().font_semibold().child(display(item.id))).child(div().flex_1().min_w(0).truncate().child(display(item.name))).child(div().w(100).flex_none().text_color(t.muted).child(status)))
-        .when(complete, el => el.child(h_flex().gap(8).items_center().text_size(11).child(div().text_color(t.accent).child("|██████████| 100% 1/1")).child(div().text_color(t.dim).child(`✓ 완료 조건 확인 · 전체 진척률 아님 · ${display(item.condition)}`))))
-        .when(!complete, el => el.child(div().text_size(11).text_color(t.dim).child(`대기 이유 · ${display(item.condition)}`)));
+    const inventoryCards = inventory.map(item => {
+      const complete = categoryForInventory(item) === "complete";
+      return { id: item.id, category: categoryForInventory(item), kind: "inventory", label: display(item.category ?? "구축"), title: item.name, state: statusText(item.status), reason: item.condition, reasonLabel: complete ? "조건" : "대기 이유", percent: complete ? "|██████████| 100% 1/1 · 완료 조건 확인 · 전체 진척률 아님" : null, raw: item };
     });
-    const remaining = inventory.filter(item => !(typeof item.status === "string" && item.status.startsWith("완료"))).length;
-    const completedCount = inventory.length - remaining;
-    const currentInventoryRows = inventoryRows.filter((_, index) => !(typeof inventory[index].status === "string" && inventory[index].status.startsWith("완료")));
-    const completedInventoryRows = inventoryRows.filter((_, index) => typeof inventory[index].status === "string" && inventory[index].status.startsWith("완료"));
+    const allCards = [...workCards, ...inventoryCards];
+    const completedCount = allCards.filter(card => card.category === "complete").length;
+    const boardCard = card => v_flex().id(`board-${card.kind}-${card.id}`).flex_none().gap(5).p(9).rounded(7).bg(t.surface).hover(el => el.bg(t.raised)).cursor_pointer()
+      .on_click((_e, _cx) => this.openDetail(card.kind, card.raw))
+      .child(h_flex().items_center().justify_between().gap(8)
+        .child(div().flex_none().px(5).py(2).rounded(4).bg(t.chrome).text_size(10).text_color(t.muted).whitespace_nowrap().child(card.label))
+        .child(div().flex_1().min_w(0).truncate().whitespace_nowrap().font_semibold().child(`${display(card.id)} · ${display(card.title)}`)))
+      .child(h_flex().justify_between().gap(6).child(div().flex_1().min_w(0).truncate().whitespace_nowrap().text_size(11).text_color(card.category === "complete" ? t.done : card.category === "review" ? t.blocked : card.category === "progress" ? t.working : t.muted).child(card.state)).when(card.kind === "work", x => x.child(div().flex_none().whitespace_nowrap().text_size(10).text_color(t.accent).child(card.percent))))
+      .when(card.kind === "inventory" && card.percent != null, x => x.child(v_flex().gap(2).text_size(10)
+        .child(div().whitespace_nowrap().text_color(t.accent).child("|██████████| 100% 1/1"))
+        .child(div().whitespace_nowrap().text_color(t.dim).child("완료 조건 확인 · 전체 진척률 아님"))))
+      .when(Boolean(card.reason), x => x.child(words(`${card.reasonLabel} · ${display(card.reason)}`).text_size(11).text_color(t.dim)));
+    const remaining = inventoryCards.filter(card => card.category !== "complete").length;
+    const column = definition => {
+      const cards = allCards.filter(card => card.category === definition.id);
+      const visible = definition.id === "complete" && !this.showCompleted ? [] : cards;
+      const holds = definition.id === "waiting" ? (data?.holds ?? []).map(hold => v_flex().flex_none().gap(4).p(8).rounded(7).bg(t.surface)
+        .child(div().font_semibold().child(`보류 · ${display(hold.id)}`))
+        .child(words(hold.reason).text_size(11).text_color(t.blocked))) : [];
+      return v_flex().id(`kanban-${definition.id}`).w(270).h_full().flex_none().min_h(0).gap(6).p(7).rounded(8).bg(t.chrome)
+        .child(h_flex().flex_none().items_center().justify_between().gap(6)
+          .child(h_flex().items_center().gap(6).child(div().w(8).h(8).rounded_full().bg(definition.color)).child(div().whitespace_nowrap().font_semibold().child(definition.title)).child(div().whitespace_nowrap().text_size(11).text_color(t.dim).child(String(cards.length))))
+          .when(definition.id === "complete", x => x.child(button("toggle-completed", this.showCompleted ? "접기" : "펼치기", cx => { this.showCompleted = !this.showCompleted; cx.notify(); }).text_size(10))))
+        .child(v_flex().flex_1().min_h(0).gap(6).overflow_y_scrollbar().children([...holds, ...visible.map(boardCard)]))
+        .when(cards.length === 0 && holds.length === 0, x => x.child(div().flex_none().px(4).py(8).text_size(11).text_color(t.dim).child("항목 없음")))
+        .when(definition.id === "complete" && cards.length > 0 && !this.showCompleted, x => x.child(div().flex_none().text_size(11).text_color(t.dim).child(`완료된 항목 ${cards.length}건 · 전체 진척률과 별도`)));
+    };
     const accountRows = accounts.map(account => {
       const key = `account-${account.provider}-${account.account}`, open = this.expanded.has(key);
       const usage = (value, name) => value == null ? (account.windows?.[name]?.status === "not_provided" ? "미제공" : "확인 필요") : `${display(value)}%${account.windows?.[name]?.status === "stale" ? "*" : ""}`;
@@ -274,45 +425,15 @@ export default class TeamOperations extends View {
         .when(open && Boolean(meta), el => el.child(div().text_size(10).text_color(t.muted).child(meta)))
         .when(Boolean(this.usageMessage), el => el.child(div().text_size(10).text_color(/⚠|실패|오류/i.test(this.usageMessage) ? t.blocked : t.muted).child(this.usageMessage)));
     });
-    const doc = this.doc;
-    const confirmText = this.confirm?.kind === "approve" ? `설계 v${this.confirm.revision}의 범위와 검증 기준을 확인했고 이 버전의 진행을 허락합니다` : `설계 v${this.confirm?.revision}의 범위와 검증 기준을 확인했고 선택한 작업의 재개를 허락합니다`;
     const actionRows = (data?.actions ?? []).map(action => {
       const failed = /실패|오류|fail|error/i.test(`${action.status ?? ""} ${action.message ?? ""}`);
       return h_flex().gap(8).p(6).rounded(6).bg(t.surface).text_size(11)
-        .child(div().w(72).flex_none().font_semibold().child(display(action.id)))
-        .child(div().w(90).flex_none().text_color(failed ? t.blocked : t.muted).child(display(action.status)))
-        .child(div().flex_1().min_w(0).child(display(action.message)));
+        .child(div().w(72).flex_none().truncate().whitespace_nowrap().font_semibold().child(display(action.id)))
+        .child(words(action.status).w(160).flex_none().text_color(failed ? t.blocked : t.muted))
+        .child(words(action.message).flex_1().min_w(0));
     });
-    const workPanel = v_flex().id("work-inventory").w(370).h_full().flex_none().min_h(0).gap(6).overflow_y_scrollbar()
-      .child(div().flex_none().font_semibold().text_color(t.accent).child("제품 작업"))
-      .when(workRows.length > 0, x => x.children(workRows))
-      .when(workRows.length === 0, x => x.child(div().p(8).text_size(12).text_color(t.muted).child("등록된 GUI 제품 작업 없음 · TUI 업무는 자동으로 가져오지 않음")))
-      .when(workRows.length === 0 && remaining === 0, x => x.child(div().p(7).text_size(11).text_color(t.muted).child("현재 진행 중인 제품 작업과 구축 항목이 없습니다.")))
-      .child(h_flex().pt(4).flex_none().justify_between().items_center().gap(4)
-        .child(div().min_w(0).font_semibold().text_color(t.accent).child(`전환 목록 · 전체 진행률 미정 · 남은 작업 ${remaining}건`))
-        .when(completedCount > 0 && !this.showAllInventory, x => x.child(button("toggle-completed", `완료된 구축 항목 ${completedCount}${this.showCompleted ? " 접기" : ""}`, cx => { this.showCompleted = !this.showCompleted; cx.notify(); }).text_size(11)))
-        .child(button("toggle-inventory", this.showAllInventory ? "현재 목록" : "전체 목록", cx => { this.showAllInventory = !this.showAllInventory; cx.notify(); }).text_size(11)))
-      .children(this.showAllInventory ? inventoryRows : [...currentInventoryRows, ...(this.showCompleted ? completedInventoryRows : [])])
-      .children((data?.holds ?? []).map(hold => v_flex().p(7).rounded(7).bg(t.surface).child(pair("보류", `${display(hold.id)} · ${display(hold.reason)}`))));
-    const designPane = v_flex().id("design-pane").h_full().flex_1().min_w(0).min_h(0).gap(6).p(8).rounded(8).border_1().border_color(t.border).bg(t.surface)
-      .child(h_flex().flex_none().items_center().justify_between().gap(8)
-        .child(div().flex_1().min_w(0).truncate().font_semibold().child(doc ? `${display(doc.title)} · v${display(doc.revision)}` : "설계 문서"))
-        .when(Boolean(doc), x => x.child(button("close-doc", "닫기", cx => this.closeDocument(cx)))))
-      .when(!doc && !this.docBusy, x => x.child(div().p(14).text_color(t.muted).child("작업에서 설계 읽기를 누르면 여기에 표시됩니다.")))
-      .when(this.docBusy, x => x.child(div().p(14).text_color(t.dim).child("설계를 읽는 중입니다.")))
-      .when(Boolean(this.message), x => x.child(div().flex_none().text_color(/실패|오류|fail|error/i.test(this.message) ? t.blocked : t.muted).child(this.message)))
-      .when(this.docEditor != null, x => x.child(Editor.new(this.docEditor).flex_1().min_h(0)))
-      .when(Boolean(doc) && !this.confirm && actionsAllowed, x => x.child(v_flex().flex_none().gap(6)
-        .child(button("approve", "이 설계 승인", cx => this.begin("approve", null, cx), !doc.can_approve))
-        .children((doc.resumable ?? []).map(task => button(`resume-${task.id}`, `재개 · ${task.id} (${task.owner})`, cx => this.begin("resume", task, cx))))))
-      .when(Boolean(this.confirm), x => x.child(v_flex().flex_none().gap(6).p(8).rounded(6).bg(t.chrome)
-        .child(div().child(confirmText))
-        .child(h_flex().gap(7).children([
-          button("confirm-action", this.actionBusy ? "처리 중" : "실행", cx => cx.spawn(async cx => this.executeConfirmed(cx)), !actionsAllowed),
-          button("cancel-action", "취소", cx => { this.confirm = null; cx.notify(); }, this.actionBusy)
-        ]))));
-    const mainPanels = h_flex().id("operations-main").w_full().flex_1().min_h(0).items_stretch().gap(8)
-      .child(workPanel).child(designPane);
+    const board = h_flex().id("operations-kanban").w_full().flex_1().min_h(0).items_stretch().gap(8).overflow_x_scrollbar()
+      .children(boardColumns.map(column));
     const accountArea = v_flex().id("account-area").w_full().max_h(150).flex_none().min_h(0).gap(3).overflow_y_scrollbar()
       .child(h_flex().flex_none().justify_between().items_center()
         .child(div().font_semibold().text_size(12).text_color(t.accent).child("계정 · 보조 정보"))
@@ -334,13 +455,29 @@ export default class TeamOperations extends View {
       .when(Boolean(this.configError), el => el.child(div().px(12).py(7).text_color(t.blocked).child(`로컬 backend 설정을 읽을 수 없습니다: ${this.configError}`)))
       .when(this.busy && !data, el => el.child(div().p(14).text_color(t.dim).child("운영 현황을 읽는 중입니다.")))
       .child(v_flex().id("operations-content").w_full().flex_1().min_h(0).gap(6).p(8)
-        .child(h_flex().w_full().flex_none().justify_between().items_center().gap(8)
-          .child(div().min_w(0).truncate().text_size(12).text_color(t.muted).child("GUI 전용 장부 · TUI 업무를 가져오지 않음"))
-          .child(div().text_size(12).font_semibold().child(`${summary} · 미확인 ${unknownTeams}개 · 총괄 ${display(coordinator?.reason ?? coordinatorStateText)}`)))
-        .when(waiting.length > 0, el => el.child(div().w_full().flex_none().min_w(0).truncate().text_size(11).text_color(t.muted).child(`⚠ 대기 이유 · ${waiting.join(" · ")}`)))
+        .child(v_flex().w_full().flex_none().gap(3)
+          .child(h_flex().gap(12)
+            .child(div().whitespace_nowrap().text_size(12).text_color(t.muted).child("GUI 전용 장부"))
+            .child(div().whitespace_nowrap().text_size(12).text_color(t.muted).child("TUI 업무를 가져오지 않음")))
+          .child(h_flex().flex_wrap().gap(12).text_size(12).font_semibold()
+            .child(div().whitespace_nowrap().child(`실행 ${appCounts.working}`))
+            .child(div().whitespace_nowrap().child(`사용자 답변 필요 ${appCounts.blocked}`))
+            .child(div().whitespace_nowrap().text_color(t.muted).child(`미확인 ${unknownTeams}개`))
+            .child(div().whitespace_nowrap().text_color(coordinator?.state === "recovering" ? t.working : t.muted).child(`총괄 · ${coordinatorStateText}`)))
+          .when(Boolean(coordinator?.reason), el => el.child(words(`총괄 상태 · ${display(coordinator.reason)}`).text_size(11).text_color(t.muted))))
+        .when(waiting.length > 0, el => el.child(v_flex().w_full().flex_none().gap(2)
+          .child(div().whitespace_nowrap().text_size(11).font_semibold().text_color(t.muted).child("대기 이유"))
+          .children(waiting.map((reason, index) => words(`⚠ ${index + 1} · ${reason}`).text_size(11).text_color(t.dim)))))
+        .when(works.length === 0, el => el.child(div().flex_none().text_size(11).text_color(t.muted).child("등록된 GUI 제품 작업 없음 · TUI 업무는 가져오지 않음")))
         .when(Boolean(this.coordinatorMessage), el => el.child(div().flex_none().text_size(11).text_color(/⚠|실패|오류/i.test(this.coordinatorMessage) ? t.blocked : t.muted).child(this.coordinatorMessage)))
         .when(actionRows.length > 0, el => el.child(v_flex().flex_none().gap(3).children(actionRows)))
-        .child(mainPanels)
+        .child(v_flex().flex_none().gap(3)
+          .child(div().whitespace_nowrap().text_size(11).font_semibold().text_color(t.muted).child("전환 작업 목록"))
+          .child(h_flex().flex_wrap().gap(12).text_size(11).text_color(t.muted)
+            .child(div().whitespace_nowrap().child("전체 진행률 미정"))
+            .child(div().whitespace_nowrap().child(`남은 구축 ${remaining}건`))
+            .child(div().whitespace_nowrap().child(`완료 카드 ${completedCount}건`))))
+        .child(board)
         .child(accountArea));
   }
 }
