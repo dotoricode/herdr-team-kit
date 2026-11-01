@@ -64,8 +64,8 @@ class DashboardUITests(unittest.TestCase):
         ui=UIState();view=self.view();result=frame(view,ui,width=120,now=33547)
         hit=next(h for h in result.hits if h.action==('work','W1'))
         screen=MagicMock();screen.getmaxyx.return_value=(120,121)
-        screen.getch.side_effect=[curses.KEY_MOUSE,10,ord('q')]
-        with patch('teamkit.dashboard_ui.UIState',return_value=ui),patch('teamkit.dashboard.snapshot',return_value={}),patch('teamkit.dashboard.model',return_value=view),patch('teamkit.dashboard.time.time',return_value=33547),patch('teamkit.dashboard.curses.curs_set'),patch('teamkit.dashboard.curses.mousemask'),patch('teamkit.dashboard.curses.getmouse',return_value=(0,hit.x,hit.y,0,curses.BUTTON1_PRESSED)):
+        screen.getch.side_effect=[curses.KEY_MOUSE,32,hit.x+33,hit.y+33,10,ord('q')]
+        with patch('teamkit.dashboard_ui.UIState',return_value=ui),patch('teamkit.dashboard.snapshot',return_value={}),patch('teamkit.dashboard.model',return_value=view),patch('teamkit.dashboard.time.time',return_value=33547),patch('teamkit.dashboard.curses.curs_set'),patch('teamkit.dashboard.curses.mousemask'),patch('teamkit.dashboard.curses.tigetstr',return_value=b'\x1b[M'):
             live(screen,Namespace(state='unused',publish=False,color='never',interval=60),{})
         self.assertNotIn(('work','W1'),ui.expanded,'click expands and Enter collapses the same focused row')
         self.assertTrue(any('model/high' in c.args[2] for c in screen.addnstr.call_args_list))
@@ -88,7 +88,25 @@ class DashboardUITests(unittest.TestCase):
         ui=UIState();view=self.view();result=frame(view,ui,width=120,now=33547)
         hit=next(h for h in result.hits if h.action[0]=='account')
         screen=MagicMock();screen.getmaxyx.return_value=(hit.y+1,121)
-        screen.getch.side_effect=[curses.KEY_MOUSE,ord('q')]
-        with patch('teamkit.dashboard_ui.UIState',return_value=ui),patch('teamkit.dashboard.snapshot',return_value={}),patch('teamkit.dashboard.model',return_value=view),patch('teamkit.dashboard.time.time',return_value=33547),patch('teamkit.dashboard.curses.curs_set'),patch('teamkit.dashboard.curses.mousemask'),patch('teamkit.dashboard.curses.getmouse',return_value=(0,hit.x,hit.y,0,curses.BUTTON1_PRESSED)):
+        screen.getch.side_effect=[curses.KEY_MOUSE,32,hit.x+33,hit.y+33,ord('q')]
+        with patch('teamkit.dashboard_ui.UIState',return_value=ui),patch('teamkit.dashboard.snapshot',return_value={}),patch('teamkit.dashboard.model',return_value=view),patch('teamkit.dashboard.time.time',return_value=33547),patch('teamkit.dashboard.curses.curs_set'),patch('teamkit.dashboard.curses.mousemask'),patch('teamkit.dashboard.curses.tigetstr',return_value=b'\x1b[M'):
             live(screen,Namespace(state='unused',publish=False,color='never',interval=60),{})
         self.assertEqual(ui.expanded,set())
+
+    def test_wheel_packets_scroll_the_document_without_treating_them_as_escape(self):
+        from argparse import Namespace
+        from unittest.mock import MagicMock,patch
+        import curses
+        from teamkit.dashboard import live
+        from teamkit.dashboard_ui import UIState
+        packets=[list(map(ord,'\x1b[<65;10;5M')),[curses.KEY_MOUSE,97,42,37]]
+        for packet in packets:
+            with self.subTest(packet=packet):
+                ui=UIState();ui.document=('W1','example','\n\n'.join('line '+str(i) for i in range(100)))
+                screen=MagicMock();screen.getmaxyx.return_value=(12,121);screen.getch.side_effect=[*packet,ord('q')]
+                with patch('teamkit.dashboard_ui.UIState',return_value=ui),patch('teamkit.dashboard.snapshot',return_value={}),patch('teamkit.dashboard.model',return_value=self.view()),patch('teamkit.dashboard.curses.curs_set'),patch('teamkit.dashboard.curses.mousemask'),patch('teamkit.dashboard.curses.tigetstr',return_value=b'\x1b[M'):
+                    live(screen,Namespace(state='unused',publish=False,color='never',interval=60),{})
+                self.assertIsNotNone(ui.document)
+                first_rows=[c.args[2] for c in screen.addnstr.call_args_list if c.args[0]==0]
+                self.assertTrue(any('요약으로' in s for s in first_rows))
+                self.assertTrue(any('요약으로' not in s and s.strip() for s in first_rows))

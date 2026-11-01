@@ -50,6 +50,10 @@ python3 teamkit_cli.py handoff TASK-1 --owner OWNER --writer-stopped --evidence-
 
 GitHub 변경은 PR 생성 → Codex 독립 리뷰 → 지적 검증·수정 → 최신 SHA 재리뷰 → 필수 검사 → merge 순서입니다. 자동 수정·재리뷰는 3회 후 총괄에 보고합니다. 미해결 지적·실패·시간 초과·오래된 SHA의 리뷰는 머지 근거가 아닙니다. 현재 CLI는 GitHub 머지나 리뷰 판정을 자동 실행하지 않습니다.
 
+리뷰는 확인한 커밋을 적어 PR의 코드 줄별 스레드에 남깁니다. 문제가 없을 때도 핵심 변경 줄에 확인 기록을 남깁니다. 수정·답변·관련 커밋·다시 확인한 결과는 같은 스레드에 이어 적고, 끝난 확인은 마무리 표시를 합니다. 로컬 문서는 이 기록을 대신하지 않습니다.
+
+리뷰를 먼저 요청하고 기다리는 동안 허용된 범위의 별도 검사·다른 작업·문서·설치 준비를 진행합니다. 확인 중인 코드는 고정하고 새 작업은 별도 브랜치로 나눕니다. 코드가 바뀌면 새 커밋을 다시 확인받고, 최신 리뷰·필수 검사·남은 문제 확인을 끝낸 뒤 머지합니다.
+
 내부 Git의 push·PR 게시·merge는 각각 사용자 승인을 받습니다. 내부 PR 내 리뷰 절차는 적용하지 않되 구현과 독립 검증은 구분합니다. 읽기용 브라우저 접근과 게시 승인은 별개입니다. GitHub 승인 범위를 내부 Git으로 확대하지 않습니다.
 
 Receipt waiters record SIGINT/SIGTERM cancellation before exiting. SIGKILL or host/process failure can prevent cleanup; inspect and hand off the stopped owner before retrying. A ledger receipt is not process-liveness proof.
@@ -82,3 +86,8 @@ python3 teamkit_cli.py retire TASK-1 --owner OWNER --writer-stopped --evidence-f
 `show`, `list`, `events`, `work show`는 기존 SQLite 장부를 `mode=ro`로 읽습니다. 쓰기용 Store 초기화·chmod·스키마 생성·승인 트랜잭션을 실행하지 않으며, 조회 때문에 디렉토리나 장부를 만들지 않습니다. 미존재 장부는 명시적인 오류이고, 이전 장부에 work_items가 없으면 unknown product work로 반환합니다. 손상된 DB/레코드와 읽기 잠금 오류도 JSON 오류로 보고합니다. 배타적 잠금의 SQLite 대기 설정은 1초이며 이후 오류로 반환하고, 일반 쓰기 예약 잠금 아래서는 커밋된 내용을 읽습니다. 쓰기·배정·수신·승인 경로는 기존 정책을 유지합니다.
 
 읽기 전용 조회는 기본 rollback 장부를 지원합니다. WAL은 `mode=ro`에서도 보조 파일을 생성·갱신할 수 있어 SQLite 연결 전에 명시적으로 거절합니다. journal mode를 자동 변경하거나 WAL 내용을 무시하는 immutable 조회를 하지 않습니다. 외부 writer가 조회 도중 journal mode를 변경하는 경우는 지원 범위 밖입니다.
+
+
+## 마우스·트랙패드 스크롤
+
+대화형 화면은 휠이나 세로 스와이프로 위아래를 움직이며, PgUp/PgDn도 사용할 수 있습니다. X10·SGR1006 마우스 입력을 직접 읽어 아래 스크롤 버튼이 없는 macOS 터미널 라이브러리에서도 동작하게 합니다. 클릭은 한 번만 펼치고 버튼을 놓는 입력·가로 스크롤·단순 포인터 움직임은 무시합니다. 화면을 닫거나 오류로 끝나면 켰던 마우스 모드를 끕니다.

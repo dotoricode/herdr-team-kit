@@ -317,12 +317,16 @@ def review_document(state,config,ident):
 
 
 def live(screen,args,config):
+    from .mouse_input import MouseInput
+    with MouseInput(screen) as inputs:
+        return _live(screen,args,config,inputs)
+
+
+def _live(screen,args,config,inputs):
     try:from .dashboard_ui import UIState,frame
     except ImportError as error:raise ValueError('Rich UI requires: python -m pip install -r requirements-ui.txt') from error
     screen.timeout(200);screen.keypad(True)
     curses.curs_set(0)
-    try:curses.mousemask(curses.BUTTON1_PRESSED|curses.BUTTON1_CLICKED|curses.BUTTON4_PRESSED|getattr(curses,'BUTTON5_PRESSED',0))
-    except curses.error:pass
     colored=args.color=='always' or args.color=='auto' and 'NO_COLOR' not in os.environ
     palette={}
     if colored and curses.has_colors():
@@ -365,10 +369,19 @@ def live(screen,args,config):
                 try:screen.addnstr(y,x,segment.text,max(0,width-1-x),attr)
                 except curses.error:pass
                 x+=segment.cell_length
-        footer=warning or '클릭·Enter 펼침 | ↑↓ 선택 | PgUp/PgDn 스크롤 | v 설계 읽기 | Esc 뒤로 | q 종료'
+        footer=warning or '클릭·Enter 펼침 | 휠·스와이프 스크롤 | ↑↓ 선택 | PgUp/PgDn | v 설계 읽기 | Esc 뒤로 | q 종료'
         try:screen.addnstr(height-1,0,footer,max(1,width-1),curses.A_REVERSE)
         except curses.error:pass
-        screen.refresh();key=screen.getch()
+        screen.refresh();event=inputs.read()
+        if event is None:continue
+        if event[0]=='scroll':offset+=event[1];continue
+        if event[0]=='click':
+            x,y=event[1:]
+            if 0<=y<visible and 0<=x<width-1:
+                action=result.hit(y+offset,x)
+                if action:activate(action)
+            continue
+        key=event[1]
         if key in (ord('q'),ord('Q')):return
         if key==ord('v'):
             dirty=True
@@ -381,16 +394,6 @@ def live(screen,args,config):
             dirty=True
             if ui.document:ui.document=None;offset=0
             elif ui.focus in ui.expanded:ui.expanded.remove(ui.focus)
-            continue
-        if key==curses.KEY_MOUSE:
-            try:
-                _,x,y,_,buttons=curses.getmouse()
-                if buttons&curses.BUTTON4_PRESSED:offset=max(0,offset-3)
-                elif buttons&getattr(curses,'BUTTON5_PRESSED',0):offset+=3
-                elif buttons&(curses.BUTTON1_PRESSED|curses.BUTTON1_CLICKED) and 0<=y<visible and 0<=x<width-1:
-                    action=result.hit(y+offset,x)
-                    if action:activate(action)
-            except curses.error:pass
             continue
         if key in (10,13,curses.KEY_ENTER,ord(' ')) and ui.focus:activate(ui.focus)
         if ui.document and key in (curses.KEY_DOWN,curses.KEY_UP,ord('j'),ord('k')):
