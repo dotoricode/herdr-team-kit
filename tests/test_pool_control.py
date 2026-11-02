@@ -125,6 +125,100 @@ class PoolControlTests(Fixture):
         with patch.object(context,'observe',return_value=None):
             self.assertIsNone(context.request(config,self.state,target,None,policy_rotation=True,pool_request=request['id']))
 
+    def test_distinct_work_ids_queue_fifo_and_received_head_blocks_next(self):
+        result = self.dispatched()
+        message = self.root / 'queue.txt'
+        message.write_text('Inspect the approved SDK.')
+        first = control.enqueue(self.config, self.state, 'alpha', message, work_id='SDK-ONE')
+        second = control.enqueue(self.config, self.state, 'alpha', message, work_id='SDK-TWO')
+        self.assertEqual(control.enqueue(self.config, self.state, 'alpha', message, work_id='SDK-ONE')['id'], first['id'])
+        with patch.object(context, 'capacity_available', return_value=True), patch.object(context, 'clean_prompt', return_value=True), patch.object(control, 'official', return_value=result) as sent:
+            control.advance(self.config, self.state, second['id'])
+            sent.assert_not_called()
+            control.advance(self.config, self.state, first['id'])
+            control.advance(self.config, self.state, second['id'])
+            self.assertEqual(sent.call_count, 1)
+        self.assertEqual(context.read(control.folder(self.state)/(first['id']+'.json'))['phase'], 'received')
+        self.assertEqual(context.read(control.folder(self.state)/(second['id']+'.json'))['phase'], 'pending')
+
+
+    def test_work_id_conflicting_content_is_preserved_not_overwritten(self):
+        self.prepare()
+        message = self.root / 'queue.txt'
+        message.write_text('First approved scope.')
+        first = control.enqueue(self.config, self.state, 'alpha', message, work_id='SDK-ONE')
+        message.write_text('Different unapproved replacement.')
+        with self.assertRaises(ValueError):
+            control.enqueue(self.config, self.state, 'alpha', message, work_id='SDK-ONE')
+        self.assertEqual(context.read(control.folder(self.state)/(first['id']+'.json'))['message'], 'First approved scope.')
+
+
+    def test_resolve_requires_receipt_owner_and_completion_evidence_before_next(self):
+        result = self.dispatched()
+        message = self.root/'resolve.txt'
+        message.write_text('Inspect SDK and report verified results.')
+        first = control.enqueue(self.config,self.state,'alpha',message,work_id='SDK-ONE')
+        second = control.enqueue(self.config,self.state,'alpha',message,work_id='SDK-TWO')
+        evidence = self.root/'complete.json'
+        evidence.write_text(json.dumps({'work_id':'SDK-ONE','owner':result['owner'],'attempt':result['attempt_count'],
+            'writer_stopped':True,'verification':['Checked final report artifact.']}))
+        with self.assertRaises(ValueError):
+            control.resolve(self.config,self.state,first['id'],'completed',evidence,result['owner'],result['attempt_count'])
+        with patch.object(context,'capacity_available',return_value=True),patch.object(context,'clean_prompt',return_value=True),patch.object(control,'official',return_value=result) as sent:
+            control.advance(self.config,self.state,first['id'])
+            with self.assertRaises(ValueError):
+                control.resolve(self.config,self.state,first['id'],'completed',evidence,'wrong-owner',result['attempt_count'])
+            resolved=control.resolve(self.config,self.state,first['id'],'completed',evidence,result['owner'],result['attempt_count'])
+            self.assertEqual(resolved['phase'],'completed')
+            control.advance(self.config,self.state,second['id'])
+            self.assertEqual(sent.call_count,2)
+
+    def test_uncertain_queue_head_blocks_later_work_and_cannot_be_resolved(self):
+        result=self.dispatched()
+        message=self.root/'uncertain-queue.txt'
+        message.write_text('Approved work.')
+        first=control.enqueue(self.config,self.state,'alpha',message,work_id='FIRST')
+        second=control.enqueue(self.config,self.state,'alpha',message,work_id='SECOND')
+        with patch.object(context,'capacity_available',return_value=True),patch.object(context,'clean_prompt',return_value=True),patch.object(control,'official',side_effect=TimeoutError) as sent:
+            control.advance(self.config,self.state,first['id'])
+            control.advance(self.config,self.state,first['id'])
+            control.advance(self.config,self.state,second['id'])
+            self.assertEqual(sent.call_count,1)
+        records=control.requests(self.state)
+        self.assertEqual([j['phase'] for j in records],['uncertain','pending'])
+        self.assertEqual(records[0]['error_stage'],'sending')
+        self.assertEqual(records[0]['error_code'],'official_execution_unconfirmed')
+        evidence=self.root/'bad-resolve.json'
+        evidence.write_text(json.dumps({'writer_stopped':True,'verification':['Not sufficient to resolve unknown delivery.']}))
+        with self.assertRaises(ValueError):
+            control.resolve(self.config,self.state,first['id'],'completed',evidence,result['owner'],result['attempt_count'])
+
+    def test_legacy_done_is_receipt_only_preserved_and_blocks_new_work(self):
+        self.prepare()
+        legacy={'id':'a'*32,'team':'alpha','task':'L1','message':'Old work','digest':'legacy',
+                'phase':'done','at':1,'updated_at':2}
+        path=control.folder(self.state)/(legacy['id']+'.json')
+        context.write(path,legacy)
+        before=path.read_bytes()
+        message=self.root/'new.txt';message.write_text('New work.')
+        new=control.enqueue(self.config,self.state,'alpha',message,work_id='NEW')
+        with patch.object(control,'plan') as plan:
+            control.advance(self.config,self.state,new['id'])
+        plan.assert_not_called()
+        self.assertEqual(path.read_bytes(),before)
+        self.assertEqual(control.requests(self.state)[0]['id'],legacy['id'])
+
+    def test_concurrent_queue_drainers_send_only_one_head(self):
+        from concurrent.futures import ThreadPoolExecutor
+        result=self.dispatched()
+        message=self.root/'concurrent.txt';message.write_text('Approved work.')
+        first=control.enqueue(self.config,self.state,'alpha',message,work_id='FIRST')
+        second=control.enqueue(self.config,self.state,'alpha',message,work_id='SECOND')
+        with patch.object(context,'capacity_available',return_value=True),patch.object(context,'clean_prompt',return_value=True),patch.object(control,'official',return_value=result) as sent:
+            with ThreadPoolExecutor(max_workers=4) as workers:
+                list(workers.map(lambda ident:control.advance(self.config,self.state,ident),[first['id'],second['id'],first['id'],second['id']]))
+            self.assertEqual(sent.call_count,1)
+
     def test_request_constraint_waits_instead_of_using_another_eligible_account(self):
         from teamkit.__main__ import select_execution
         self.prepare()
@@ -208,12 +302,12 @@ class PoolControlTests(Fixture):
         first=control.enqueue(self.config,self.state,'alpha',message)
         self.assertEqual(control.enqueue(self.config,self.state,'alpha',message)['id'],first['id'])
         other=self.root/'other.txt';other.write_text('different pending work')
-        with self.assertRaises(ValueError):control.enqueue(self.config,self.state,'alpha',other)
+        self.assertNotEqual(control.enqueue(self.config,self.state,'alpha',other)['id'],first['id'])
         with patch.object(context,'capacity_available',return_value=True),patch.object(context,'clean_prompt',return_value=True),patch.object(control,'official',return_value=result) as official:
             control.advance(self.config,self.state,first['id']);control.advance(self.config,self.state,first['id'])
             self.assertEqual(official.call_count,1)
             self.assertIn('--expected-owner',official.call_args.args)
-        self.assertEqual(control.requests(self.state)[0]['phase'],'done')
+        self.assertEqual(control.requests(self.state)[0]['phase'],'received')
 
     def test_uncertain_send_never_replays_or_changes_owner(self):
         result=self.dispatched();p=self.root/'request.txt';p.write_text('Approved remaining work only')

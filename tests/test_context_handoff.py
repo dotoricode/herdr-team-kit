@@ -28,6 +28,30 @@ class ContextHandoffTests(unittest.TestCase):
     def request(self, used=90):
         return context.request(self.config,self.state,self.target,{**self.observation,'used':used})
 
+    def test_existing_supervisor_without_matching_source_version_is_not_reused(self):
+        import hashlib
+        scope=hashlib.sha256(str(self.state.resolve()).encode()).hexdigest()[:12]
+        terminal={'address':'tsupervisor','state':'live','name':'context-supervisor-'+scope,
+                  'argv':['auto-context','serve']}
+        def native(*args):
+            return {'terminals':[terminal]} if args[0]=='ls' else terminal
+        with patch.object(context,'load',return_value=self.config),patch.object(context,'_call',side_effect=native):
+            with self.assertRaisesRegex(ValueError,'source version'):
+                context.ensure(self.config_path,self.state)
+            context.write(context.directory(self.state)/'supervisor-start.json',
+                {'terminal':'tsupervisor','source_fingerprint':context.source_fingerprint()})
+            context.ensure(self.config_path,self.state)
+
+    def test_changed_source_stops_supervisor_before_next_tick(self):
+        self.state.touch()
+        with patch.object(context,'source_fingerprint',return_value='changed'),patch.object(context,'tick') as tick:
+            result=context.serve(self.config_path,self.state,once=True)
+        tick.assert_not_called()
+        self.assertTrue(result['reload_required'])
+        saved=context.read(context.directory(self.state)/'supervisor.json')
+        self.assertTrue(saved['reload_required'])
+        self.assertFalse(saved['enabled'])
+
     def test_crossing_90_latches_once_even_if_context_later_compacts(self):
         self.assertIsNone(self.request(89.9))
         job = self.request(90)

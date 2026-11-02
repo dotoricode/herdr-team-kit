@@ -82,6 +82,18 @@ GitHub 변경은 PR 생성 → Codex 독립 리뷰 → 지적 검증·수정 →
 
 Receipt waiters record SIGINT/SIGTERM cancellation before exiting. SIGKILL or host/process failure can prevent cleanup; inspect and hand off the stopped owner before retrying. A ledger receipt is not process-liveness proof.
 
+## 팀장 작업 큐
+
+`pool assign --team TEAM --work WORK-ID --message-file FILE --provider codex --account team`은 요청을 디스크 큐에 넣습니다. `--completion-file FILE`로 최종 보고 주체·검증·산출물 등 완료 조건을 함께 고정할 수 있습니다. 같은 팀의 같은 work ID와 동일한 본문·계정 제약·완료 조건은 기존 요청으로 합칩니다. 다른 내용으로 같은 ID를 덮어쓰지 않습니다. 서로 다른 작업은 접수 순서대로 보존합니다. work ID 생략 시 본문 해시를 키로 사용하며, 같은 본문을 새로운 업무로 요청하려면 새 work ID를 지정합니다.
+
+`received`는 전달과 수신 확인이며 업무 완료가 아닙니다. 기존 `done` 기록도 수신만 확인한 것으로 보존하고 다음 작업을 막습니다. 앞선 업무가 `completed` 또는 `deferred`로 확인되기 전에는 native가 idle이어도 다음 요청을 보내지 않습니다. `uncertain` 요청은 자동 재전송하거나 resolve하지 않으며 이후 작업도 기다립니다. 기존 기록은 삭제하거나 업무 완료로 승격하지 않습니다.
+
+`pool resolve --request REQUEST-ID --outcome completed|deferred --evidence-file JSON --expected-owner OWNER --expected-attempt N`은 수신된 업무만 정리합니다. 현재 장부와 수신자의 owner·attempt·terminal이 일치하고 native가 idle이며 입력 초안이 없어야 합니다. JSON에는 `work_id`, `owner`, `attempt`, `writer_stopped: true`, 비어 있지 않은 `verification` 문자열 배열을 넣습니다. 고정 완료 조건이 있으면 동일한 `completion_requirements` 원문과 그 조건을 실제 검증한 근거가 필요합니다. `deferred`에는 인계할 `next`도 필요합니다. 팀장 초안만 있는 것을 다른 담당자의 최종 보고 완료로 선언해서는 안 됩니다. 이 명령은 검증 결과의 명시 기록이며 서버·모델·게시 승인 범위를 확대하지 않습니다.
+
+긴 제품 작업이 native 전달 대기 시간을 넘겨 `uncertain`이 되면 자동 재전송하지 않습니다. 총괄이 실제 ACK·화면·소유권을 대조해 수동으로 정합화해야 하며, 이 최소 큐는 그 결과를 추정하지 않습니다. 업무 수신 뒤 auto-context 등으로 owner가 바뀐 경우에도 기존 receiver와 현재 owner가 달라 resolve를 거절하고 수동 확인을 기다립니다. 소유권 인계 chain의 자동 추적과 불명 수신 정합화 인터페이스는 이번 범위에 포함하지 않습니다.
+
+`pool status`는 요청별 work ID·계정 제약·완료 조건과 안전한 오류 단계·코드를 표시합니다. 오류 원문은 저장하지 않으므로 이 코드만으로 과거 native 실패의 정확한 원인을 단정하지 않습니다. supervisor와 현재 Python 소스의 fingerprint가 다르면 새 assign은 거절합니다. active jobs와 전달 불명을 먼저 확인하고 supervisor만 안전하게 재기동해야 하며 기존 팀장 세션은 재시작하지 않습니다. 새 supervisor는 실행 중 소스 변경을 감지하면 다음 tick을 중단하고 진행 중 작업이 끝나기를 기다립니다.
+
 ## 운영 현황과 계정 사용률
 
 `monitor`는 호스트에서 native 실행 상태를 3초마다 관측하고 Codex 회사/개인 사용률을 30초마다 조회합니다. provider 조회는 별도 스레드에서 실행하여 지연된 한도 조회가 실행 상태 관측을 막지 않습니다. Claude는 기존 실제 응답에 연결된 statusline 수집을 유지합니다. 한도 확인을 위한 모델 턴·API fallback은 만들지 않습니다.

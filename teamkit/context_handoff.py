@@ -23,6 +23,16 @@ from .policy import account_order, choose_account, number
 from .runtime import profile_home_matches
 from .store import Store, ACTIVE
 
+def source_fingerprint():
+    digest=hashlib.sha256()
+    for path in sorted(Path(__file__).parent.glob('*.py')):
+        digest.update(path.name.encode());digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+LOADED_SOURCE_FINGERPRINT=source_fingerprint()
+
+
 TERMINAL = re.compile(r't[0-9a-z]+\Z')
 SESSION = re.compile(r'[A-Za-z0-9_-]{1,128}\Z')
 JOB = re.compile(r'[a-f0-9]{32}\Z')
@@ -743,7 +753,7 @@ def tick(config_path, state, pool=None, futures=None):
     if session_pool.enabled(config):
         from . import pool_control
         for assignment in pool_control.requests(state):
-            if assignment['phase'] in ('done','uncertain','cancelled'):continue
+            if assignment['phase'] in ('done','received','completed','deferred','uncertain','cancelled'):continue
             key='assignment-'+assignment['id']
             if pool is None:pool_control.advance(config_path,state,assignment['id'])
             elif key not in futures:futures[key]=pool.submit(pool_control.advance,config_path,state,assignment['id'])
@@ -760,8 +770,12 @@ def serve(config_path, state, once=False):
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures={}
             while True:
+                if source_fingerprint()!=LOADED_SOURCE_FINGERPRINT:
+                    write(directory(state)/'supervisor.json',{'observed_at':time.time(),'pid':os.getpid(),
+                        'enabled':False,'reload_required':True,'terminal':os.environ.get('HC_TERMINAL_ID'),'source_fingerprint':LOADED_SOURCE_FINGERPRINT})
+                    return {'enabled':False,'reload_required':True}
                 value = tick(config_path, state, None if once else pool, futures)
-                write(directory(state) / 'supervisor.json', {'observed_at':time.time(), 'pid':os.getpid(), 'enabled':value['enabled']})
+                write(directory(state) / 'supervisor.json', {'observed_at':time.time(), 'pid':os.getpid(), 'enabled':value['enabled'], 'terminal':os.environ.get('HC_TERMINAL_ID'), 'source_fingerprint':LOADED_SOURCE_FINGERPRINT})
                 if once:
                     return value
                 time.sleep(settings(load(config_path))['interval'])
@@ -824,6 +838,12 @@ def ensure(config_path, state):
             value = _call('get', live[0]['address'])
             if 'auto-context' not in value.get('argv', []) or 'serve' not in value.get('argv', []):
                 raise ValueError('context supervisor program changed')
+            heartbeat=read(directory(state)/'supervisor.json') or {}
+            started=read(path) or {}
+            running=(heartbeat.get('source_fingerprint') if heartbeat.get('terminal')==live[0]['address']
+                     else started.get('source_fingerprint') if started.get('terminal')==live[0]['address'] else None)
+            if running!=source_fingerprint():
+                raise ValueError('context supervisor source version differs; inspect active jobs and restart only the supervisor safely')
             return
         previous = read(path)
         if previous and previous.get('phase') == 'starting':
@@ -832,7 +852,7 @@ def ensure(config_path, state):
         created = _call('run', '--json', '--bg', '--outlive-parent', '--no-notify',
                         '--name', name, '--label', 'teamkit.context-scope=' + scope,
                         '--', *cli(config_path, state, 'auto-context', 'serve'))
-        write(path, {'phase':'started', 'terminal':created['address'], 'at':time.time()})
+        write(path, {'phase':'started', 'terminal':created['address'], 'at':time.time(), 'source_fingerprint':LOADED_SOURCE_FINGERPRINT})
 
 
 def summary(config, state):
