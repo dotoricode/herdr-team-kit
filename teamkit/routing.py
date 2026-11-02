@@ -70,6 +70,11 @@ def execution_candidates(config, task, role, now):
                 or constraint.get('account') not in ('team', 'personal')):
             raise ValueError('execution constraint requires a configured provider and account')
         provider, account = constraint['provider'], constraint['account']
+        cls = task.get('classification', {'kind': 'general', 'risks': []})
+        fixed = (task.get('user_decision') or task['role'] not in ('leader', 'implementer')
+                 or cls['kind'] not in ('general', 'small') or cls['risks'])
+        if fixed and provider != role['provider']:
+            return []  # A request pin cannot replace an approved or specialized model policy.
         return [{**role, **constraint,
                  'model': role['model'] if provider == role['provider'] else config['profiles'][provider][account]['model']}]
     preference = execution_preference(config)

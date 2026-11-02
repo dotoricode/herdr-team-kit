@@ -163,6 +163,15 @@ def advance(config_path,state,ident):
                         if task.get('execution_constraint')!=requested:
                             if task['state'] not in ('ready','queued','handed_off'):
                                 return save('pending','기존 담당 실행이 안전한 경계에 도달하기를 기다립니다.')
+                            if task.get('owner'):
+                                from .core_runtime import CoreRuntime
+                                try:
+                                    native=CoreRuntime(task)._native(task['runtime']['name'],ready=True)
+                                    target=next(t for t in context.targets(config,state) if t['id']==task['id'])
+                                    if not context.clean_prompt(native,target):
+                                        return save('pending','기존 담당 입력을 보존하고 안전한 경계를 기다립니다.')
+                                except Exception:
+                                    return save('pending','기존 담당 실행·신원을 확인한 뒤 선택을 변경합니다.')
                             if requested is None:task.pop('execution_constraint',None)
                             else:task['execution_constraint']=requested
                             store._save(task,'execution_constraint',{'request':job['id'],'selection':requested})

@@ -64,6 +64,29 @@ class PoolControlTests(Fixture):
         self.identity_mock.assert_called()
         return result
 
+    def test_pin_does_not_replace_explicit_model_policy(self):
+        from teamkit.__main__ import select_execution
+        self.prepare()
+        task = self.call('show', 'L1')
+        task['user_decision'] = {'provider': 'claude', 'model': 'approved-special', 'effort': 'high', 'failure_count': 0}
+        task['execution_constraint'] = {'provider': 'codex', 'account': 'team'}
+        store = Store(self.state)
+        try:
+            selected = select_execution(load(self.config), store, task, time.time())
+        finally:
+            store.close()
+        self.assertEqual(selected['action'], 'wait')
+
+    def test_pin_waits_while_native_is_working_despite_ledger_ready(self):
+        self.dispatched()
+        message = self.root / 'working-pin.txt'
+        message.write_text('Do not interrupt the current work.')
+        request = control.enqueue(self.config, self.state, 'alpha', message, 'claude', 'team')
+        with patch('teamkit.core_runtime.CoreRuntime._native', side_effect=RuntimeError('working')):
+            control.advance(self.config, self.state, request['id'])
+        self.assertNotIn('execution_constraint', self.call('show', 'L1'))
+        self.assertEqual(control.requests(self.state)[0]['phase'], 'pending')
+
     def test_request_constraint_waits_instead_of_using_another_eligible_account(self):
         from teamkit.__main__ import select_execution
         self.prepare()
