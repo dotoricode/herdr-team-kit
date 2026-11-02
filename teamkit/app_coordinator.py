@@ -4,15 +4,19 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import stat
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
+from contextlib import closing
 
 from .app_bridge import core_read
 from .config import load, profile, binding, cached_quota
-from .core_runtime import _call, require_managed, CoreRuntime, startup_native
+from .core_runtime import _call, require_managed, CoreRuntime, startup_native, _model_effort
 from .policy import account_order, choose_account
 from .runtime import launch_spec, RuntimeError as KitError
 from .store import Store
@@ -33,6 +37,9 @@ def save(path, value):
         with os.fdopen(fd,'w') as out:
             json.dump(value,out,ensure_ascii=False,indent=2);out.flush();os.fsync(out.fileno())
         os.replace(name,path)
+        directory=os.open(path.parent,os.O_RDONLY)
+        try:os.fsync(directory)
+        finally:os.close(directory)
     finally:
         if os.path.exists(name):os.unlink(name)
 
@@ -44,6 +51,281 @@ def read_record(state):
     value=json.loads(path.read_text())
     if not isinstance(value,dict):raise ValueError('총괄 복구 기록을 확인하세요.')
     return value
+
+
+def _rebind_json(path, limit=1024*1024):
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(fd,'rb') as source:
+        info=os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or not 0<info.st_size<=limit:
+            raise ValueError('bounded regular reconciliation evidence required')
+        raw=source.read(limit+1)
+    if len(raw)>limit:raise ValueError('reconciliation evidence grew during read')
+    try:value=json.loads(raw)
+    except (UnicodeError,ValueError) as error:raise ValueError('reconciliation evidence must be JSON') from error
+    if not isinstance(value,dict):raise ValueError('reconciliation evidence must be an object')
+    return value,hashlib.sha256(raw).hexdigest(),raw
+
+
+def _rebind_environment(pid):
+    """Return selected metadata and a credential-presence flag, never credentials."""
+    from .runtime import AUTH_ENV
+    result=subprocess.run(['ps','eww','-p',str(pid),'-o','command='],capture_output=True,text=True,timeout=5,check=True)
+    keys={'HOME','CODEX_HOME','TEAMKIT_CONFIG','TEAMKIT_STATE','TEAMKIT_GUI_COORDINATOR',*AUTH_ENV}
+    found={}
+    for key,value in re.findall(r'(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*?)(?=\s[A-Za-z_][A-Za-z0-9_]*=|$)',result.stdout):
+        if key not in keys:continue
+        if key in AUTH_ENV:
+            if value.strip():found['_api_credentials_present']=True
+            continue
+        if key in found:raise ValueError('ambiguous native profile environment')
+        found[key]=value.strip()
+    return found
+
+
+def _rebind_context(config_path,state,record):
+    config_path=Path(config_path).resolve();state=Path(state).resolve()
+    config,digest,_=_rebind_json(config_path)
+    config=load(config_path)
+    if _rebind_json(config_path)[1]!=digest:raise ValueError('config changed during policy read')
+    policy=config.get('coordinator') or {}
+    if (config.get('runtime_backend')!='core' or policy.get('provider')!='codex'
+            or not record.get('nonce') or record.get('account') not in ('team','personal')
+            or not isinstance(record.get('context_session_id'),str)
+            or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}',record['context_session_id'])
+            or not isinstance(policy.get('root'),str) or not Path(policy['root']).is_absolute()
+            or not Path(policy['root']).is_dir()):
+        raise ValueError('existing core coordinator identity and working root required')
+    pr=profile(config,'codex',record['account'],policy)
+    if (record.get('profile_binding')!=binding(pr) or record.get('model')!=pr['model']
+            or record.get('effort')!=pr.get('effort','low')):
+        raise ValueError('existing profile binding/model/effort policy changed; do not replace it')
+    binding_path=Path(config.get('context_bindings',''))
+    if not binding_path.is_absolute():raise ValueError('existing absolute App bindings required')
+    linked,binding_digest,_=_rebind_json(binding_path)
+    sp,tab,created=destination(record,linked)
+    if created or sp!=record.get('space') or tab!=record.get('tab'):
+        raise ValueError('existing coordinator space/tab required; no new destination is allowed')
+    return config,pr,digest,str(binding_path.resolve()),binding_digest
+
+
+def _rebind_native(config_path,state,record,pr,pid,exact_argv=None):
+    from .prompt_state import empty_input
+    if type(pid) is not int or pid<=0:raise ValueError('positive exact native PID required')
+    name='gui-coordinator-'+scope(state)
+    actor=CoreRuntime(dict(id='GUI-COORDINATOR',owner=record['nonce'],provider='codex',
+        runtime=dict(backend='core',name=name,terminal=record['terminal'],native_pid=pid)))
+    native=actor._native(name,ready=True)
+    expected={'teamkit.app-scope':scope(state),'teamkit.kind':'coordinator',
+              'herdr.space':record['space'],'herdr.tab':record['tab']}
+    if any(native.get('labels',{}).get(k)!=v for k,v in expected.items()):
+        raise ValueError('coordinator labels or existing destination changed')
+    argv=native['foreground'].get('argv') or []
+    sessions=[argv[i+1] for i,value in enumerate(argv[:-1]) if value=='resume']
+    if sessions!=[record['context_session_id']]:raise ValueError('native must resume the exact existing session')
+    if Path(native['foreground'].get('cwd','')).resolve()!=Path(load(config_path)['coordinator']['root']).resolve():
+        raise ValueError('coordinator native cwd changed')
+    if exact_argv is not None:
+        if (not argv or Path(argv[0]).name!='codex' or argv[1:]!=exact_argv[1:]
+                or _model_effort('codex',argv)!=(pr['model'],pr.get('effort','low'))):
+            raise ValueError('new native argv must match the prepared resume policy exactly')
+    env=_rebind_environment(pid)
+    if not isinstance(env.get('HOME'),str) or not Path(env['HOME']).is_absolute():
+        raise ValueError('native process environment is unavailable; do not infer its default profile')
+    effective=env.get('CODEX_HOME',str(Path(env['HOME'])/'.codex'))
+    if Path(effective).resolve()!=Path(pr['home']).resolve() or env.get('_api_credentials_present'):
+        raise ValueError('native profile environment differs or API credentials are present')
+    if exact_argv is not None and any(env.get(k)!=v for k,v in {
+            'CODEX_HOME':pr['home'],'TEAMKIT_CONFIG':str(Path(config_path).resolve()),
+            'TEAMKIT_STATE':str(Path(state).resolve()),'TEAMKIT_GUI_COORDINATOR':record['nonce']}.items()):
+        raise ValueError('new native profile/controller environment is not the prepared one')
+    screen=_call('read','--json',record['terminal'])
+    if screen.get('complete') is not True or not empty_input(screen.get('text','')):
+        raise ValueError('coordinator has a user draft, dialog or incomplete screen; preserve it')
+    after=actor._native(name,ready=True)
+    if (after.get('turn')!=native.get('turn') or after.get('foreground')!=native.get('foreground')
+            or after.get('labels')!=native.get('labels')):
+        raise ValueError('coordinator turn/process metadata changed during observation')
+    return native
+
+
+def _rebind_pending(intent):
+    return {**intent['original_record'],'phase':'rebinding','policy_rebind_intent':intent['id'],
+            'reason':'기존 대화·정책을 보존한 PID 재결합 대기입니다. 자동 종료·실행하지 않습니다.'}
+
+
+def _rebind_no_pending(state,record):
+    from .context_handoff import jobs
+    if any(j.get('target',{}).get('kind')=='coordinator' and j.get('phase') not in ('done','cancelled','closed')
+           for j in jobs(state)):
+        raise ValueError('unresolved coordinator handoff exists; preserve it before policy reconciliation')
+    with closing(sqlite3.connect(Path(state).resolve().as_uri()+'?mode=ro',uri=True)) as db:
+        tables={x[0] for x in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if 'operation_intake_attempts' in tables:
+            for body, in db.execute('SELECT body FROM operation_intake_attempts'):
+                attempt=json.loads(body)
+                if attempt.get('owner')==record['nonce'] and attempt.get('phase')!='submitted':
+                    raise ValueError('unresolved coordinator classification attempt exists; do not replace its PID')
+        if 'resource_reservations' in tables:
+            for body, in db.execute('SELECT body FROM resource_reservations'):
+                reservation=json.loads(body);session=reservation.get('session') or {}
+                if (session.get('owner')==record['nonce'] and session.get('terminal')==record['terminal']
+                        and (reservation.get('execution_reserved') or reservation.get('writes_held'))):
+                    raise ValueError('coordinator still owns active execution/resource reservations')
+
+
+def _rebind_lock(state):
+    fd=os.open(Path(state).resolve().with_name('coordinator.lock'),os.O_CREAT|os.O_WRONLY|os.O_NOFOLLOW|os.O_NONBLOCK,0o600)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd);raise ValueError('coordinator lock must be a regular file')
+    return fd
+
+
+def prepare_rebind(config_path,state,checkpoint_file,owner,pid,session_id):
+    """Persist a fenced intent and return argv only; never launch/kill/send/auth."""
+    require_managed();state=Path(state).resolve();config_path=Path(config_path).resolve()
+    lock=_rebind_lock(state)
+    try:
+        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        record,record_digest,original=_rebind_json(record_path(state))
+        config,pr,config_digest,binding_path,binding_digest=_rebind_context(config_path,state,record)
+        checkpoint_path=Path(checkpoint_file).absolute()
+        checkpoint,checkpoint_digest,_=_rebind_json(checkpoint_path,256*1024)
+        ident=hashlib.sha256(json.dumps([owner,pid,session_id,config_digest,checkpoint_digest],sort_keys=True).encode()).hexdigest()[:32]
+        root=state.with_name('coordinator-rebinds');root.mkdir(mode=0o700,exist_ok=True)
+        if root.is_symlink():raise ValueError('coordinator reconciliation storage must not be a symlink')
+        path=root/(ident+'.json')
+        previous=_rebind_json(path)[0] if path.exists() else None
+        if record.get('policy_rebind_intent') and record['policy_rebind_intent']!=ident and record.get('phase')=='rebinding':
+            raise ValueError('another unresolved coordinator intent exists; inspect it without replacement')
+        if previous and previous['phase']=='completed':
+            return _complete_rebind(config_path,state,path,previous,owner,previous['new_pid'])
+        if (record.get('phase') not in ('ready','rebinding') or record.get('nonce')!=owner
+                or type(pid) is not int or record.get('native_pid')!=pid or record.get('context_session_id')!=session_id):
+            raise ValueError('existing ready owner/PID/session differs; no replacement is allowed')
+        required={'task':'GUI-COORDINATOR','owner':owner,'terminal':record['terminal'],'native_pid':pid,
+                  'session_id':session_id,'config_sha256':config_digest,'profile_binding':binding(pr)}
+        if (any(checkpoint.get(k)!=v for k,v in required.items()) or type(checkpoint.get('native_pid')) is not int
+                or checkpoint.get('writer_stopped') is not True or checkpoint.get('background_writers')!=[]
+                or not isinstance(checkpoint.get('verification'),list) or not checkpoint['verification']
+                or any(not isinstance(v,str) or not v.strip() for v in checkpoint['verification'])
+                or type(checkpoint.get('native_turn')) is not int or checkpoint['native_turn']<0
+                or type(checkpoint.get('observed_at')) not in (int,float)
+                or not 0<=time.time()-checkpoint['observed_at']<=300
+                or not checkpoint_path.is_relative_to(Path(config['coordinator']['root']).resolve())):
+            raise ValueError('fresh same-actor checkpoint with explicit stopped-writer evidence required')
+        _rebind_no_pending(state,record)
+        native=_rebind_native(config_path,state,record,pr,pid)
+        if native.get('turn')!=checkpoint['native_turn']:
+            raise ValueError('checkpoint belongs to another native turn; preserve the current execution')
+        if _rebind_json(config_path)[1]!=config_digest or _rebind_json(binding_path)[1]!=binding_digest:
+            raise ValueError('config or bindings changed during prepare')
+        if previous:
+            if previous['phase'] not in ('preparing','prepared') or previous['bindings_sha256']!=binding_digest:
+                raise ValueError('existing intent contract changed')
+            if _rebind_json(previous['original_record_file'])[1]!=previous['original_record_sha256']:
+                raise ValueError('original coordinator backup changed')
+            if record!=_rebind_pending(previous) and record_digest!=previous['original_record_sha256']:
+                raise ValueError('coordinator changed after the existing intent')
+            if previous['phase']=='prepared' and record==_rebind_pending(previous):return previous
+            intent=previous
+        else:
+            if _rebind_json(record_path(state))[1]!=record_digest:raise ValueError('coordinator changed during prepare')
+            spec=launch_spec('codex',pr,session_id)
+            spec['env'].update(TEAMKIT_CONFIG=str(config_path),TEAMKIT_STATE=str(state),TEAMKIT_GUI_COORDINATOR=owner)
+            spec['args']+=['--add-dir',str(state.parent)]
+            backup=root/(ident+'.original.json')
+            try:fd=os.open(backup,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+            except FileExistsError:
+                if _rebind_json(backup)[1]!=record_digest:raise ValueError('preserved original coordinator differs')
+            else:
+                with os.fdopen(fd,'wb') as output:output.write(original);output.flush();os.fsync(output.fileno())
+            intent={'id':ident,'phase':'preparing','at':time.time(),'old_pid':pid,'owner':owner,'session_id':session_id,
+                'config_path':str(config_path),'config_sha256':config_digest,'bindings_path':binding_path,
+                'bindings_sha256':binding_digest,'checkpoint_file':str(checkpoint_path),'checkpoint_sha256':checkpoint_digest,
+                'checkpoint':checkpoint,'profile_binding':binding(pr),'original_record':record,
+                'original_record_file':str(backup),'original_record_sha256':record_digest,
+                'native_argv':['codex',*spec['args']],
+                'resume_argv':['env',*(k+'='+v for k,v in spec['env'].items()),'codex',*spec['args']],
+                'errors':[],'boundary':'No process is started or stopped. Preserve the current address, conversation, owner, profile and App binding.',
+                'next_action':'Inspect this same intent and native terminal before any external process action; repeated prepare never authorizes a retry launch.'}
+            save(path,intent)
+        save(record_path(state),_rebind_pending(intent))
+        try:
+            _rebind_no_pending(state,record)
+            if _rebind_native(config_path,state,record,pr,pid).get('turn')!=native.get('turn'):
+                raise ValueError('coordinator turn changed after the durable intent; preserve pending recovery')
+        except Exception as error:
+            intent['errors']=[*intent.get('errors',[]),{'at':time.time(),'type':type(error).__name__,'reason':str(error)}]
+            save(path,intent)
+            raise
+        intent['phase']='prepared';save(path,intent)
+        return intent
+    finally:os.close(lock)
+
+
+def _complete_rebind(config_path,state,path,intent,owner,pid):
+    record=_rebind_json(record_path(state))[0];original=intent['original_record']
+    config,pr,config_digest,binding_path,binding_digest=_rebind_context(config_path,state,record)
+    if (intent.get('phase') not in ('prepared','completing','completed') or owner!=intent['owner']
+            or record.get('nonce')!=owner or record.get('policy_rebind_intent')!=intent['id']
+            or str(Path(config_path).resolve())!=intent['config_path'] or config_digest!=intent['config_sha256']
+            or binding_path!=intent['bindings_path'] or binding_digest!=intent['bindings_sha256']
+            or _rebind_json(intent['checkpoint_file'])[1]!=intent['checkpoint_sha256']
+            or _rebind_json(intent['original_record_file'])[1]!=intent['original_record_sha256']
+            or type(pid) is not int or pid<=0 or pid==intent['old_pid']):
+        raise ValueError('intent/config/checkpoint/owner/PID contract differs; preserve unresolved intent')
+    already=record.get('phase')=='ready' and record.get('native_pid')==pid
+    if already:
+        if any(record.get(k)!=v for k,v in original.items()
+               if k not in ('phase','native_pid','policy_rebind_intent','policy_rebind_history')):
+            raise ValueError('completed coordinator identity or policy changed after the original intent')
+        if not any(x.get('intent')==intent['id'] and x.get('new_pid')==pid for x in record.get('policy_rebind_history',[])):
+            raise ValueError('current PID has no matching formal reconciliation audit')
+        if intent['phase']=='completed' and _rebind_json(record_path(state))[1]!=intent.get('completed_record_sha256'):
+            raise ValueError('completed coordinator record changed; never overwrite a later state')
+    elif record!=_rebind_pending(intent):
+        raise ValueError('original coordinator record changed; never overwrite a later PID')
+    if intent.get('new_pid') not in (None,pid):raise ValueError('late native PID differs from the original completion')
+    def process_boundary():
+        try:os.kill(intent['old_pid'],0)
+        except ProcessLookupError:pass
+        else:raise ValueError('original OS PID is still alive or was reused; do not rebind')
+        os.kill(pid,0)
+    process_boundary()
+    native=_rebind_native(config_path,state,original,pr,pid,intent['native_argv'])
+    process_boundary()
+    _rebind_no_pending(state,record)
+    if (_rebind_json(config_path)[1]!=intent['config_sha256'] or _rebind_json(binding_path)[1]!=intent['bindings_sha256']
+            or _rebind_json(intent['checkpoint_file'])[1]!=intent['checkpoint_sha256']
+            or _rebind_json(record_path(state))[0]!=record):raise ValueError('coordinator/config/bindings changed during completion')
+    if intent['phase']=='completed':return intent
+    intent.update(phase='completing',new_pid=pid);save(path,intent)
+    if not already:
+        audit={'intent':intent['id'],'at':time.time(),'old_pid':intent['old_pid'],'new_pid':pid,
+               'session_id':intent['session_id'],'owner':owner,'checkpoint_sha256':intent['checkpoint_sha256'],
+               'config_sha256':intent['config_sha256'],'native_turn':native.get('turn')}
+        updated={**original,'native_pid':pid,'phase':'ready','policy_rebind_intent':intent['id'],
+                 'policy_rebind_history':[*original.get('policy_rebind_history',[]),audit]}
+        save(record_path(state),updated)
+    intent.update(phase='completed',completed_at=time.time(),completed_record_sha256=_rebind_json(record_path(state))[1]);save(path,intent)
+    return intent
+
+
+def complete_rebind(config_path,state,ident,owner,pid):
+    """Adopt only an externally resumed, proven same-session native process."""
+    require_managed();state=Path(state).resolve()
+    if not isinstance(ident,str) or not re.fullmatch(r'[a-f0-9]{32}',ident):raise ValueError('exact reconciliation intent required')
+    lock=_rebind_lock(state)
+    try:
+        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        path=state.with_name('coordinator-rebinds')/(ident+'.json');intent=_rebind_json(path)[0]
+        try:return _complete_rebind(config_path,state,path,intent,owner,pid)
+        except Exception as error:
+            intent['errors']=[*intent.get('errors',[]),{'at':time.time(),'type':type(error).__name__,'reason':str(error)}]
+            save(path,intent)
+            raise
+    finally:os.close(lock)
 
 
 def destination(record, linked):

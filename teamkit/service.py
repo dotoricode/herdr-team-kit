@@ -113,6 +113,16 @@ def guard(config_path, state, once=False):
 
 
 def handle(args):
+    if args.action == 'rebind-prepare':
+        from .app_coordinator import prepare_rebind
+        if not args.checkpoint_file or not args.owner or not args.pid or not args.session:
+            raise ValueError('checkpoint-file, owner, original pid and session are required')
+        return prepare_rebind(args.config,args.state,args.checkpoint_file,args.owner,args.pid,args.session)
+    if args.action == 'rebind-complete':
+        from .app_coordinator import complete_rebind
+        if not args.intent or not args.owner or not args.pid:
+            raise ValueError('intent, original owner and new pid are required')
+        return complete_rebind(args.config,args.state,args.intent,args.owner,args.pid)
     if args.action == 'status':
         return status(args.config, args.state)
     if args.action == 'install':
