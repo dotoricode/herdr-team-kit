@@ -160,12 +160,36 @@ class NativeRuntime:
         from .core_runtime import _call
         spaces = self.config.get('operations', {}).get('spaces', {})
         destination = 'qa' if ticket['role'] in ('reviewer','ui') else 'docs' if ticket['role']=='documenter' else ticket['product']
-        labels = ['operations.ticket='+ticket['id'], 'ui.display-name='+ticket['product']+' · '+ticket['role']+' · '+executor['account']+' '+executor['provider']]
+        roles={'leader':'팀장','implementer':'구현','reviewer':'독립리뷰','investigator':'조사',
+               'documenter':'문서·편집','ui':'UI 검증','integrator':'통합'}
+        team=self.config.get('operations',{}).get('product_labels',{}).get(ticket['product'],ticket['product'])
+        display=team+' · '+roles[ticket['role']]+' · '+{'team':'회사','personal':'개인'}[executor['account']]+' '+{'codex':'Codex','claude':'Claude'}[executor['provider']]
+        labels = ['operations.ticket='+ticket['id'], 'ui.display-name='+display]
         if destination in spaces:
             labels.append('herdr.space='+spaces[destination])
         _call('label',executor['terminal'],*labels)
-        self.admit(ticket, executor)
-        return executor
+        deadline=time.monotonic()+30
+        while True:
+            try:
+                self.admit(ticket, executor)
+                before=self.native(executor)
+                time.sleep(.15)
+                after=self.native(executor)
+                if type(before.get('turn')) is int and before['turn']==after.get('turn'):
+                    return executor
+            except NativeError as error:
+                # A newly created CLI can briefly become busy while loading MCP.
+                # No task text has been submitted by this launch method.
+                if str(error)!='Core agent is not idle and ready; inspect before sending':
+                    raise
+                observed=self.native(executor,require_idle=False)
+                if observed.get('status') not in ('working','unknown',None):
+                    raise
+                if time.monotonic()>=deadline:
+                    raise
+                time.sleep(.1)
+            if time.monotonic()>=deadline:
+                raise NativeError('New worker readiness did not settle; no task input sent')
 
 
 def prompt(config_path, state, ticket, attempt):
