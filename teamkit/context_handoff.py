@@ -372,12 +372,12 @@ def jobs(state):
     return [read(p) for p in sorted(root.glob('*.json')) if JOB.fullmatch(p.stem)]
 
 
-def request(config, state, target, observation, manual=False, policy_rotation=False):
+def request(config, state, target, observation, manual=False, policy_rotation=False, pool_request=None):
     with locked(directory(state) / 'requests'):
-        return _request(config, state, target, observation, manual, policy_rotation)
+        return _request(config, state, target, observation, manual, policy_rotation, pool_request)
 
 
-def _request(config, state, target, observation, manual=False, policy_rotation=False):
+def _request(config, state, target, observation, manual=False, policy_rotation=False, pool_request=None):
     """manual is reserved for explicit isolated lifecycle verification."""
     if not settings(config)['enabled']:
         raise ValueError('context handoff disabled')
@@ -412,6 +412,19 @@ def _request(config, state, target, observation, manual=False, policy_rotation=F
             continue
         with locked(job_path(state,previous['id'])):
             previous=read(job_path(state,previous['id']))
+            # Only a new durable explicit pool request may bypass an unsent cancellation.
+            if (policy_rotation and pool_request and JOB.fullmatch(pool_request)
+                    and previous['phase']=='cancelled' and previous.get('policy_rotation')
+                    and not previous.get('checkpoint') and not previous.get('pool_request')==pool_request):
+                assignment=read(Path(state).resolve().parent/'pool-requests'/(pool_request+'.json'))
+                store=Store(state)
+                try:
+                    current=store.get(target['id'])
+                    unsent=not any(e['event']=='woken' and e['at']>=previous['at'] for e in store.events(target['id']))
+                finally:store.close()
+                if (assignment and assignment.get('task')==target['id'] and assignment.get('phase')=='pending'
+                        and current['state']=='ready' and current.get('owner')==target['owner'] and unsent):
+                    continue
             changed_thread=(metric=='context' and (previous.get('trigger') or {}).get('metric','context')=='context'
                             and (previous.get('trigger') or {}).get('session_id')!=(observation or {}).get('session_id'))
             if changed_thread and previous['phase'] in ('pending','cancelled'):
@@ -419,7 +432,7 @@ def _request(config, state, target, observation, manual=False, policy_rotation=F
             else:return None
     nonce = uuid.uuid4().hex
     job = {'id':nonce, 'phase':'pending', 'target':target, 'trigger':observation,
-           'verification_only':manual, 'policy_rotation':policy_rotation, 'at':time.time(), 'updated_at':time.time()}
+           'verification_only':manual, 'policy_rotation':policy_rotation, 'pool_request':pool_request, 'at':time.time(), 'updated_at':time.time()}
     update_next_session(config,state,job)
     write(job_path(state, nonce), job)
     return job

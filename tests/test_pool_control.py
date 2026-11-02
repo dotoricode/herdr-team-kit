@@ -106,6 +106,25 @@ class PoolControlTests(Fixture):
         sent.assert_not_called()
         self.assertEqual(control.requests(self.state)[0]['phase'], 'pending')
 
+    def test_new_explicit_request_can_replace_unsent_cancelled_policy_rotation(self):
+        self.dispatched()
+        config = load(self.config)
+        target = next(t for t in context.targets(config,self.state) if t['id']=='L1')
+        with patch.object(context,'observe',return_value=None):
+            old = context.request(config,self.state,target,None,policy_rotation=True)
+        context.set_phase(self.state,old,'cancelled','User changed requested account before sending.')
+        message = self.root/'retry.txt'
+        message.write_text('New explicitly approved request.')
+        request = control.enqueue(self.config,self.state,'alpha',message,'codex','team')
+        with patch.object(context,'observe',return_value=None):
+            new = context.request(config,self.state,target,None,policy_rotation=True,pool_request=request['id'])
+        self.assertIsNotNone(new)
+        self.assertNotEqual(new['id'],old['id'])
+        self.assertEqual(context.read(context.job_path(self.state,old['id']))['phase'],'cancelled')
+        context.set_phase(self.state,new,'uncertain','Never resend uncertain rotation.')
+        with patch.object(context,'observe',return_value=None):
+            self.assertIsNone(context.request(config,self.state,target,None,policy_rotation=True,pool_request=request['id']))
+
     def test_request_constraint_waits_instead_of_using_another_eligible_account(self):
         from teamkit.__main__ import select_execution
         self.prepare()

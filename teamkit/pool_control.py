@@ -197,7 +197,7 @@ def advance(config_path,state,ident):
             if route['action']=='wait':return save('pending',route['reason'])
             if route['action']=='handoff':
                 target=next(t for t in context.targets(config,state) if t['id']==job['task'])
-                handoff=context.request(config,state,target,None,policy_rotation=True)
+                handoff=context.request(config,state,target,None,policy_rotation=True,pool_request=job['id'])
                 if handoff is None:
                     handoff=next(j for j in context.jobs(state) if j['target']['id']==job['task'] and j['target']['owner']==route['owner'] and j['phase'] not in context.FINISHED)
                 job['handoff_job']=handoff['id'];return save('waiting_handoff','사용량·요일 순서에 맞는 다음 팀장으로 인계 중입니다.')
