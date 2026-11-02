@@ -17,7 +17,7 @@ class NativeFixture:
         self.executor = dict(terminal='t1', pid=42, owner='fixture-owner', provider='codex',
                              account='personal', product='example', roles=['investigator'])
 
-    def executors(self):
+    def executors(self, ticket=None):
         return [self.executor]
 
     def admit(self, ticket, candidate):
@@ -65,17 +65,19 @@ class OperationsTest(unittest.TestCase):
             operations={'enabled':True})))
         self.runtime = NativeFixture(self.state)
 
-    def enqueue(self, ident, dependencies=None):
+    def enqueue(self, ident, dependencies=None, **changes):
         queue = TicketStore(self.state)
         try:
-            return queue.enqueue(dict(id=ident, product='example', role='investigator', kind='investigation',
+            spec = dict(id=ident, product='example', role='investigator', kind='investigation',
                 goal='Inspect only the test fixture', completion=['nonempty report'], checks=['report'],
                 verification_commands={'report':[sys.executable, '-c',
                     'import pathlib,sys;sys.exit(not pathlib.Path(sys.argv[1]).read_text().startswith("Verified fixture"))', '{artifact}']},
                 profiles=['codex/personal'], priority=0, dependencies=dependencies or [],
                 scope=dict(paths=[str(self.root)], actions=['read'], data=['fixture']),
                 resources=[dict(kind='path', name=str(self.root), mode='read')],
-                approval=dict(state='approved', reference=str(self.approval))), ident)
+                approval=dict(state='approved', reference=str(self.approval)))
+            spec.update(changes)
+            return queue.enqueue(spec, ident, user_approved=True)
         finally:
             queue.close()
 
@@ -105,6 +107,60 @@ class OperationsTest(unittest.TestCase):
             self.assertEqual('completed', queue.get('ONE')['state'])
         finally:
             queue.close()
+
+    def test_busy_candidate_does_not_abort_other_eligible_candidates(self):
+        from teamkit.runtime import RuntimeError as NativeError
+        self.enqueue('ONE')
+        original = self.runtime.admit
+        self.runtime.executors = lambda ticket=None: [dict(self.runtime.executor, busy=True), self.runtime.executor]
+        def admit(ticket, candidate):
+            if candidate.get('busy'):
+                raise NativeError('Core agent is not idle and ready')
+            return original(ticket, candidate)
+        self.runtime.admit = admit
+        tick(self.config, self.state, self.runtime)
+        self.assertEqual(1, len(self.runtime.sent))
+
+    def test_review_failure_repair_reverification_and_independent_review(self):
+        self.enqueue('ONE', review_required=True)
+        original_send = self.runtime.send
+        reviewer = dict(self.runtime.executor, owner='review-owner', terminal='t2', pid=43)
+        self.runtime.executors = lambda ticket: [reviewer if ticket['role']=='reviewer' else self.runtime.executor]
+        self.runtime.native = lambda executor, require_idle=True: dict(executor, status='idle')
+        review_count = []
+        def send(executor, text):
+            store = TicketStore(self.state)
+            try:
+                ticket = next(t for t in store.list() if t['state']=='dispatching')
+                if ticket['role'] != 'reviewer':
+                    return original_send(executor, text)
+                attempt = store.attempt(ticket['attempt'])
+                store.receipt(ticket['id'], attempt['id'], executor['owner'], executor['terminal'], self.runtime.native(executor))
+                parent = store.attempt(ticket['parent_attempt'])
+                review_count.append(ticket['id'])
+                first = len(review_count)==1
+                report = self.root / (ticket['id']+'.json')
+                report.write_text(json.dumps(dict(verdict='fail' if first else 'pass',
+                    artifact_digest=parent['submission']['artifact_digest'], source=parent['submission'].get('source'),
+                    findings=[dict(blocking=True, problem='fixture defect', evidence='bounded artifact', impact='completion incorrect')] if first else [])))
+                store.submit(ticket['id'], attempt['id'], executor['owner'],
+                             dict(artifact=str(report), writer_stopped=True))
+                return {'accepted':True}
+            finally:
+                store.close()
+        self.runtime.send = send
+        for _ in range(12):
+            tick(self.config, self.state, self.runtime)
+        store = TicketStore(self.state)
+        try:
+            parent = store.get('ONE')
+            self.assertEqual('completed', parent['state'], parent.get('reason'))
+            self.assertEqual('review-owner', parent['reviewer']['owner'])
+            self.assertEqual(2, len(review_count))
+            self.assertTrue(any(t['relation']=='defect' for t in store.list()))
+            self.assertTrue(all(t['state']=='completed' for t in store.list()))
+        finally:
+            store.close()
 
 
 if __name__ == '__main__':

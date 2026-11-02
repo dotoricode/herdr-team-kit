@@ -13,6 +13,7 @@ from .config import binding, cached_quota, load, profile
 from .policy import eligible
 from .resources import ResourceLedger, observe_native, validate_policy
 from .store import Store
+from .runtime import RuntimeError as NativeError
 from .tickets import TicketStore, digest, file_digest, within
 
 
@@ -34,7 +35,7 @@ class NativeRuntime:
     def observation(self):
         return observe_native()
 
-    def executors(self):
+    def executors(self, ticket=None):
         from .session_pool import _read
         result = []
         for slot in _read(self.state)['slots'].values():
@@ -47,7 +48,29 @@ class NativeRuntime:
                                profile_binding=slot['binding'], task=slot['task'], runtime=runtime,
                                empty_prompt=slot.get('empty_prompt')))
         result.extend(self.config.get('operations', {}).get('executors', []))
-        return result
+        if ticket is not None:
+            queue = TicketStore(self.state, read_only=True)
+            try:
+                seen = {x['terminal'] for x in result}
+                for item in reversed(queue.list()):
+                    if item['state'] != 'completed' or not item.get('attempt'):
+                        continue
+                    previous = queue.attempt(item['attempt'])['executor']
+                    if previous.get('operation_actor') and previous['terminal'] not in seen:
+                        result.append(previous)
+                        seen.add(previous['terminal'])
+            finally:
+                queue.close()
+            from .workers import plans
+            result.extend(plans(self.config, self.state, ticket))
+        from .routing import execution_candidates
+        first = next(iter(self.config['profiles']))
+        role = {'provider': first, 'model': self.config['profiles'][first]['team']['model'], 'effort': 'medium'}
+        ordered = execution_candidates(self.config, {'role':'implementer',
+                         'classification':{'kind':'general','risks':[]}}, role, time.time())
+        pairs = [(x['provider'], x['account']) for x in ordered] if ordered else []
+        return sorted(result, key=lambda e: pairs.index((e['provider'], e['account']))
+                      if (e['provider'], e['account']) in pairs else len(pairs))
 
     def native(self, executor, require_idle=True):
         from .core_runtime import CoreRuntime
@@ -68,8 +91,37 @@ class NativeRuntime:
 
     def admit(self, ticket, executor):
         work_gate(self.config, self.state, ticket)
+        if ticket['role'] == 'ui':
+            raise ValueError('UI work requires the existing personal Codex UI lab, test host and exclusive screen lease')
+        if executor.get('new') is True:
+            from .workers import plans, PLAN_FIELDS
+            if not any(all(candidate.get(key)==executor.get(key) for key in PLAN_FIELDS)
+                       for candidate in plans(self.config,self.state,ticket)):
+                raise ValueError('planned role/profile/quota no longer eligible')
+            return executor
         if executor['product'] not in (ticket['product'], '*') or ticket['role'] not in executor['roles']:
             raise ValueError('executor responsibility or role mismatch')
+        from .core_runtime import _model_effort
+        from .workers import DEFAULT_ROLES
+        role_key = self.config.get('operations',{}).get('worker_roles',{}).get(ticket['role'], DEFAULT_ROLES.get(ticket['role']))
+        from .departments import execution_config
+        effective = execution_config(self.config)
+        role = effective.get('teams', {}).get(ticket['product'], {}).get('roles', {}).get(role_key)
+        if role:
+            self.native(executor)
+            from .routing import execution_candidates
+            choices = execution_candidates(effective, {'role':role_key,
+                       'classification':{'kind':'general','risks':[]}}, role, time.time())
+            expected = next((c for c in choices or [] if c['provider']==executor['provider']
+                             and c['account']==executor['account']), None)
+            if choices is None and executor['provider']==role['provider']:
+                expected = role
+            if expected is None:
+                raise ValueError('executor provider is outside the existing role policy')
+            from .core_runtime import _call
+            observed = _call('get', executor['terminal'])['foreground']['argv']
+            if _model_effort(executor['provider'], observed) != (expected['model'], expected.get('effort','medium')):
+                raise ValueError('executor model/effort differs from existing role policy')
         pr = profile(self.config, executor['provider'], executor['account'])
         if binding(pr) != executor['profile_binding']:
             raise ValueError('executor profile binding changed')
@@ -97,6 +149,19 @@ class NativeRuntime:
         task = dict(id=executor['task'], owner=executor['owner'], provider=executor['provider'],
                     runtime=executor['runtime'])
         return CoreRuntime(task).accept(executor['runtime']['name'], text)
+
+    def launch(self, config_path, ticket, attempt):
+        from .workers import launch
+        executor = launch(config_path, self.state, ticket, attempt)
+        from .core_runtime import _call
+        spaces = self.config.get('operations', {}).get('spaces', {})
+        destination = 'qa' if ticket['role'] in ('reviewer','ui') else 'docs' if ticket['role']=='documenter' else ticket['product']
+        labels = ['operations.ticket='+ticket['id'], 'ui.display-name='+ticket['product']+' · '+ticket['role']+' · '+executor['account']+' '+executor['provider']]
+        if destination in spaces:
+            labels.append('herdr.space='+spaces[destination])
+        _call('label',executor['terminal'],*labels)
+        self.admit(ticket, executor)
+        return executor
 
 
 def prompt(config_path, state, ticket, attempt):
@@ -184,9 +249,8 @@ def followup(queue, ticket, attempt, relation, goal, *, reviewer=False):
         for resource in resources:
             resource['mode'] = 'read'
         checks = ['independent-review-report']
-        commands = {checks[0]: [sys.executable, str(Path(__file__).parent / 'artifact_verifier.py'), '{artifact}',
-                                '--artifact-digest', attempt['submission']['artifact_digest'],
-                                '--source-digest', digest(attempt['submission'].get('source'))]}
+        from .artifact_verifier import command
+        commands = {checks[0]: command(attempt['submission'])}
     spec = dict(id=ident, parent_id=ticket['id'], relation=relation, product=ticket['product'],
                 role='reviewer' if reviewer else ticket['role'], kind='review' if reviewer else ticket['kind'],
                 goal=goal, completion=['Submit the required bounded result and stop the writer'],
@@ -197,6 +261,9 @@ def followup(queue, ticket, attempt, relation, goal, *, reviewer=False):
                 parent_attempt=attempt['id'])
     if ticket.get('workflow_ref'):
         spec['workflow_ref'] = ticket['workflow_ref']
+    for field in ('execution_constraint', 'classification', 'user_decision'):
+        if field in ticket:
+            spec[field] = ticket[field]
     return queue.enqueue(spec, key)
 
 
@@ -208,7 +275,7 @@ def reconcile(queue, runtime, config=None):
                 runtime.native(attempt['executor'])
                 queue.wait_children(ticket['id'], attempt['id'], attempt['executor']['owner'], True,
                                     ticket.get('release_writes_on_stop') is True)
-            except (ValueError, OSError) as error:
+            except (ValueError, OSError, NativeError) as error:
                 queue.block(ticket['id'], str(error))
             continue
         if ticket['state'] not in ('awaiting_verification', 'awaiting_review'):
@@ -254,7 +321,7 @@ def reconcile(queue, runtime, config=None):
                                        terminal=review_attempt['executor']['terminal'], verdict=report.get('verdict'),
                                        artifact_digest=report.get('artifact_digest'), evidence=review_attempt['submission']['artifact'])
             queue.finish(ticket['id'], attempt['id'], proof)
-        except (ValueError, KeyError, OSError, subprocess.SubprocessError) as error:
+        except (ValueError, KeyError, OSError, subprocess.SubprocessError, NativeError) as error:
             queue.block(ticket['id'], str(error))
 
 
@@ -265,6 +332,11 @@ def tick(config_path, state, runtime=None):
     runtime = runtime or NativeRuntime(config, state)
     queue = TicketStore(state)
     try:
+        from .intake import capture
+        try:
+            intake = capture(config, state)
+        except (ValueError, OSError, json.JSONDecodeError) as error:
+            intake = {'enabled': True, 'reason': str(error)}
         from .admission import configure
         configure(queue.db, policy(config))
         reconcile(queue, runtime, config)
@@ -272,17 +344,20 @@ def tick(config_path, state, runtime=None):
         started = []
         for ticket in queue.ready():
             reasons = []
-            for candidate in runtime.executors():
+            for candidate in runtime.executors(ticket):
                 try:
                     executor = runtime.admit(ticket, candidate)
                     eligible_observed_at = time.time()
                     observation = runtime.observation()
                     attempt = queue.reserve(ticket['id'], executor, policy(config), observation)
-                except (ValueError, OSError, subprocess.SubprocessError) as error:
+                except (ValueError, OSError, subprocess.SubprocessError, NativeError) as error:
                     reasons.append(str(error))
                     continue
                 try:
                     # The durable attempt/outbox exists before touching the terminal.
+                    if executor.get('new') is True:
+                        executor = runtime.launch(config_path, ticket, attempt)
+                        attempt = queue.attempt(attempt['id'])
                     runtime.native(executor)
                     accepted = runtime.send(executor, prompt(config_path, state, ticket, attempt))
                     queue.delivery(attempt['id'], True, accepted)
@@ -294,7 +369,7 @@ def tick(config_path, state, runtime=None):
                 break
             else:
                 queue.block(ticket['id'], '; '.join(sorted(set(reasons))) or 'no registered executor supports this ticket')
-        return {'enabled': True, 'started': started}
+        return {'enabled': True, 'started': started, 'intake': intake}
     finally:
         queue.close()
 
@@ -303,19 +378,38 @@ def view(config_path, state):
     from . import pool_control
     from .service import status
     config = load(config_path)
-    queue = TicketStore(state)
-    ledger = ResourceLedger(queue.db)
+    queue = TicketStore(state, read_only=True)
     try:
         try:
-            capacity = ledger.snapshot(policy(config), observe_native())
+            from .admission import observe
+            ledger = ResourceLedger(queue.db, initialize=False)
+            capacity = ledger.snapshot(policy(config), observe(queue.db, observe_native()))
         except Exception as error:
             capacity = {'available': None, 'reason': str(error), 'outside_controlled': False}
         legacy = [dict(id=x['id'], origin_id=x.get('work_id') or x['id'],
                        source='legacy', product=x['team'], state=x['phase'],
+                       goal=x.get('message') or x.get('request') or x.get('work_id') or x['id'],
+                       created_at=x.get('created_at'), updated_at=x.get('updated_at'),
+                       executor=x.get('receiver') or {},
                        reason=x.get('reason'), next_action='reconcile original evidence',
                        managed=True) for x in pool_control.requests(state)]
+        from types import SimpleNamespace
+        def quota(key):
+            row = queue.db.execute('SELECT body FROM quotas WHERE profile=?', (key,)).fetchone()
+            return json.loads(row[0]) if row else None
+        reader = SimpleNamespace(path=Path(state), quota=quota)
+        quotas = {p+'/'+a: cached_quota(config, reader, p, a) for p in config['profiles']
+                  for a in config['profiles'][p]}
+        tasks = [json.loads(row[0]) for row in queue.db.execute('SELECT body FROM tasks')]
+        quota_fields = ('source','observed_at','unavailable','five_hour','weekly','not_applicable')
+        profiles = {key:{**{k:value.get(k) for k in quota_fields if k in (value or {})},
+                         'eligible':eligible(value,time.time(),config['quota_ttl_seconds'])} for key,value in quotas.items()}
+        from .intake import pending
         return {'schema_version': SCHEMA_VERSION, 'observed_at': time.time(),
                 'tickets': queue.list() + legacy, 'ready_count': len(queue.ready()),
+                'intake_pending': pending(queue.db),
+                'ready_count_boundary':'approval/dependency ready; native/quota/resource admission happens at dispatch',
+                'task_actors':tasks, 'profiles':profiles,
                 'capacity': capacity, 'supervisor': status(config_path, state),
                 'terminology': {'user': '사용자'}, 'account_profiles': 4,
                 'candidate_slots': len(__import__('teamkit.session_pool', fromlist=['_read'])._read(state)['slots'])}

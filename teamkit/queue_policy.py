@@ -50,9 +50,9 @@ def _absolute(value):
 
 
 def _allowed(config, team):
-    if team not in config.get('teams', {}):
-        raise ValueError('unknown queue team')
-    return [_absolute(config['teams'][team]['root']),
+    from .departments import organization
+    definition = organization(config, team)
+    return [_absolute(definition['root']),
             *(_absolute(p) for p in config.get('shared_roots', []))]
 
 
@@ -86,7 +86,8 @@ def resources(config, team, workflow_ref=None, extra=()):
     allowed = _allowed(config, team)
     if not isinstance(extra, (list, tuple)):
         raise ValueError('extra resource roots must be a list')
-    default = workflow_ref.get('root') if workflow_ref else config['teams'][team]['root']
+    from .departments import organization
+    default = workflow_ref.get('root') if workflow_ref else organization(config, team)['root']
     result = []
     for value in (default, *extra):
         path = _absolute(value)

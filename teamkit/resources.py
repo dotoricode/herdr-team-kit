@@ -152,7 +152,7 @@ def _native_matches(reservation, native):
 
 
 class ResourceLedger:
-    def __init__(self, state_or_connection, clock=time.time):
+    def __init__(self, state_or_connection, clock=time.time, *, initialize=True):
         self.clock = clock
         self._owned = not isinstance(state_or_connection, sqlite3.Connection)
         self._closed = False
@@ -168,8 +168,11 @@ class ResourceLedger:
             self.connection = sqlite3.connect(path, isolation_level=None, timeout=10)
         else:
             self.connection = state_or_connection
-        self.connection.execute('CREATE TABLE IF NOT EXISTS resource_reservations '
-                                '(attempt TEXT PRIMARY KEY, ticket TEXT NOT NULL, body TEXT NOT NULL)')
+        if initialize:
+            self.connection.execute('CREATE TABLE IF NOT EXISTS resource_reservations '
+                                    '(attempt TEXT PRIMARY KEY, ticket TEXT NOT NULL, body TEXT NOT NULL)')
+        elif not self.connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='resource_reservations'").fetchone():
+            raise ValueError('resource schema migration required')
 
     def close(self):
         if self._owned and not self._closed:

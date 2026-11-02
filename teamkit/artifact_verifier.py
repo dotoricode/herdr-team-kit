@@ -2,6 +2,14 @@
 import argparse
 import json
 from pathlib import Path
+import hashlib
+import sys
+
+
+def command(submission):
+    source_digest = hashlib.sha256(json.dumps(submission.get('source'), sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    return [sys.executable, str(Path(__file__).resolve()), '{artifact}',
+            '--artifact-digest', submission['artifact_digest'], '--source-digest', source_digest]
 
 
 def review(path, artifact_digest, source_digest):

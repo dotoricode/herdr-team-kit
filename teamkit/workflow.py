@@ -161,7 +161,8 @@ def run(args,config,store):
         raise ValueError('invalid product work ID')
     if args.action=='create':
         root=Path(args.root).resolve()
-        team=config['teams'][args.team]
+        from .departments import organization
+        team=organization(config,args.team)
         if not any(root.is_relative_to(Path(p).resolve()) for p in [team['root'],*config.get('shared_roots',[])]):
             raise ValueError('work root is outside configured roots')
         if git(root,'rev-parse','--show-toplevel').decode().removesuffix('\n')!=str(root):

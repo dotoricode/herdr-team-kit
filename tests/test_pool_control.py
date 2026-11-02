@@ -1,4 +1,6 @@
 import json
+import copy
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -355,6 +357,130 @@ class PoolControlTests(Fixture):
         self.assertEqual(result['phase'],'received');self.assertIn('submission',result)
         control.reconcile(self.config,self.state,job['id'])
         self.assertEqual(control.requests(self.state)[0]['phase'],'completed')
+
+    def legacy_lineage(self):
+        actor=self.dispatched();previous=actor['runtime']['terminal'];current='trestored'
+        ident='b'*32;path=control.folder(self.state)/(ident+'.json')
+        message='Historical bounded investigation.'
+        job={'id':ident,'team':'alpha','task':'L1','message':message,
+             'digest':hashlib.sha256(message.encode()).hexdigest(),'phase':'done','at':time.time(),
+             'updated_at':time.time(),'error_type':'HistoricalTimeout','reason':'receipt only, not work completion',
+             'receiver':{'terminal':previous,'owner':actor['owner'],'attempt':actor['attempt_count']}}
+        context.write(path,job);original=path.read_bytes()
+        self.fake.rows[current]=copy.deepcopy(self.fake.rows[previous]);self.fake.rows[current]['address']=current
+        self.fake.rows[current]['foreground']['pid']+=500
+        session='11111111-2222-4333-8444-555555555555'
+        self.fake.rows[current]['foreground']['argv']+=['resume',session]
+        self.fake.rows[previous].update(state='finished',foreground=None,status=None)
+        with StoreContext(self.state) as store:
+            task=store.get('L1');task['runtime'].update(terminal=current,pane=current,
+                native_pid=self.fake.rows[current]['foreground']['pid'],resumed_session=session)
+            store._save(task,'native-session-resumed',{'from_terminal':previous,'to_terminal':current,
+                'session':session,'owner_preserved':True,'state_preserved':True})
+            event=store.events('L1')[-1]
+        evidence=self.root/'receiver-lineage.json'
+        evidence.write_text(json.dumps({'request_id':ident,'task':'L1','owner':actor['owner'],
+            'attempt':actor['attempt_count'],'from_terminal':previous,'to_terminal':current,
+            'session_id':session,'lineage_event_seq':event['seq'],
+            'request_record_sha256':hashlib.sha256(original).hexdigest(),
+            'operator_reference':'Fixture user-approved operational lineage repair',
+            'verification':['Observed the original terminal finished and the exact resumed session idle.']}))
+        return actor,job,evidence,path,original
+
+    def rebind_legacy(self,actor,job,evidence,approved=True):
+        return control.rebind_receiver(self.config,self.state,job['id'],evidence,
+                                       actor['owner'],actor['attempt_count'],approved)
+
+    def test_official_legacy_receiver_rebind_preserves_original_and_does_not_complete(self):
+        actor,job,evidence,path,original=self.legacy_lineage()
+        result=self.rebind_legacy(actor,job,evidence)
+        self.assertEqual(result['phase'],'done')
+        self.assertEqual(result['receiver']['terminal'],'trestored')
+        self.assertEqual(context.read(path)['message'],job['message'])
+        self.assertEqual(result['error_type'],'HistoricalTimeout')
+        audit=result['receiver_lineage'][-1]
+        self.assertEqual(audit['previous_receiver'],job['receiver'])
+        self.assertEqual(Path(audit['original_request_file']).read_bytes(),original)
+        completion=self.root/'historical-completion.json'
+        completion.write_text(json.dumps({'work_id':job['id'],'owner':actor['owner'],
+            'attempt':actor['attempt_count'],'writer_stopped':True,
+            'verification':['Historical investigation report has been checked within its declared scope.']}))
+        resolved=control.resolve(self.config,self.state,job['id'],'completed',completion,actor['owner'],actor['attempt_count'])
+        self.assertEqual(resolved['phase'],'completed')
+
+    def test_legacy_receiver_rebind_requires_operator_approval_and_matching_session(self):
+        actor,job,evidence,path,original=self.legacy_lineage()
+        with self.assertRaises(ValueError):self.rebind_legacy(actor,job,evidence,approved=False)
+        self.assertEqual(path.read_bytes(),original)
+        value=json.loads(evidence.read_text());value['session_id']='aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+        evidence.write_text(json.dumps(value))
+        with self.assertRaises(ValueError):self.rebind_legacy(actor,job,evidence)
+        self.assertEqual(path.read_bytes(),original)
+
+    def test_legacy_unknown_and_pending_requests_are_never_unblocked_by_rebind(self):
+        actor,job,evidence,path,original=self.legacy_lineage()
+        for phase in ['uncertain','pending','sending','completed']:
+            value=json.loads(original);value['phase']=phase;context.write(path,value)
+            before=path.read_bytes()
+            with self.assertRaises(ValueError):self.rebind_legacy(actor,job,evidence)
+            self.assertEqual(path.read_bytes(),before)
+
+    def test_legacy_receiver_rebind_is_idempotent_and_never_redelivers(self):
+        actor,job,evidence,path,original=self.legacy_lineage()
+        self.rebind_legacy(actor,job,evidence)
+        before=path.read_bytes();calls=len(self.fake.calls)
+        repeated=self.rebind_legacy(actor,job,evidence)
+        self.assertEqual(path.read_bytes(),before)
+        self.assertEqual(len(repeated['receiver_lineage']),1)
+        self.assertFalse(any(c[0]=='send' for c in self.fake.calls[calls:]))
+
+    def test_legacy_receiver_rebind_requires_exact_original_hash_and_resume_event(self):
+        actor,job,evidence,path,original=self.legacy_lineage()
+        value=json.loads(evidence.read_text())
+        for key,wrong in [('request_record_sha256','0'*64),('lineage_event_seq',1),
+                          ('owner','another-owner'),('attempt',2)]:
+            evidence.write_text(json.dumps({**value,key:wrong}))
+            with self.assertRaises(ValueError):self.rebind_legacy(actor,job,evidence)
+            self.assertEqual(path.read_bytes(),original)
+
+    def test_legacy_receiver_rebind_rejects_live_previous_native_and_wrong_actual_session(self):
+        actor,job,evidence,path,original=self.legacy_lineage()
+        previous=self.fake.rows[job['receiver']['terminal']]
+        previous['state']='running'
+        with self.assertRaises(ValueError):self.rebind_legacy(actor,job,evidence)
+        previous['state']='finished'
+        self.fake.rows['trestored']['foreground']['argv'][-1]='different-conversation'
+        with self.assertRaises(ValueError):self.rebind_legacy(actor,job,evidence)
+        self.assertEqual(path.read_bytes(),original)
+
+    def test_rebound_legacy_receiver_fences_later_process_replacement(self):
+        actor,job,evidence,path,original=self.legacy_lineage()
+        self.rebind_legacy(actor,job,evidence)
+        with StoreContext(self.state) as store:
+            task=store.get('L1');task['runtime']['native_pid']+=1
+            store._save(task,'native-replaced',{})
+        completion=self.root/'completion.json'
+        completion.write_text(json.dumps({'work_id':job['id'],'owner':actor['owner'],
+            'attempt':actor['attempt_count'],'writer_stopped':True,'verification':['Observed result.']}))
+        with self.assertRaises(ValueError):
+            control.resolve(self.config,self.state,job['id'],'completed',completion,actor['owner'],actor['attempt_count'])
+        self.assertEqual(context.read(path)['phase'],'done')
+
+    def test_legacy_receiver_rebind_cli_uses_the_official_fenced_path(self):
+        actor,job,evidence,path,original=self.legacy_lineage()
+        result=self.call('pool','rebind-receiver','--request',job['id'],
+            '--evidence-file',str(evidence),'--expected-owner',actor['owner'],
+            '--expected-attempt',str(actor['attempt_count']),'--operator-approved')
+        self.assertEqual(result['phase'],'done')
+        self.assertEqual(result['receiver']['terminal'],'trestored')
+        self.assertEqual(len(result['receiver_lineage']),1)
+
+    def test_legacy_rebind_never_replaces_a_new_delivery_protocol_receipt(self):
+        actor,job,evidence,path,original=self.legacy_lineage()
+        value=json.loads(original);value['delivery_id']='c'*32;context.write(path,value)
+        before=path.read_bytes()
+        with self.assertRaises(ValueError):self.rebind_legacy(actor,job,evidence)
+        self.assertEqual(path.read_bytes(),before)
 
 
     def test_work_id_conflicting_content_is_preserved_not_overwritten(self):

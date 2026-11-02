@@ -11,7 +11,7 @@ from .tickets import TicketStore
 def parser(commands):
     item = commands.add_parser('queue')
     item.add_argument('action', choices=('create', 'approve', 'show', 'status', 'submit', 'receipt',
-                                        'wait-children', 'dependencies', 'tick'))
+                                        'wait-children', 'dependencies', 'tick', 'intake'))
     item.add_argument('ticket', nargs='?')
     item.add_argument('--ticket-file')
     item.add_argument('--key')
@@ -22,19 +22,34 @@ def parser(commands):
     item.add_argument('--result-file')
     item.add_argument('--depends-on', action='append', default=[])
     item.add_argument('--release-writes', action='store_true')
+    item.add_argument('--board', action='store_true')
 
 
 def handle(args):
     if args.action == 'status':
+        if args.board:
+            from .queue_view import board
+            return board(args.config, args.state)
         return view(args.config, args.state)
     if args.action == 'tick':
         return tick(args.config, args.state)
     queue = TicketStore(args.state)
     try:
+        if args.action == 'intake':
+            from .intake import register
+            if not args.ticket_file or not args.key:
+                raise ValueError('original instruction file and stable source key required')
+            packet = Path(args.ticket_file)
+            if packet.stat().st_size > 1024*1024:
+                raise ValueError('instruction file exceeds bound')
+            result = register(queue.db, packet.read_text(), {'key':args.key})
+            queue.notify()
+            return result
         if args.action == 'create':
             if not args.ticket_file or not args.key:
                 raise ValueError('ticket-file and idempotency key required')
-            return queue.enqueue(json.loads(Path(args.ticket_file).read_text()), args.key)
+            return queue.enqueue(json.loads(Path(args.ticket_file).read_text()), args.key,
+                                 user_approved=args.user_approved)
         if not args.ticket:
             raise ValueError('ticket identity required')
         if args.action == 'show':

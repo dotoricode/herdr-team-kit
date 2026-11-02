@@ -29,7 +29,17 @@ def file_digest(path):
     source = Path(path)
     if not source.is_absolute() or not source.is_file():
         raise ValueError('evidence requires an existing absolute file')
-    return hashlib.sha256(source.read_bytes()).hexdigest()
+    if source.stat().st_size > 64 * 1024 * 1024:
+        raise ValueError('evidence exceeds the 64 MiB bound')
+    result = hashlib.sha256()
+    with source.open('rb') as stream:
+        total = 0
+        while block := stream.read(1024 * 1024):
+            total += len(block)
+            if total > 64 * 1024 * 1024:
+                raise ValueError('evidence grew beyond the 64 MiB bound')
+            result.update(block)
+    return result.hexdigest()
 
 
 def within(path, roots):
@@ -46,8 +56,14 @@ def strings(value, name, nonempty=True):
 
 
 class TicketStore:
-    def __init__(self, state, clock=time.time):
+    def __init__(self, state, clock=time.time, *, read_only=False):
         self.path = Path(state)
+        self.clock = clock
+        self.read_only = read_only
+        if read_only:
+            self.db = sqlite3.connect(self.path.resolve().as_uri() + '?mode=ro', uri=True,
+                                      timeout=10, isolation_level=None)
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
             fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -70,6 +86,8 @@ class TicketStore:
               (seq INTEGER PRIMARY KEY, ticket TEXT, event TEXT NOT NULL,
                at REAL NOT NULL, body TEXT NOT NULL);
         ''')
+        from .intake import schema
+        schema(self.db)
 
     def close(self):
         self.db.close()
@@ -91,6 +109,8 @@ class TicketStore:
         return json.loads(row[0])
 
     def list(self):
+        if not self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='operation_tickets'").fetchone():
+            return []
         return [json.loads(x[0]) for x in self.db.execute('SELECT body FROM operation_tickets ORDER BY id')]
 
     def _save(self, item, event, detail=None):
@@ -111,7 +131,9 @@ class TicketStore:
         self.db.execute('INSERT OR REPLACE INTO operation_budgets VALUES (?,?)',
                         (origin, json.dumps(budget)))
 
-    def enqueue(self, spec, registration_key):
+    def enqueue(self, spec, registration_key, *, user_approved=False):
+        if type(user_approved) is not bool:
+            raise ValueError('user_approved must be explicit boolean')
         spec = json.loads(json.dumps(spec))
         ident = spec.get('id', '')
         if not IDENT.fullmatch(ident) or not isinstance(registration_key, str) or not registration_key:
@@ -156,6 +178,11 @@ class TicketStore:
                     raise ValueError('registration identity conflicts with immutable instruction')
                 return json.loads(previous[0][1])
             parent = self.get(spec['parent_id']) if spec.get('parent_id') else None
+            instruction_id = parent.get('instruction_id') if parent else spec.get('instruction_id')
+            if instruction_id:
+                instruction = self.db.execute('SELECT body FROM operation_instructions WHERE id=?', (instruction_id,)).fetchone()
+                if instruction is None:
+                    raise ValueError('original instruction must be registered before execution ticket')
             relation = spec.get('relation', 'required')
             if relation not in ('required', 'defect', 'improvement'):
                 raise ValueError('unknown follow-up relation')
@@ -166,6 +193,20 @@ class TicketStore:
                             and all(within(x, parent['scope']['paths']) for x in scope['paths'])
                             and set(spec['profiles']).issubset(parent['profiles'])
                             and spec['product'] == parent['product'])
+                same_verifiers = spec.get('verification_commands', {}) == parent.get('verification_commands', {})
+                safe_review = False
+                if spec.get('role') == 'reviewer' and spec.get('kind') == 'review' and parent.get('attempt'):
+                    from .artifact_verifier import command
+                    parent_attempt = self.attempt(parent['attempt'])
+                    if parent_attempt.get('submission'):
+                        expected = {'independent-review-report': command(parent_attempt['submission'])}
+                        safe_review = spec.get('checks') == ['independent-review-report'] and spec.get('verification_commands') == expected
+                narrowed = narrowed and (same_verifiers or safe_review)
+                # These fields affect routing/approval, rather than the requested
+                # subtask. Descendants cannot weaken a parent's execution policy.
+                for field in ('execution_constraint', 'classification', 'user_decision', 'workflow_ref'):
+                    if spec.get(field) != parent.get(field):
+                        narrowed = False
                 for resource in resources:
                     if resource['kind'] == 'named' and not any(
                             r['kind'] == 'named' and r['name'] == resource['name']
@@ -177,9 +218,12 @@ class TicketStore:
                 origin = parent['origin_id']
             else:
                 approval = spec.get('approval', {'state': 'pending'})
+                if not user_approved:
+                    approval = {'state': 'pending'}
                 origin = ident
             if approval.get('state') == 'approved':
-                approval = {**approval, 'digest': file_digest(approval.get('reference', ''))}
+                # Descendants retain the original pinned grant, even if its file changed.
+                approval = dict(approval) if parent else {**approval, 'digest': file_digest(approval.get('reference', ''))}
             else:
                 approval = {'state': 'pending'}
             dependencies = strings(spec.get('dependencies', []), 'dependencies', False)
@@ -200,6 +244,7 @@ class TicketStore:
             self._save_budget(origin, budget)
             state = 'backlog' if parent and relation == 'improvement' else 'pending' if approval['state'] == 'approved' else 'waiting_approval'
             item = {**spec, 'origin_id': origin, 'parent_id': parent['id'] if parent else None,
+                    'instruction_id': instruction_id,
                     'relation': relation, 'approval': approval, 'state': state,
                     'created_at': self.clock(), 'updated_at': self.clock(), 'attempt': None,
                     'responsible': spec['product'], 'executor': None, 'reviewer': None,
@@ -208,6 +253,10 @@ class TicketStore:
                             (ident, registration_key, signature, json.dumps(item)))
             self._check_graph()
             self._save(item, 'registered', {'registration_key': registration_key})
+            if instruction_id and not parent:
+                source = json.loads(instruction[0])
+                source.update(state='ticketed', tickets=list(dict.fromkeys([*source.get('tickets',[]), ident])))
+                self.db.execute('UPDATE operation_instructions SET body=? WHERE id=?', (json.dumps(source), instruction_id))
         self.notify()
         return item
 
@@ -283,7 +332,10 @@ class TicketStore:
             if item['state'] != 'pending' or self.gate(ident):
                 raise ValueError('ticket is not eligible')
             profile = executor['provider'] + '/' + executor['account']
-            if profile not in item['profiles'] or not executor.get('owner') or type(executor.get('pid')) is not int:
+            planned = (executor.get('new') is True and executor.get('pid') is None
+                       and executor.get('terminal') is None)
+            if (profile not in item['profiles'] or not executor.get('owner')
+                    or not planned and type(executor.get('pid')) is not int):
                 raise ValueError('executor identity/profile mismatch')
             budget = self._budget(item['origin_id'])
             estimate = item.get('estimated_tokens', 4096)
@@ -293,10 +345,11 @@ class TicketStore:
             attempt = dict(id=uuid.uuid4().hex, ticket=ident, ordinal=item['attempt_count'] + 1,
                            executor=executor, phase='reserved', created_at=self.clock(),
                            delivery_id=uuid.uuid4().hex, estimated_tokens=estimate)
+            self._continue_own_writes(item, attempt, executor, observation)
             from .admission import reserve_in_transaction
             reserve_in_transaction(self.db, attempt['id'], ident, profile,
                                    item['resources'], policy, observation,
-                                   session={k: executor[k] for k in ('terminal', 'pid', 'owner')})
+                                   session=None if planned else {k: executor[k] for k in ('terminal', 'pid', 'owner')})
             budget['attempts'] += 1
             budget['tokens_reserved'] += estimate
             self._save_budget(item['origin_id'], budget)
@@ -305,6 +358,23 @@ class TicketStore:
                         attempt_count=attempt['ordinal'], reason='', next_action='deliver persisted attempt')
             self._save(item, 'execution_reserved', {'attempt': attempt['id']})
         return attempt
+
+    def _continue_own_writes(self, ticket, attempt, executor, observation):
+        """Transfer a parent's lease only to the very same observed idle actor."""
+        from .resources import ResourceLedger
+        session = {k: executor.get(k) for k in ('terminal', 'pid', 'owner')}
+        observed = next((x for x in observation.get('terminals', [])
+                         if x.get('terminal') == session['terminal']), None)
+        for old in ResourceLedger._rows(self.db):
+            if old['ticket'] != ticket['id'] or old['execution_reserved'] or not old['writes_held']:
+                continue
+            if (old.get('session') != session or observed is None
+                    or observed.get('pid') != session['pid'] or observed.get('owner') != session['owner']
+                    or observed.get('status') not in ('idle', 'done')
+                    or old['profile'] != executor['provider'] + '/' + executor['account']):
+                raise ValueError('parent retained write lease; original idle actor or explicit stopped-writer release required')
+            old.update(writes_held=False, write_transfer_to=attempt['id'])
+            ResourceLedger._write(self.db, old)
 
     def delivery(self, ident, accepted, detail):
         with self.transaction():
@@ -374,8 +444,10 @@ class TicketStore:
         packet = json.loads(Path(approval_file).read_text())
         with self.transaction():
             item = self.get(ident)
+            contract = self.db.execute('SELECT digest FROM operation_tickets WHERE id=?', (ident,)).fetchone()[0]
             if (item['attempt'] is not None or item['state'] not in ('waiting_approval', 'backlog')
                     or packet.get('ticket') != ident or packet.get('scope_digest') != digest(item['scope'])
+                    or packet.get('contract_digest') != contract
                     or packet.get('approved_by') != '사용자'):
                 raise ValueError('explicit approval does not match this ticket scope')
             item.update(approval={'state': 'approved', 'reference': str(Path(approval_file).resolve()),

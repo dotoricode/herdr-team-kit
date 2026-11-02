@@ -477,7 +477,8 @@ def resolve(config_path,state,ident,outcome,evidence_file,owner,attempt):
         finally:store.close()
         if (task['state']!='ready' or task.get('owner')!=owner or task.get('attempt_count')!=attempt
                 or task.get('runtime',{}).get('terminal')!=receiver.get('terminal')
-                or job.get('delivery_id') and task.get('runtime',{}).get('native_pid')!=receiver.get('native_pid')):
+                or (job.get('delivery_id') or job.get('receiver_lineage'))
+                   and task.get('runtime',{}).get('native_pid')!=receiver.get('native_pid')):
             raise ValueError('current ready owner must match the received work')
         if idle_native(task,config,state) is None:raise ValueError('current work is still active or has unsubmitted input')
         job.update(phase=outcome,work_resolution=evidence,updated_at=time.time(),
@@ -485,6 +486,114 @@ def resolve(config_path,state,ident,outcome,evidence_file,owner,attempt):
         write_request(path,job)
         notify(state)
         return {k:v for k,v in job.items() if k!='message'}
+
+
+def rebind_receiver(config_path,state,ident,evidence_file,owner,attempt,operator_approved=False):
+    """Repair only a proven legacy session resume; never change work resolution."""
+    from . import context_handoff as context
+    from .core_runtime import CoreRuntime,require_managed,_call,_values
+    require_managed()
+    if (operator_approved is not True or not isinstance(ident,str) or not context.JOB.fullmatch(ident)
+            or not isinstance(owner,str) or not owner or type(attempt) is not int or attempt<1):
+        raise ValueError('approved operator reconciliation and exact request owner/attempt required')
+    evidence_path=Path(evidence_file).absolute()
+    evidence,evidence_digest=_result_file(evidence_path)
+    if (not isinstance(evidence.get('operator_reference'),str) or not evidence['operator_reference'].strip()
+            or not isinstance(evidence.get('verification'),list) or not evidence['verification']
+            or any(not isinstance(x,str) or not x.strip() for x in evidence['verification'])
+            or type(evidence.get('lineage_event_seq')) is not int or evidence['lineage_event_seq']<1
+            or not isinstance(evidence.get('request_record_sha256'),str)
+            or not re.fullmatch(r'[a-f0-9]{64}',evidence['request_record_sha256'])):
+        raise ValueError('operator reference, pinned request hash and ledger lineage evidence required')
+    path=folder(state)/(ident+'.json');initial=context.read(path)
+    if not initial:raise ValueError('existing legacy work request required')
+    key=hashlib.sha256(initial['team'].encode()).hexdigest()
+    with context.locked(folder(state)/('team-'+key)),context.locked(path):
+        job=context.read(path)
+        if (job.get('phase') not in ('received','done') or job.get('delivery_id')
+                or job.get('team')!=initial.get('team')):
+            raise ValueError('only legacy confirmed received/done requests may rebind their receiver')
+        history=job.get('receiver_lineage',[])
+        if not isinstance(history,list):raise ValueError('receiver lineage history is invalid')
+        previous=history[-1] if history and history[-1].get('evidence_sha256')==evidence_digest else None
+        receiver=previous['previous_receiver'] if previous else job.get('receiver') or {}
+        if (receiver.get('owner')!=owner or receiver.get('attempt')!=attempt
+                or evidence.get('request_id')!=ident or evidence.get('task')!=job.get('task')
+                or evidence.get('owner')!=owner or type(evidence.get('attempt')) is not int or evidence['attempt']!=attempt
+                or evidence.get('from_terminal')!=receiver.get('terminal')):
+            raise ValueError('legacy receiver or evidence owner/attempt differs')
+        expected_hash=previous['original_request_sha256'] if previous else hashlib.sha256(path.read_bytes()).hexdigest()
+        if evidence['request_record_sha256']!=expected_hash:
+            raise ValueError('legacy request changed after operator inspection')
+        config=load(config_path)
+        store=Store(state)
+        try:
+            task=store.get(job['task'])
+            events=store.events(job['task'])
+        finally:store.close()
+        runtime=task.get('runtime') or {}
+        if (config.get('runtime_backend')!='core' or task.get('state')!='ready'
+                or task.get('role')!='leader' or task.get('team')!=job['team']
+                or task.get('owner')!=owner or task.get('attempt_count')!=attempt
+                or evidence.get('to_terminal')!=runtime.get('terminal')
+                or evidence.get('from_terminal')==runtime.get('terminal')):
+            raise ValueError('current ready execution is not the same resumed owner/attempt')
+        session=evidence.get('session_id')
+        recorded=[value for value in (runtime.get('resumed_session'),runtime.get('context_session_id'),
+                   (runtime.get('reboot_restore')or{}).get('session_id')) if value]
+        if not isinstance(session,str) or not recorded or any(value!=session for value in recorded):
+            raise ValueError('current recorded native session differs from the operator lineage')
+        event=next((e for e in events if e['seq']==evidence['lineage_event_seq']),None)
+        detail=(event or {}).get('detail') or {}
+        if (not event or event['event']!='native-session-resumed' or event['at']<job['at']
+                or detail.get('from_terminal')!=receiver['terminal']
+                or detail.get('to_terminal')!=runtime['terminal'] or detail.get('session')!=session
+                or detail.get('owner_preserved') is not True or detail.get('state_preserved') is not True):
+            raise ValueError('matching owner-preserving native session resume event is required')
+        claims=[e for e in events if e['event']=='claimed' and e['seq']<event['seq']]
+        if (len(claims)!=attempt or not claims or claims[-1]['detail'].get('owner')!=owner
+                or claims[-1]['at']>job['at']):
+            raise ValueError('lineage event is outside the original execution attempt')
+        old=_call('get',receiver['terminal'])
+        old_labels=old.get('labels') or {}
+        if (old.get('state')!='finished' or old.get('foreground') is not None
+                or old_labels.get('teamkit.owner')!=owner or old_labels.get('teamkit.task')!=job['task']):
+            raise ValueError('the original owned terminal must be proven finished before receiver rebind')
+        native=idle_native(task,config,state)
+        if native is None:raise ValueError('resumed native is working or has an unknown input draft')
+        argv=(native.get('foreground')or{}).get('argv') or []
+        if task['provider']=='claude':sessions=_values(argv,'--resume')
+        else:
+            positions=[i for i,value in enumerate(argv[:-1]) if value=='resume']
+            sessions=[argv[i+1] for i in positions]
+        if sessions!=[session]:raise ValueError('actual native argv does not resume the pinned conversation')
+        CoreRuntime(task)._native(runtime['name'],ready=True)
+        updated_receiver={**receiver,'terminal':runtime['terminal'],'native_pid':runtime['native_pid']}
+        if previous:
+            if job.get('receiver')!=updated_receiver:raise ValueError('recorded receiver changed after the earlier reconciliation')
+            if _file_proof(previous['original_request_file'])!=previous['original_request_sha256']:
+                raise ValueError('preserved original request bytes changed')
+            return {k:v for k,v in job.items() if k!='message'}
+        original=path.read_bytes()
+        if hashlib.sha256(original).hexdigest()!=expected_hash:raise ValueError('legacy request changed during lineage verification')
+        backup=folder(state)/(ident+'.receiver-before-'+expected_hash+'.json')
+        try:fd=os.open(backup,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        except FileExistsError:
+            if _file_proof(backup)!=expected_hash:raise ValueError('existing original-request backup differs')
+        else:
+            with os.fdopen(fd,'wb') as output:output.write(original);output.flush();os.fsync(output.fileno())
+        audit={'at':time.time(),'operator_reference':evidence['operator_reference'],
+               'evidence_file':str(evidence_path),'evidence_sha256':evidence_digest,
+               'original_request_file':str(backup),'original_request_sha256':expected_hash,
+               'previous_receiver':receiver,'receiver':updated_receiver,'session_id':session,
+               'lineage_event_seq':event['seq'],'lineage_event':event,
+               'previous_phase':job['phase'],'previous_reason':job.get('reason'),
+               'verification':evidence['verification']}
+        job.update(receiver=updated_receiver,receiver_lineage=[*history,audit],updated_at=time.time(),
+                   reason='동일 담당·실행 시도의 대화 재개 계보를 확인했습니다. 업무 완료와 검증은 별도 확인합니다.')
+        write_request(path,job)
+    notify(state)
+    return {k:v for k,v in job.items() if k!='message'}
 
 
 def _recover_delivery(config_path,state,ident):
@@ -613,6 +722,8 @@ def handle(args):
         return resolve(args.config,args.state,args.request,args.outcome,args.evidence_file,args.expected_owner,args.expected_attempt)
     if args.action=='submit':
         return submit(args.config,args.state,args.request,args.evidence_file,args.expected_owner,args.expected_attempt,args.delivery_id)
+    if args.action=='rebind-receiver':
+        return rebind_receiver(args.config,args.state,args.request,args.evidence_file,args.expected_owner,args.expected_attempt,args.operator_approved)
     if args.action=='assign':
         if not args.team or not args.message_file:raise ValueError('team and approved message file required')
         from .context_handoff import ensure
