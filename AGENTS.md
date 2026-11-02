@@ -6,6 +6,7 @@
 - Before Herdr control, load `herdr --skill` and require a genuine `HERDR_ENV=1` managed pane. Never synthesize that environment to control a user's session.
 - The installed CLI is the syntax authority. Test adapters with fake processes, then disclose the real runtime boundary still unverified.
 - Read `docs/operations.md` for account changes, handoff, shared manuals and PR gates. Keep implementation and review independent; bind reviews to the current head.
+- Card creation, state changes, decision questions, responses and handoff follow `docs/card-management.md`.
 - Preserve user changes and person-only commit authorship.
 - App dialogs and popovers must close on Escape and outside press as well as an explicit close button. Closing never submits an answer or authorizes work.
 - Background refresh preserves the displayed content, expanded sections and user drafts. Show loading for initial reads; notify only when visible data or errors change. Review cards put the requested decision and its next action before implementation details.

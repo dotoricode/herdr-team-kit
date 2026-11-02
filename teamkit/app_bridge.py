@@ -714,7 +714,8 @@ def main():
     parser.add_argument('--card-revision');parser.add_argument('--choice');parser.add_argument('--answer-text',default='')
     parser.add_argument('--question-file');parser.add_argument('--expected-question-revision',type=int,default=0)
     parser.add_argument('--send-json');parser.add_argument('--request-id')
-    parser.add_argument('--board-action',choices=('done','archive','restore'));parser.add_argument('--board-revision')
+    from .app_board import BOARD_ACTIONS
+    parser.add_argument('--board-action',choices=BOARD_ACTIONS);parser.add_argument('--board-revision')
     parser.add_argument('--outcome',choices=('responded','deferred'))
     parser.add_argument('--confirmed', action='store_true')
     args = parser.parse_args()

@@ -130,8 +130,12 @@ GUI Claude 실행은 프로세스별 `--settings`로 GUI statusline 수집기를
 
 ### 카드 운영과 문서 읽기
 
-보드는 `담당자 대기 / 실행 중 / 내 결정 필요 / 완료·정리`로 표시합니다. `presentation`이 실제 사용자 행동 여부와 현재 설계의 신원 검증된 native 실행을 분류하고, 운영상 확인은 담당자 대기의 `attention`으로 표시합니다. 카드에 요약·담당자·현재 작업·현재 설계 세션을 고정 표시하며 과거 세션은 상세에 둡니다.
+카드 생성·상태 변경·질문 작성·답변 처리·인계 시 [작업 카드 생성·관리 지침](card-management.md)을 읽습니다. 팀 공통 지침이나 `references`에서 같은 문서를 연결해 세션마다 다른 운영 규칙을 만들지 않습니다.
 
-`card-board-action`의 `done/archive/restore`는 비공개 보드 기록만 변경합니다. card semantic token과 현재 board revision을 대조하고 같은 요청 ID는 재실행하지 않습니다. 업무 phase·승인·진척률·전달·모델 실행은 변경하지 않습니다. 보관된 카드도 보관 목록에서 복원할 수 있고, 새 문서나 새 질문은 다시 나타납니다.
+보드는 `담당자 대기 / 진행 중 / 내 결정 필요 / 완료·정리`로 표시합니다. `presentation`이 실제 사용자 행동 여부와 현재 설계의 신원 검증된 native 실행을 분류하고, 운영상 확인은 담당자 대기의 `attention`으로 표시합니다. 카드에 요약·담당자·현재 작업·현재 설계 세션을 고정 표시하며 과거 세션은 상세에 둡니다.
+
+`card-board-action`의 `waiting/progress/done/archive/restore`는 비공개 보드 기록만 변경합니다. card semantic token과 현재 board revision을 대조하고 같은 요청 ID는 재실행하지 않습니다. 업무 phase·승인·진척률·전달·모델 실행은 변경하지 않습니다. 보관된 카드도 보관 목록에서 복원할 수 있고, 새 문서나 새 질문은 다시 나타납니다.
+
+카드와 상세의 상태 메뉴에서 자동·대기·진행 중·완료를 선택할 수 있습니다. 수동 선택은 `board.manual_status`로 저장되고 새 조회와 재진입에도 유지됩니다. 실제 실행·승인 정보는 그대로 표시하며 새 설계나 질문이 생기면 자동 상태로 돌아옵니다. 완료를 선택하면 완료 열을 즉시 펼칩니다.
 
 설계는 쉬운 설명·전체 Markdown·범위와 검증 조건·원문으로 나뉩니다. `document_view.body/source_body`는 정확한 원문이며 계약 항목은 `contract`로 분리합니다. 비공개 `card_briefs`의 사용자 설명은 `document.revision/digest`가 일치할 때만 사용합니다. 설명에는 summary/purpose/changes/checks/impact/decision_explanation/current_activity와 짧은 title을 둘 수 있습니다. 현재 활동과 세션은 실시간 실행 관찰을 우선하며 설명 문구만으로 실행 중이라고 표시하지 않습니다.

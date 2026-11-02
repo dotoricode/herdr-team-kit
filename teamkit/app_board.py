@@ -14,6 +14,8 @@ import stat
 import time
 import uuid
 
+BOARD_ACTIONS=('waiting','progress','done','archive','restore')
+
 from .app_feedback import _key, _open
 
 
@@ -133,7 +135,7 @@ def _read(path,card):
             raise ValueError('invalid journal')
         events=journal['events'];seen=set()
         for seq,event in enumerate(events,1):
-            if (not isinstance(event,dict) or type(event.get('seq')) is not int or event['seq']!=seq or event.get('action') not in ('done','archive','restore')
+            if (not isinstance(event,dict) or type(event.get('seq')) is not int or event['seq']!=seq or event.get('action') not in BOARD_ACTIONS
                     or not isinstance(event.get('token'),str) or not re.fullmatch(r'[0-9a-f]{64}',event['token'])
                     or not isinstance(event.get('client_request_id'),str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{7,127}',event['client_request_id'])
                     or event['client_request_id'] in seen or type(event.get('at')) not in (int,float) or not math.isfinite(event['at'])):
@@ -147,9 +149,11 @@ def _read(path,card):
 def _state(card,events):
     token=semantic_token(card);last=events[-1] if events else None
     stale=bool(last and last['token']!=token)
-    disposition={'done':'done','archive':'archived','restore':'visible'}[last['action']] if last and not stale else 'visible'
+    action=last['action'] if last and not stale else None
+    disposition={'done':'done','archive':'archived'}.get(action,'visible')
+    manual_status={'waiting':'waiting','progress':'progress','done':'complete'}.get(action)
     return {'disposition':disposition,'revision':_digest({'token':token,'events':events}),
-            'stale':stale,'can_restore':disposition!='visible'}
+            'stale':stale,'can_restore':disposition!='visible' or manual_status is not None,'manual_status':manual_status}
 
 
 def board_state(state,card):
@@ -187,7 +191,7 @@ def _sync(path):
 
 def board_action(state,card,action,client_request_id,expected_revision):
     """CAS-protected organization only. Repeating a request never replays an action."""
-    if action not in ('done','archive','restore'):raise ValueError('보드 정리 동작을 확인하세요.')
+    if action not in BOARD_ACTIONS:raise ValueError('보드 상태 변경 동작을 확인하세요.')
     if not isinstance(client_request_id,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{7,127}',client_request_id):
         raise ValueError('보드 정리 요청 ID를 확인하세요.')
     token=semantic_token(card);base=_base(state,True);path=_path(base,card)

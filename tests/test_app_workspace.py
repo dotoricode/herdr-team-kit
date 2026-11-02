@@ -6,6 +6,23 @@ from teamkit import app_bridge
 
 
 class WorkspaceTests(FeedbackFixture):
+    def test_manual_status_cli_round_trip_is_visible_to_another_reader(self):
+        import contextlib,io,json,sys
+        before=self.state.read_bytes()
+        for action,status in (('waiting','waiting'),('progress','progress'),('done','complete'),('restore',None)):
+            card=app_bridge.card_detail(self.config,self.state,self.links,'inventory','W47')
+            argv=['--config',str(self.config),'--state',str(self.state),'--bindings',str(self.links),'card-board-action',
+                  '--kind','inventory','--work','W47','--board-action',action,'--board-revision',card['board']['revision'],'--request-id','cli-status-'+action]
+            output=io.StringIO()
+            with patch.object(sys,'argv',['app',*argv]),contextlib.redirect_stdout(output):self.assertEqual(app_bridge.main(),0)
+            self.assertEqual(json.loads(output.getvalue())['board']['manual_status'],status)
+            with patch('teamkit.app_bridge.core_read',return_value={'terminals':[]}):
+                read=app_bridge.view(self.config,self.state,self.links)
+            row=next(r for r in read['inventory'] if r['id']=='W47')
+            self.assertEqual(row['board']['manual_status'],status)
+            self.assertFalse(row['status'].startswith('완료'))
+            self.assertEqual(self.state.read_bytes(),before)
+
     def test_document_rejects_a_newer_card_loaded_after_its_source_snapshot(self):
         self.setup_work();self.call('work','submit','W1')
         current=app_bridge.feedback_card_detail

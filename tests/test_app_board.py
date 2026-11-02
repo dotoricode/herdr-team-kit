@@ -93,6 +93,25 @@ class BoardJournalTests(unittest.TestCase):
         value=value or self.card
         return board_action(self.state,value,action,rid,revision or board_state(self.state,value)['revision'])
 
+    def test_manual_waiting_progress_and_complete_survive_reopening_without_changing_work(self):
+        original=self.state.read_bytes()
+        for index,(action,status,disposition) in enumerate((('waiting','waiting','visible'),('progress','progress','visible'),('done','complete','done'),('restore',None,'visible'))):
+            with self.subTest(action=action):
+                saved=self.action(action,f'request-manual-{index}')
+                self.assertEqual(saved['manual_status'],status)
+                self.assertEqual(saved['disposition'],disposition)
+                self.assertEqual(board_state(self.state,self.card),saved)
+                self.assertEqual(self.state.read_bytes(),original)
+                self.assertEqual(self.card['status'],'awaiting_approval')
+
+    def test_new_question_clears_a_manual_status_and_rejects_old_revision(self):
+        old=self.action('progress')
+        changed=copy.deepcopy(self.card)
+        changed['question']={'question_id':'question-1','question_revision':1,'document_revision':1,'document_digest':'a'*64,'prompt':'확인할까요?','options':[{'option_id':'yes','label':'확인'}]}
+        self.assertIsNone(board_state(self.state,changed)['manual_status'])
+        with self.assertRaisesRegex(ValueError,'바뀌었습니다'):
+            board_action(self.state,changed,'waiting','request-manual-1',old['revision'])
+
     def test_read_does_not_create_files_and_done_restore_leave_business_state_unchanged(self):
         before=set(self.root.iterdir());body=self.state.read_bytes()
         initial=board_state(self.state,self.card)
