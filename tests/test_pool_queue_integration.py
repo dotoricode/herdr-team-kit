@@ -74,6 +74,18 @@ class QueueIntegrationTests(unittest.TestCase):
             control.advance(self.f.config,self.f.state,first['id']);self.assertEqual(sent.call_count,1)
         self.assertEqual({j['work_id']:j['phase'] for j in control.requests(self.f.state)}, {'LOW':'pending','HIGH':'received'})
 
+    def test_urgent_dependent_does_not_starve_its_lower_priority_prerequisite(self):
+        actor=self.f.dispatched()
+        first=control.enqueue(self.f.config,self.f.state,'alpha',self.message,work_id='BASE',priority=0)
+        dependent=control.enqueue(self.f.config,self.f.state,'alpha',self.message,work_id='URGENT',
+                                   priority=9,dependencies=[first['id']])
+        with patch.object(context,'capacity_available',return_value=True),patch.object(control,'official',return_value=actor) as sent:
+            control.advance(self.f.config,self.f.state,dependent['id'])
+            control.advance(self.f.config,self.f.state,first['id'])
+        self.assertEqual(sent.call_count,1)
+        self.assertEqual({j['work_id']:j['phase'] for j in control.requests(self.f.state)},
+                         {'BASE':'received','URGENT':'pending'})
+
     def test_dependency_deferred_does_not_count_as_completed(self):
         self.f.dispatched()
         first=control.enqueue(self.f.config,self.f.state,'alpha',self.message,work_id='FIRST')

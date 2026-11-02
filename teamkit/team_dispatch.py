@@ -143,6 +143,37 @@ def _ready(config, state, team):
     return task if clean_prompt(native, target) else None
 
 
+def verify_tell(config_path, state, expected):
+    """Recheck fixed observer admission at the actual tell/wake boundary."""
+    from . import providers
+    from .config import binding, profile
+    from .store import Store
+    from .__main__ import select_execution
+    config=load(config_path)
+    task=_task(config,state,expected['team'])
+    keys=('id','owner','attempt_count','provider','account','model','effort','runtime')
+    if any(task.get(k)!=expected.get(k) for k in keys):
+        raise ValueError('observer actor changed before tell')
+    pr=profile(config,'codex','personal')
+    if task.get('runtime',{}).get('profile_binding')!=binding(pr):
+        raise ValueError('observer receipt profile binding changed')
+    providers.identity('codex',pr)
+    current=load(config_path)
+    store=Store(state)
+    try:
+        latest=store.get(task['id'])
+        chosen=select_execution(current,store,latest,time.time())
+    finally:store.close()
+    if (any(latest.get(k)!=task.get(k) for k in keys)
+            or chosen.get('action')!='dispatch'
+            or any(chosen.get(k)!=task.get(k) for k in ('provider','account','model','effort'))
+            or binding(profile(current,'codex','personal'))!=binding(pr)):
+        raise ValueError('observer quota, policy, profile or owner changed before tell')
+    ready=_ready(current,state,task['team'])
+    if ready is None or ready.get('owner')!=task['owner'] or ready.get('attempt_count')!=task['attempt_count']:
+        raise ValueError('observer is busy or has unsubmitted input')
+
+
 def bootstrap(config_path, state, team):
     config = load(config_path)
     task = _task(config, state, team)

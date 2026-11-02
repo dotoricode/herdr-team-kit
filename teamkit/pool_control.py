@@ -212,13 +212,20 @@ def _advance(config_path,state,ident):
         if not job or job['phase'] in ('done','received','completed','deferred','uncertain','cancelled'):return
         config=load(config_path)
         if not pool.enabled(config):return
-        team_jobs=[j for j in requests(state) if j['team']==job['team']]
+        from . import queue_policy
+        all_jobs=requests(state)
+        team_jobs=[j for j in all_jobs if j['team']==job['team']]
         active=[j for j in team_jobs if j['id']!=ident and j['phase'] not in ('pending','completed','deferred','cancelled')]
         waiting=sorted((j for j in team_jobs if j['phase']=='pending'),
                        key=lambda j:(-j.get('priority',0),j.get('sequence',0),j.get('at',0),j['id']))
-        if job['phase']=='pending' and (active or waiting and waiting[0]['id']!=ident):
-            job.update(reason='앞선 요청의 업무 완료·보류 인계를 기다립니다.',updated_at=time.time())
-            write_request(path,job);return
+        if job['phase']=='pending':
+            reason='앞선 요청의 업무 완료·보류 인계를 기다립니다.' if active else queue_policy.admission(config,state,job,all_jobs)
+            if not reason:
+                eligible=next((j for j in waiting if queue_policy.admission(config,state,j,all_jobs) is None),None)
+                if eligible and eligible['id']!=ident:reason='먼저 실행 가능한 우선 요청을 기다립니다.'
+            if reason:
+                job.update(reason=reason,updated_at=time.time())
+                write_request(path,job);return
         def save(phase,reason):
             job.update(phase=phase,reason=reason,updated_at=time.time());write_request(path,job)
         try:

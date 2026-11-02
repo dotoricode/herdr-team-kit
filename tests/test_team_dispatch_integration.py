@@ -1,10 +1,12 @@
 """Consumer integration around observer CLI and existing context supervisor."""
+import json
 import unittest
 from unittest.mock import patch
 
 import test_team_dispatch as fixtures
 from teamkit import context_handoff as context
-from teamkit.config import load
+from teamkit.config import load, binding
+from teamkit.store import Store
 
 
 class DispatchIntegrationTests(unittest.TestCase):
@@ -38,3 +40,45 @@ class DispatchIntegrationTests(unittest.TestCase):
             result=self.f.call('team-dispatch','status')
         self.assertTrue(result['enabled']);self.assertEqual(result['managers'][0]['state'],'queued')
         prepare.assert_not_called();bootstrap.assert_not_called()
+
+    def test_actual_tell_refuses_quota_or_profile_change_before_wake(self):
+        for change in ('quota','profile'):
+            with self.subTest(change=change):
+                self.f.ready();self.f.observe()
+                store=Store(self.f.state);task=store.get('D1')
+                task['runtime']['profile_binding']=binding(self.f.value['profiles']['codex']['personal'])
+                store._save(task,'fixture');store.close()
+                native={**self.f.native(),'address':'tmanager','status':{'state':'idle','app':'codex'}}
+                def native_read(*args,**kwargs):
+                    if change=='quota':
+                        store=Store(self.f.state);quota=store.quota('codex/personal')
+                        quota['five_hour']['used']=90;store.quota('codex/personal',quota);store.close()
+                    else:
+                        self.f.value['profiles']['codex']['personal']['home']=str(self.f.root/'replacement-personal')
+                        self.f.config.write_text(json.dumps(self.f.value))
+                    return native
+                with patch('teamkit.core_runtime.require_managed',return_value='tcontroller'),                     patch('teamkit.core_runtime.CoreRuntime._native',side_effect=native_read),                     patch('teamkit.core_runtime.CoreRuntime.prompt') as prompt,                     patch('teamkit.providers.identity'):
+                    message=self.f.root/'event.txt';message.write_text('Observe this event.')
+                    with self.assertRaises(ValueError):
+                        self.f.call('tell','D1','--message-file',str(message))
+                prompt.assert_not_called()
+                self.assertEqual(self.f.call('show','D1')['state'],'ready')
+                # Restore the original fixture configuration for the next branch.
+                self.f.value['profiles']['codex']['personal']['home']=str(self.f.root/'personal')
+                self.f.config.write_text(json.dumps(self.f.value))
+
+    def test_actual_tell_accepts_current_personal_actor_and_fresh_admission(self):
+        task=self.f.ready()
+        store=Store(self.f.state)
+        task['runtime']['profile_binding']=binding(self.f.value['profiles']['codex']['personal'])
+        store._save(task,'fixture');store.close()
+        native={**self.f.native(),'address':'tmanager','status':{'state':'idle','app':'codex'}}
+        message=self.f.root/'event-valid.txt';message.write_text('Observe the supplied event.')
+        with patch('teamkit.core_runtime.require_managed',return_value='tcontroller'),\
+             patch('teamkit.core_runtime.CoreRuntime._native',return_value=native),\
+             patch('teamkit.context_handoff.clean_prompt',return_value=True),\
+             patch('teamkit.core_runtime.CoreRuntime.prompt') as prompt,\
+             patch('teamkit.providers.identity') as identity:
+            result=self.f.call('tell','D1','--message-file',str(message))
+        self.assertEqual(result['state'],'running')
+        prompt.assert_called_once();identity.assert_called_once()

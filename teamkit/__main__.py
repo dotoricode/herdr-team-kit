@@ -452,6 +452,9 @@ def run(args):
                         or any(chosen.get(k)!=task.get(k) for k in ('provider','account','model','effort'))
                         or binding(profile(latest_config,task['provider'],task['account']))!=binding(pr)):
                     raise ValueError('pool selection changed before new work; use pool assign and wait for handoff')
+            if task.get('team_dispatch_team') is not None:
+                from .team_dispatch import verify_tell
+                verify_tell(args.config,args.state,task)
             store.wake(args.task, task['owner'], approval_config=config)
             try:
                 import shlex
