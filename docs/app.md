@@ -126,3 +126,12 @@ GUI Claude 실행은 프로세스별 `--settings`로 GUI statusline 수집기를
 설계 문서를 읽으면 본문 위쪽에 300px 문서 영역을 확보하고, 모달 크기 변경 시 본문 스크롤 높이를 다시 계산합니다. 설계 편집기의 글자는12px이며 읽기 전용·줄바꿈을 적용합니다. 자유 입력은 단일 `--answer-text=...` 인자로 전달하여 옵션처럼 시작하는 답변도 그대로 저장합니다.
 
 문서와 상세 내용은 마우스 휠·네이티브 스크롤바를 사용하는 구성입니다. 별도의 PageUp/PageDown 버튼이나 단축키를 등록하지 않습니다. 모달 본문 스크롤 영역과 스크롤바는 같은 ID에 명시적으로 연결합니다.
+
+
+### 카드 운영과 문서 읽기
+
+보드는 `담당자 대기 / 실행 중 / 내 결정 필요 / 완료·정리`로 표시합니다. `presentation`이 실제 사용자 행동 여부와 현재 설계의 신원 검증된 native 실행을 분류하고, 운영상 확인은 담당자 대기의 `attention`으로 표시합니다. 카드에 요약·담당자·현재 작업·현재 설계 세션을 고정 표시하며 과거 세션은 상세에 둡니다.
+
+`card-board-action`의 `done/archive/restore`는 비공개 보드 기록만 변경합니다. card semantic token과 현재 board revision을 대조하고 같은 요청 ID는 재실행하지 않습니다. 업무 phase·승인·진척률·전달·모델 실행은 변경하지 않습니다. 보관된 카드도 보관 목록에서 복원할 수 있고, 새 문서나 새 질문은 다시 나타납니다.
+
+설계는 쉬운 설명·전체 Markdown·범위와 검증 조건·원문으로 나뉩니다. `document_view.body/source_body`는 정확한 원문이며 계약 항목은 `contract`로 분리합니다. 비공개 `card_briefs`의 사용자 설명은 `document.revision/digest`가 일치할 때만 사용합니다. 설명에는 summary/purpose/changes/checks/impact/decision_explanation/current_activity와 짧은 title을 둘 수 있습니다. 현재 활동과 세션은 실시간 실행 관찰을 우선하며 설명 문구만으로 실행 중이라고 표시하지 않습니다.

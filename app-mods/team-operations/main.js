@@ -14,17 +14,9 @@ const shortHash = text => { let h = 5381; for (const ch of String(text)) h = ((h
 const BOARD_NARROW = 900;
 const SEND_FINAL = new Set(["sent", "not_sent", "unknown"]);
 function documentPreview(source) {
-  let fence = null;
-  return String(source ?? "").split("\n").map(line => {
-    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line);
-    if (marker) {
-      if (!fence) fence = marker[1];
-      else if (marker[1][0] === fence[0] && marker[1].length >= fence.length && line.slice(marker[0].length).trim() === "") fence = null;
-      return line;
-    }
-    return fence || !line.trim() || /^( {4}|\t)/.test(line) || /(?: {2}|\\)$/.test(line) ? line : `${line}  `;
-  }).join("\n");
+  return String(source ?? "");
 }
+
 const display = value => value == null ? "미확인" : typeof value === "string" ? value : typeof value === "number" ? String(value) : Array.isArray(value) ? value.map(display).join(" / ") : typeof value === "boolean" ? (value ? "예" : "아니요") : JSON.stringify(value);
 const clock = value => {
   if (value == null) return DUMMY;
@@ -106,7 +98,7 @@ export default class TeamOperations extends View {
     this.data = null; this.error = null; this.busy = false; this.seq = 0;
     this.expanded = new Set(); this.doc = null; this.docBusy = false; this.docSource = false;
     this.confirm = null; this.actionBusy = false; this.message = null;
-    this.showCompleted = false; this.coordinatorConfirm = false; this.coordinatorBusy = false; this.coordinatorMessage = null;
+    this.showAccounts = false; this.showArchived = false; this.boardBusy = false; this.boardMessage = null; this.boardRequestIds = new Map(); this.docMode = "brief"; this.showCompleted = false; this.coordinatorConfirm = false; this.coordinatorBusy = false; this.coordinatorMessage = null;
     this.usageBusy = false; this.usageMessage = null;
     this.statusOpen = null; this.statusRevealed = false; this.statusEpoch = 0;
     this.detailData = null; this.detailError = null; this.detailBusy = false; this.detailFetching = false; this.detailHeight = null;
@@ -114,7 +106,7 @@ export default class TeamOperations extends View {
     this.infoOpen = false; this.historyOpen = false;
     this.cardData = null; this.cardError = null; this.cardBusy = false;
     this.answerChoice = null; this.answerBusy = false; this.answerMessage = null;
-    this.closed = false; this.refreshPromise = null; this.activeSeq = 0; this.manual = null; this.manualCount = 0; this.lastSuccessAt = null; this.viewWidth = null;
+    this.closed = false; this.refreshPromise = null; this.activeSeq = 0; this.manual = null; this.manualCount = 0; this.lastSuccessAt = null; this.viewWidth = null; this.viewHeight = null;
     this.form = { key: null, option: null }; this.restoring = false; this.preservedKeys = [];
     this.sendBusy = false; this.sendRequestId = null; this.sendResult = null; this.sendMessage = null; this.techOpen = false;
     if (this.role === "detail") {
@@ -412,7 +404,7 @@ export default class TeamOperations extends View {
 
   async document(work, cx) {
     if (this.actionBusy || this.docBusy) return;
-    this.selectedWorkId = work.id; this.docBusy = true; this.docSource = false; this.confirm = null; this.message = null; this.doc = null;
+    this.selectedWorkId = work.id; this.docBusy = true; this.docSource = false; this.docMode = "brief"; this.confirm = null; this.message = null; this.doc = null;
     this.docEditor?.release(); this.docEditor = null;
     const id = work.id;
     try {
@@ -422,7 +414,7 @@ export default class TeamOperations extends View {
       if (d.id !== id) throw new Error("backend가 요청한 작업과 다른 문서를 반환했습니다.");
       this.doc = d;
       const t = theme();
-      this.docEditor = EditorState.new({ language: "markdown", readonly: true, value: String(d.body ?? ""), font_family: this.config?.document_code_font || "D2Coding", font_size: 12, line_numbers: false, folding: false, soft_wrap: true,
+      this.docEditor = EditorState.new({ language: "markdown", readonly: true, value: String(d.source_body ?? d.body ?? ""), font_family: this.config?.document_code_font || "D2Coding", font_size: 14, line_numbers: false, folding: false, soft_wrap: true,
         syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 } });
     } catch (e) { this.message = String(e); }
     finally { this.docBusy = false; cx.notify(); }
@@ -506,7 +498,7 @@ export default class TeamOperations extends View {
 
   choiceContext() {
     const card = this.cardData, selected = this.viewProps.selection;
-    if (card?.interaction && !card.needs_decision && !this.choiceStarted) return null;
+    if ((card?.presentation ? !card.presentation.decision_required : card?.interaction && !card.needs_decision) && !this.choiceStarted) return null;
     if (!card || !selected || card.revision !== selected.cardRevision
         || card.document_revision !== selected.documentRevision || card.document_digest !== selected.documentDigest) return null;
     let option;
@@ -514,7 +506,7 @@ export default class TeamOperations extends View {
       if (!card.question || card.question.question_id !== selected.questionId || card.question.question_revision !== selected.questionRevision) return null;
       const source = card.question.options.find(o => o.option_id === selected.id);
       if (source) option = { ...source, intent: "question" };
-    } else if (card.needs_decision || this.choiceStarted) option = card.decision?.options.find(o => o.id === selected.id);
+    } else if ((card.presentation?.decision_required ?? card.needs_decision) || this.choiceStarted) option = card.decision?.options.find(o => o.id === selected.id);
     if (!option || option.intent === "approve" && (card.kind !== "work" || card.status !== "awaiting_approval")) return null;
     const recipient = option.intent === "confirmed" ? "팀 총괄" : card.leader?.label ?? card.team_label ?? "담당 팀장";
     const unresolved = (card.deliveries ?? []).some(d => {
@@ -530,6 +522,25 @@ export default class TeamOperations extends View {
     return { ...option, recipient, next, blocked: unresolved && ["question", "changes", "defer"].includes(option.intent)
       ? "이전 요청의 전달 결과를 확인 중입니다. 새 요청은 보내지 않습니다." : null };
   }
+
+  async organizeCard(kind, card, action, cx) {
+    if (this.boardBusy || this.error || !this.data?.actions_enabled || !card?.board?.revision) return;
+    this.boardBusy = true; this.boardMessage = null; cx.notify();
+    const key = `${kind}|${card.id}|${action}|${card.board.revision}`;
+    if (!this.boardRequestIds.has(key)) this.boardRequestIds.set(key, requestId());
+    try {
+      const r = await this.args("card-board-action", ["--kind", kind, "--work", card.id, "--board-action", action,
+        "--board-revision", card.board.revision, "--request-id", this.boardRequestIds.get(key)]);
+      if (r.code !== 0) throw new Error(r.stderr || "카드 정리 상태를 변경하지 못했습니다.");
+      const result = JSON.parse(r.stdout);
+      this.boardMessage = result.message;
+      showNotice({ title: action === "archive" ? "카드를 보관했습니다" : action === "restore" ? "카드를 복원했습니다" : "보드에서 정리 완료했습니다", body: "실제 작업과 승인 상태는 유지됩니다.", level: "success", timeout: 3000 });
+      await this.refresh(cx);
+      if (this.role === "detail") await this.loadCard(cx);
+    } catch (error) { this.boardMessage = String(error); }
+    finally { this.boardBusy = false; if (!this.closed) cx.notify(); }
+  }
+
 
   finishChoice(title) {
     if (this.choiceCompleted || this.closed) return;
@@ -610,7 +621,7 @@ export default class TeamOperations extends View {
 
   render(cx) {
     const t = theme(), data = this.data;
-    const button = (id, text, fn, disabled = false) => div().id(id).px(10).py(6).rounded(6).cursor_pointer().bg(disabled ? t.chrome : t.raised).text_color(disabled ? t.dim : t.foreground).on_click((_e, cx) => { if (!disabled) fn(cx); }).child(text);
+    const button = (id, text, fn, disabled = false) => div().id(id).px(10).py(6).rounded(6).cursor_pointer().bg(disabled ? t.chrome : t.raised).text_color(disabled ? t.dim : t.foreground).on_click((_e, cx) => { cx.stop_propagation?.(); if (!disabled) fn(cx); }).child(text);
     const badge = (text, color = t.muted) => div().flex_none().whitespace_nowrap().h(20).line_height("20px").px(7).rounded(5).bg(t.raised).text_size(11).font_semibold().text_color(color).child(text);
     const statusBadge = (label, status) => badge(label, t[status]).bg(t[status]).text_color("#000000");
     // Flowing text: soft-wraps at spaces, and a very long path or id breaks after its separators.
@@ -625,7 +636,7 @@ export default class TeamOperations extends View {
     };
     // Purpose / task goal read as one continuous Markdown body (headings, lists, code, links), same font as the design.
     const readable = (id, source) => TextView.markdown(`${id}-${shortHash(source)}`, documentPreview(display(source).replaceAll("장부", "작업 기록"))).selectable(true).scrollable(false)
-      .w_full().min_w(0).max_w(880).flex_none().font_family(this.config?.document_font || "Pretendard").font_normal().text_size(14).line_height("23px").on_link_click(openLink);
+      .w_full().min_w(0).max_w(700).flex_none().font_family(this.config?.document_font || "Pretendard").font_normal().text_size(16).line_height("24px").on_link_click(openLink);
     const pair = (a, b, scroll = false) => h_flex().gap(6).items_start()
       .child(div().flex_none().whitespace_nowrap().text_color(t.muted).child(a))
       .child(scroll ? div().flex_1().min_w(0).overflow_x_scrollbar().whitespace_nowrap().child(display(b)) : words(b).flex_1().min_w(0));
@@ -790,21 +801,37 @@ export default class TeamOperations extends View {
       const approvalButtons = h_flex().flex_none().gap(6)
         .when(Boolean(doc?.can_approve), el => el.child(button("detail-approve", "이 설계 승인", cx => this.begin("approve", null, cx), !doc.can_approve)))
         .children((doc?.resumable ?? []).map(task => button(`detail-resume-${task.id}`, `재개 · ${task.id}`, cx => this.begin("resume", task, cx))));
-      const documentSection = v_flex().id("detail-document").min_h(0).gap(6).pt(4).font_family(this.config?.document_font || "Pretendard").font_normal()
-        .when(this.docBusy || this.docSource && this.docEditor != null, x => x.h(300).flex_none())
-        .when(!this.docBusy && !this.docSource, x => x.flex_none())
-        .child(h_flex().flex_none().items_center().justify_between().gap(8)
-          .child(div().whitespace_nowrap().font_semibold().text_color(t.accent).child(doc ? `${display(doc.title)} · v${display(doc.revision)}` : "설계 문서"))
-          .child(h_flex().gap(6).children([
-            button("detail-read-document", this.docBusy ? "읽는 중" : doc ? "설계 다시 읽기" : "설계 읽기", cx => cx.spawn(async cx => this.document(detailWork, cx)), this.docBusy || this.actionBusy),
-            ...(doc ? [button("detail-toggle-source", this.docSource ? "문서 보기" : "원문 보기", cx => { this.docSource = !this.docSource; cx.notify(); })] : []),
-            ...(doc ? [button("detail-close-document", "문서 닫기", cx => this.closeDocument(cx))] : [])
-          ])))
-        .when(Boolean(this.message), x => x.child(div().flex_none().text_color(/실패|오류|fail|error/i.test(this.message) ? t.blocked : t.muted).child(this.message)))
-        .when(this.docBusy, x => x.child(div().flex_none().text_color(t.dim).child("설계를 읽는 중입니다.")))
-        .when(Boolean(doc) && !this.docSource, x => x.child(TextView.markdown(`design-preview-${doc.id}-${doc.revision}-${doc.digest}`, documentPreview(doc.body)).selectable(true).scrollable(false).w_full().max_w(880).flex_none().px(10).font_family(this.config?.document_font || "Pretendard").font_normal().text_size(14).line_height("23px")
-          .on_link_click(openLink)))
-        .when(this.docEditor != null && Boolean(this.docSource), x => x.child(Editor.new(this.docEditor).flex_1().min_h(0)))
+      const docBrief = doc?.brief;
+      const briefPart = (id, title, content) => v_flex().min_w(0).gap(7).pt(12)
+        .child(div().font_semibold().text_size(14).child(title))
+        .child(readable(`brief-${id}-${doc?.id}`, Array.isArray(content) ? content.map(x => `- ${x}`).join("\n") : content));
+      const documentSection = v_flex().id("detail-document").min_h(0).flex_none().gap(12).pt(12).font_family(this.config?.document_font || "Pretendard").font_normal()
+        .child(h_flex().flex_none().flex_wrap().items_center().justify_between().gap(8)
+          .child(div().font_semibold().text_size(14).child(doc ? `설계 v${doc.revision}` : "설계 설명"))
+          .child(h_flex().flex_wrap().gap(6)
+            .when(Boolean(doc), el => el.children([
+              button("detail-reading-brief", "쉬운 설명", cx => { this.docMode = "brief"; this.docSource = false; cx.notify(); }),
+              button("detail-reading-full", "전체 설계", cx => { this.docMode = "full"; this.docSource = false; cx.notify(); }),
+              button("detail-reading-contract", "범위·검증 조건", cx => { this.docMode = "contract"; this.docSource = false; cx.notify(); }),
+              button("detail-toggle-source", "원문", cx => { this.docMode = "source"; this.docSource = true; cx.notify(); }),
+              button("detail-close-document", "문서 닫기", cx => this.closeDocument(cx))
+            ]))))
+        .when(Boolean(this.message), x => x.child(words(this.message).text_color(t.blocked)))
+        .when(this.docBusy, x => x.child(words("현재 버전의 설계를 읽는 중입니다.").text_color(t.muted)))
+        .when(Boolean(docBrief) && this.docMode === "brief", x => x.child(v_flex().id("reading-brief").min_w(0).max_w(700).gap(10)
+          .when(docBrief.summary !== (card?.presentation?.summary ?? card?.brief?.summary), el => el.child(readable("brief-summary", docBrief.summary)))
+          .child(briefPart("purpose", "왜 필요한가요?", docBrief.purpose))
+          .child(briefPart("changes", "달라지는 점", docBrief.changes))
+          .child(briefPart("checks", "어떻게 확인하나요?", docBrief.checks))
+          .child(briefPart("impact", "영향과 범위", docBrief.impact))
+          .child(briefPart("decision", "내가 결정할 내용", docBrief.decision_explanation))
+          .when(doc.brief_state !== "current", el => el.child(words("현재 설계의 요구사항과 검증 조건으로 정리한 설명입니다.").text_size(12).text_color(t.muted)))))
+        .when(Boolean(doc) && this.docMode === "full", x => x.child(readable(`design-preview-${doc.id}-${doc.revision}-${doc.digest}`, doc.body)))
+        .when(Boolean(doc) && this.docMode === "contract", x => x.child(v_flex().min_w(0).max_w(700).gap(10)
+          .child(briefPart("paths", "변경할 수 있는 범위", doc.contract?.allowed_paths ?? []))
+          .child(briefPart("requirements", "지켜야 할 조건", doc.contract?.requirements ?? []))
+          .child(briefPart("steps", "완료를 확인할 단계", (doc.contract?.steps ?? []).map(step => step.title)))))
+        .when(this.docEditor != null && this.docMode === "source", x => x.child(Editor.new(this.docEditor).h(420).min_h(0)))
         .when(Boolean(doc) && !this.confirm && selectedActionAllowed, x => x.child(approvalButtons))
         .when(Boolean(this.confirm), x => x.child(confirmBox));
       const shownStatus = card?.status_label ?? phaseText(detail?.phase ?? detailWork.phase ?? detailWork.status);
@@ -812,7 +839,7 @@ export default class TeamOperations extends View {
         .child(div().whitespace_nowrap().child(`${this.viewProps.kind === "inventory" ? "운영 환경 구축" : "제품 작업"} · ${display(detailWork.id)}`))
         .child(badge(shownStatus, /확인|승인 대기|검토|오류|실패/.test(shownStatus) ? t.blocked : /완료/.test(shownStatus) ? t.done : t.working));
       const titleBlock = v_flex().flex_1().min_w(0).gap(3)
-        .child(div().min_w(0).whitespace_normal().text_size(15).line_height("22px").font_semibold().child(softBreaks(display(this.viewProps.kind === "inventory" ? detailWork.name ?? detailWork.title ?? detailWork.id : detail?.title ?? detailWork.title ?? detail?.name ?? detailWork.id))));
+        .child(div().min_w(0).whitespace_normal().text_size(15).line_height("22px").font_semibold().child(softBreaks(display(card?.presentation?.title ?? this.viewProps.item?.presentation?.title ?? (this.viewProps.kind === "inventory" ? detailWork.name ?? detailWork.title ?? detailWork.id : detail?.title ?? detailWork.title ?? detail?.name ?? detailWork.id)))));
       const detailHeader = h_flex().min_h(48).flex_none().items_center().justify_between().gap(10)
         .child(titleBlock)
         .child(button("detail-close", "닫기", () => closeOverlay(overlay)));
@@ -832,7 +859,7 @@ export default class TeamOperations extends View {
           .child(div().min_w(0).font_semibold().whitespace_normal().child(`${picked ? "●" : "○"} ${number}. ${label}`))
           .when(Boolean(description), el => el.child(words(description).text_size(11).text_color(t.muted)));
       };
-      const questionSection = q && (card?.interaction ? card.needs_decision : true)
+      const questionSection = q && (card?.presentation ? card.presentation.decision_required : card?.interaction ? card.needs_decision : true)
         ? v_flex().id("decision-question").flex_none().min_w(0).gap(7).p(10).rounded(7).bg(t.surface).border_1().border_color(t.accent)
           .child(div().text_size(11).font_semibold().text_color(t.accent).child("결정 질문"))
           .child(words(q.prompt).text_size(14).font_semibold())
@@ -847,22 +874,22 @@ export default class TeamOperations extends View {
           .child(words([draft.other, draft.comment].filter(x => x?.trim()).join("\n")).text_size(11))
           .child(button(`discard-draft-${shortHash(key)}`, "이 내용 지우기", cx => { DRAFTS.delete(key); this.preservedKeys = this.preservedKeys.filter(k => k !== key); cx.notify(); }).text_size(10));
       });
-      const needsDecision = card?.interaction ? Boolean(card.needs_decision) : Boolean(q || card?.needs_decision);
-      const summary = card?.prompt && card.prompt !== "무엇을 확인했고 어떤 조치가 필요한가요?" ? card.prompt : card?.reason ?? card?.condition;
+      const needsDecision = card?.presentation ? Boolean(card.presentation.decision_required) : card?.interaction ? Boolean(card.needs_decision) : Boolean(q || card?.needs_decision);
+      const summary = card?.presentation?.summary ?? (card?.prompt && card.prompt !== "무엇을 확인했고 어떤 조치가 필요한가요?" ? card.prompt : card?.reason ?? card?.condition);
       const summarySection = v_flex().id("decision-summary").flex_none().min_w(0).gap(6)
         .child(div().text_size(11).font_semibold().text_color(t.muted).child(needsDecision ? "무엇을 결정하나요?" : "어떤 작업인가요?"))
-        .child(words(summary ?? "작업 내용을 확인하고 있습니다.").text_size(13));
+        .child(readable("card-summary", summary ?? "작업 내용을 확인하고 있습니다."));
       const fallbackSection = v_flex().id("decision-options").flex_none().min_w(0).gap(8)
-        .child(words(card?.decision?.prompt ?? card?.decision_reason ?? "이 작업의 선택지를 준비하고 있습니다.").text_size(14).font_semibold())
+        .child(words(card?.decision?.prompt ?? card?.decision_reason ?? (card?.status === "awaiting_approval" ? "아래 설계 설명과 변경 범위를 읽고 이 버전의 진행 여부를 결정해 주세요." : "담당자가 이 작업에 맞는 선택지를 준비해야 합니다.")).text_size(14).font_semibold())
         .children((card?.decision?.options ?? []).map(option => button(`answer-${option.id}`, option.label, () => this.openChoice("decision", option.id), !canSend || this.choiceBusy)
           .min_w(0).whitespace_normal().text_size(13)
           .child(words(option.description).text_size(11).text_color(t.muted))));
       const progressSection = v_flex().id("card-progress").flex_none().min_w(0).gap(7)
-        .child(words(card?.interaction?.label ?? shownStatus).text_color(t.accent).font_semibold())
+        .child(words(card?.presentation?.waiting_on || card?.interaction?.label || shownStatus).text_color(t.accent).font_semibold())
         .child(words(card?.interaction?.reason || (card?.status === "complete" || card?.status_label === "완료" ? "완료된 작업입니다. 결과와 이력은 아래에서 볼 수 있습니다."
           : card?.status === "approved" ? "승인된 작업입니다. 담당자 배정을 기다리고 있습니다."
             : card?.status === "planning" ? "설계를 준비하고 있습니다. 검토가 필요해지면 질문이 표시됩니다."
-              : "지금 선택할 항목은 없습니다. 담당자가 작업과 검증을 진행하고 있습니다.")).text_color(t.muted));
+              : "현재 사용자 결정 요청은 없습니다. 아래에 담당자와 작업 상태를 표시합니다.")).text_color(t.muted));
       const deliveries = card?.deliveries ?? [];
       const shownDeliveries = current && !deliveries.some(d => d.request_id === current.request_id) ? [current, ...deliveries] : deliveries;
       const deliverySection = v_flex().id("delivery-status").flex_none().min_w(0).gap(4).p(9).rounded(7).bg(t.surface)
@@ -888,7 +915,12 @@ export default class TeamOperations extends View {
           else cx.spawn(async cx => this.document(detailWork, cx));
         }, this.docBusy || this.actionBusy)))
         .child(button("detail-toggle-info", this.infoOpen ? "상세 정보 접기" : "상세 정보", cx => { this.infoOpen = !this.infoOpen; cx.notify(); }))
-        .child(button("detail-toggle-history", this.historyOpen ? "기록 접기" : "기록", cx => { this.historyOpen = !this.historyOpen; cx.notify(); }));
+        .child(button("detail-toggle-history", this.historyOpen ? "기록 접기" : "기록", cx => { this.historyOpen = !this.historyOpen; cx.notify(); }))
+        .when(Boolean(card?.board), el => el
+          .when(card.board.disposition === "visible", x => x.children([
+            button("detail-board-done", "보드에서 정리 완료", cx => cx.spawn(async cx => this.organizeCard(card.kind, card, "done", cx)), this.boardBusy),
+            button("detail-board-archive", "보관", cx => cx.spawn(async cx => this.organizeCard(card.kind, card, "archive", cx)), this.boardBusy)]))
+          .when(card.board.disposition !== "visible", x => x.child(button("detail-board-restore", "보드에 복원", cx => cx.spawn(async cx => this.organizeCard(card.kind, card, "restore", cx)), this.boardBusy))));
       const informationSection = v_flex().id("detail-information").flex_none().min_w(0).gap(8)
         .child(detailCategory)
         .child(v_flex().flex_none().gap(4)
@@ -920,6 +952,12 @@ export default class TeamOperations extends View {
         .when(Boolean(this.sendMessage), el => el.child(words(this.sendMessage).text_size(11).text_color(this.sendMessage.startsWith("⚠") ? t.blocked : t.muted)))
         .when(Boolean(current), el => el.child(words(current.label ?? sendLabel("전달 상태")).text_size(11).text_color(sendColor(current.state))))
         .when(Boolean(this.answerMessage), el => el.child(words(this.answerMessage).text_size(11).text_color(this.answerMessage.startsWith("⚠") ? t.blocked : t.accent)))
+        .when(Boolean(card?.presentation), el => el.child(v_flex().id("card-current-work").gap(6).py(10)
+          .child(pair("담당", card.presentation.owner_label))
+          .child(pair("지금", card.presentation.current_activity))
+          .child(pair("작업 세션", (card.presentation.sessions ?? []).filter(s => s.terminal).map(s => `${s.role_label} · ${s.terminal}`).join(" / ") || "현재 설계에 연결된 세션 없음"))
+          .children((card.presentation.sessions ?? []).filter(s => s.can_focus).map(s => button(`current-session-${s.task}`, `${s.role_label} 세션 열기`, () => run("agent.focus", {terminal:s.terminal}))))))
+        .when(Boolean(this.boardMessage), el => el.child(words(this.boardMessage).text_size(12).text_color(t.muted)))
         .when(Boolean(card), el => el.child(extraButtons))
         .when((this.viewProps.kind !== "inventory" || Boolean(this.viewProps.linkedWorkId)) && (this.docBusy || this.docEditor != null || Boolean(this.message)), el => el.child(documentSection))
         .when(this.infoOpen, el => el.child(informationSection))
@@ -935,60 +973,61 @@ export default class TeamOperations extends View {
           .child(body)
           .child(Scrollbar.vertical("detail-body").absolute().inset_0().mode("always")));
     }
-    const categoryForWork = work => work.interaction?.column ?? WORK_PHASES[work.phase]?.column ?? "review";
-    const categoryForInventory = item => {
-      if (item.interaction) return item.interaction.column;
-      const status = String(item.status ?? "");
-      if (status.startsWith("완료")) return "complete";
-      if (/확인|승인|검토|선택|실패|불명|오류/.test(status)) return "review";
-      if (/진행|실행 중/.test(status)) return "progress";
-      return "waiting";
-    };
-    // Below this logical width the four columns stack in one vertical flow instead of running off the right edge.
     const narrow = (this.viewWidth ?? Infinity) < BOARD_NARROW;
     const boardColumns = [
-      { id: "waiting", title: "대기", color: t.idle },
-      { id: "progress", title: "진행 중", color: t.working },
-      { id: "review", title: "확인 필요", color: t.blocked },
-      { id: "complete", title: "완료", color: t.done }
+      { id: "waiting", title: "담당자 대기", color: t.idle },
+      { id: "progress", title: "실행 중", color: t.working },
+      { id: "review", title: "내 결정 필요", color: t.blocked },
+      { id: "complete", title: "완료·정리", color: t.done }
     ];
-    const workCards = works.map(work => {
-      const category = categoryForWork(work);
-      const reason = work.reason || (category === "waiting" ? work.next : null);
-      return { id: work.id, category, kind: "work", label: "제품", title: work.title, state: work.interaction?.label ?? phaseText(work.phase), reason: work.interaction?.reason || reason, reasonLabel: work.reason ? "대기 이유" : "다음", percent: percent(work), feedback: work.feedback, raw: work };
-    });
-    const inventoryCards = inventory.map(item => {
-      return { id: item.id, category: categoryForInventory(item), kind: "inventory", label: display(item.category ?? "구축"), title: item.name, state: item.interaction?.label ?? statusText(item.status), reason: item.interaction?.reason || item.condition, reasonLabel: "완료 조건", percent: null, feedback: item.feedback, raw: item };
-    });
+    const asCard = (kind, raw) => {
+      const p = raw.presentation ?? {};
+      const original = kind === "work" ? WORK_PHASES[raw.phase]?.column ?? "waiting" : String(raw.status ?? "").startsWith("완료") ? "complete" : "waiting";
+      const disposition = raw.board?.disposition ?? "visible";
+      const category = disposition === "done" ? "complete" : p.column ?? original;
+      const state = disposition === "done" ? "사용자가 보드에서 정리 완료" : p.decision_required ? "사용자 결정 대기" : p.waiting_on || raw.interaction?.label || (kind === "work" ? phaseText(raw.phase) : statusText(raw.status));
+      return {kind,id:raw.id,raw,p,disposition,category,state,title:p.title || raw.title || raw.name};
+    };
+    const workCards = works.map(x => asCard("work",x)), inventoryCards = inventory.map(x => asCard("inventory",x));
     const allCards = [...workCards, ...inventoryCards];
-    const completedCount = allCards.filter(card => card.category === "complete").length;
-    const boardCard = card => v_flex().id(`board-${card.kind}-${card.id}`).flex_none().min_w(0).gap(5).p(9).rounded(7).bg(t.surface).hover(el => el.bg(t.raised)).cursor_pointer()
-      .on_click((_e, _cx) => this.openDetail(card.kind, card.raw))
-      .child(div().min_w(0).whitespace_normal().font_semibold().child(softBreaks(display(card.title))))
-      .when(card.category !== "review", x => x.child(h_flex().min_w(0).flex_wrap().items_center().gap_x(6).gap_y(2)
-        .child(div().flex_none().px(5).py(2).rounded(4).bg(t.chrome).text_size(10).text_color(t.muted).whitespace_nowrap().child(card.label))
-        .child(div().min_w(0).whitespace_normal().text_size(10).text_color(t.dim).child(softBreaks(`ID ${display(card.id)}`)))))
-      .child(div().min_w(0).whitespace_normal().text_size(11).text_color(card.category === "complete" ? t.done : card.category === "review" ? t.blocked : card.category === "progress" ? t.working : t.muted).child(card.state))
-      .when(card.kind === "work" && card.category !== "review", x => x.child(div().min_w(0).whitespace_normal().text_size(10).text_color(t.accent).child(card.percent)))
-      .when(Boolean(card.feedback), x => x.child(div().text_size(10).text_color(t.accent).child("답변 저장됨 · 총괄 확인 대기")))
-      .when(card.category === "review", x => x.child(div().text_size(11).text_color(t.accent).child(card.raw.interaction?.action ?? "선택하기")))
-      .when(card.category !== "review" && Boolean(card.reason), x => x.child(words(`${card.reasonLabel} · ${display(card.reason)}`).text_size(11).text_color(t.dim)));
-    const remaining = inventoryCards.filter(card => card.category !== "complete").length;
+    const archived = allCards.filter(card => card.disposition === "archived");
+    const cardsInView = this.showArchived ? archived : allCards.filter(card => card.disposition !== "archived");
+    const completedCount = cardsInView.filter(card => card.category === "complete").length;
+    const remaining = inventoryCards.filter(card => card.category !== "complete" && card.disposition !== "archived").length;
+    const boardCard = card => {
+      const sessions = (card.p.sessions ?? []).filter(s => s.terminal);
+      const attention = card.p.attention ?? [];
+      return v_flex().id(`board-${card.kind}-${card.id}`).flex_none().min_w(0).gap(10).p(12).rounded(8).bg(t.surface)
+        .hover(el => el.bg(t.raised)).cursor_pointer().on_click(() => this.openDetail(card.kind,card.raw,card.category === "review" && card.kind === "work"))
+        .child(div().min_w(0).whitespace_normal().font_semibold().text_size(14).line_height("22px").child(display(card.title)))
+        .when(Boolean(card.p.summary) && card.p.summary !== card.title, el => el.child(words(card.p.summary.replaceAll("`", "")).text_size(13).line_height("21px").text_color(t.muted)))
+        .child(div().min_w(0).whitespace_normal().text_size(12).text_color(card.category === "review" ? t.blocked : card.category === "complete" ? t.done : t.foreground).child(card.state))
+        .child(h_flex().flex_wrap().gap_x(14).gap_y(6).text_size(12)
+          .child(pair("담당", card.p.owner_label || card.raw.team || "팀 총괄"))
+          .child(pair("지금", (card.p.current_activity || "현재 실행 기록 확인 중").split(" · 작업 내용: ")[0]))
+          .child(pair("세션", sessions.length ? sessions.map(s => `${s.role_label} · ${s.terminal}`).join(" / ") : "현재 설계에 연결된 세션 없음")))
+        .when(attention.length > 0, el => el.child(words(`담당자 확인 · ${attention[0].reason}`).text_size(12).text_color(t.muted)))
+        .when(card.disposition === "done", el => el.child(words("보드 정리 상태입니다. 실제 업무 완료·승인은 별도로 유지됩니다.").text_size(11).text_color(t.muted)))
+        .child(h_flex().flex_wrap().gap(6)
+          .child(button(`open-card-${card.kind}-${card.id}`, card.p.decision_required ? "결정하기" : "자세히", () => this.openDetail(card.kind,card.raw,card.p.decision_required && card.kind === "work")))
+          .children(sessions.filter(s => s.can_focus).map(s => button(`open-session-${card.id}-${s.task}`, "세션 열기", () => run("agent.focus",{terminal:s.terminal}))))
+          .when(Boolean(card.raw.board), el => el
+            .when(card.disposition === "visible" && card.category !== "complete", x => x.child(button(`done-card-${card.kind}-${card.id}`, "정리 완료", cx => cx.spawn(async cx => this.organizeCard(card.kind,card.raw,"done",cx)), this.boardBusy)))
+            .when(card.disposition !== "archived", x => x.child(button(`archive-card-${card.kind}-${card.id}`, "보관", cx => cx.spawn(async cx => this.organizeCard(card.kind,card.raw,"archive",cx)), this.boardBusy)))
+            .when(card.disposition !== "visible", x => x.child(button(`restore-card-${card.kind}-${card.id}`, "복원", cx => cx.spawn(async cx => this.organizeCard(card.kind,card.raw,"restore",cx)), this.boardBusy)))));
+    };
     const column = definition => {
-      const cards = allCards.filter(card => card.category === definition.id);
-      const visible = definition.id === "complete" && !this.showCompleted ? [] : cards;
-      const holds = definition.id === "waiting" ? (data?.holds ?? []).map(hold => v_flex().flex_none().gap(4).p(8).rounded(7).bg(t.surface)
-        .child(div().font_semibold().child(`보류 · ${display(hold.id)}`))
-        .child(words(hold.reason).text_size(11).text_color(t.blocked))) : [];
-      return v_flex().id(`kanban-${definition.id}`).min_w(0).gap(6).p(7).rounded(8).bg(t.chrome)
+      const cards = cardsInView.filter(card => card.category === definition.id);
+      const visible = definition.id === "complete" && !this.showCompleted && !this.showArchived ? [] : cards;
+      return v_flex().id(`kanban-${definition.id}`).min_w(0).gap(10).p(8).rounded(8).bg(t.chrome)
         .when(narrow, el => el.w_full().flex_none())
-        .when(!narrow, el => el.h_full().flex_1().min_h(0))
+        .when(!narrow, el => el.h_full().min_h(0).when(cards.length === 0, x => x.w(155).flex_none()).when(cards.length > 0, x => x.flex_1()))
         .child(h_flex().flex_none().items_center().justify_between().gap(6)
-          .child(h_flex().items_center().gap(6).child(div().w(8).h(8).rounded_full().bg(definition.color)).child(div().whitespace_nowrap().font_semibold().child(definition.title)).child(badge(String(cards.length), cards.length > 0 ? definition.color : t.dim)))
-          .when(definition.id === "complete", x => x.child(button("toggle-completed", this.showCompleted ? "접기" : "펼치기", cx => { this.showCompleted = !this.showCompleted; cx.notify(); }).text_size(10))))
-        .child(v_flex().min_w(0).gap(6).when(!narrow, el => el.flex_1().min_h(0).overflow_y_scrollbar()).children([...holds, ...visible.map(boardCard)]))
-        .when(cards.length === 0 && holds.length === 0, x => x.child(div().flex_none().px(4).py(8).text_size(11).text_color(t.dim).child("항목 없음")))
-        .when(definition.id === "complete" && cards.length > 0 && !this.showCompleted, x => x.child(div().flex_none().text_size(11).text_color(t.dim).child(`완료된 항목 ${cards.length}건 · 전체 진척률과 별도`)));
+          .child(h_flex().items_center().gap(6).child(div().w(7).h(7).rounded_full().bg(definition.color)).child(div().whitespace_nowrap().font_semibold().text_size(13).child(definition.title)).child(badge(String(cards.length),cards.length ? definition.color : t.muted)))
+          .when(definition.id === "complete" && cards.length > 0, el => el.child(button("toggle-completed",this.showCompleted ? "접기" : "보기",cx=>{this.showCompleted=!this.showCompleted;cx.notify();}).text_size(11))))
+        .child(v_flex().min_w(0).gap(10).when(!narrow, el => el.flex_1().min_h(0).overflow_y_scrollbar()).children(visible.map(boardCard)))
+        .when(cards.length === 0, el => el.child(words(definition.id === "review" ? "지금 결정할 요청이 없습니다." : definition.id === "progress" ? "실행 중으로 확인된 작업이 없습니다." : "이 상태의 카드가 없습니다.").text_size(12).text_color(t.muted)))
+        .when(cards.length > 0 && !visible.length, el => el.child(words(`${cards.length}개 완료 기록을 접었습니다.`).text_size(12).text_color(t.muted)));
     };
     const accountRow = account => {
       const key = `account-${account.provider}-${account.account}`, open = this.expanded.has(key);
@@ -1033,11 +1072,11 @@ export default class TeamOperations extends View {
         .child(words(action.message).flex_1().min_w(0));
     });
     // No horizontal scroll: columns share the window width (min_w 0) or stack vertically when it is narrow.
-    const board = (narrow ? v_flex().id("operations-kanban").w_full().flex_none().gap(8) : h_flex().id("operations-kanban").w_full().min_w(0).flex_1().min_h(0).items_stretch().gap(8))
+    const board = (narrow ? v_flex().id("operations-kanban").w_full().flex_none().gap(8) : h_flex().id("operations-kanban").w_full().min_w(0).h(Math.max(220, (this.viewHeight ?? 700) - (this.headerHeight ?? 48) - (this.controlsHeight ?? 150) - (this.accountHeight ?? 40) - 28)).flex_none().min_h(0).items_stretch().gap(8))
       .children(boardColumns.map(column));
-    const accountArea = v_flex().id("account-area").w_full().max_h(250).flex_none().min_h(0).gap(6).overflow_y_scrollbar()
+    const accountArea = v_flex().id("account-area").on_size_change((size,cx)=>{ const h=Math.ceil(size.height); if(this.accountHeight!==h){this.accountHeight=h;cx.notify();} }).w_full().max_h(250).flex_none().min_h(0).gap(6).overflow_y_scrollbar()
       .child(h_flex().flex_none().justify_between().items_center()
-        .child(div().font_semibold().text_size(12).text_color(t.accent).child("계정 · 보조 정보"))
+        .child(button("toggle-accounts", this.showAccounts ? "계정 사용량 접기" : "계정 사용량 보기", cx => { this.showAccounts = !this.showAccounts; cx.notify(); }))
         .child(h_flex().flex_1().min_w(0).gap(10).px(12).text_size(10)
           .child(div().text_color(t.ansi2).child("<70%"))
           .child(div().text_color(t.ansi3).child("70–<90%"))
@@ -1045,27 +1084,9 @@ export default class TeamOperations extends View {
           .child(div().text_color(t.dim).child("지난 기록")))
         .child(button("refresh-usage", this.usageBusy || data?.usage_refreshing ? "사용량 갱신 중" : "사용량 갱신", cx => cx.spawn(async cx => this.refreshUsage(cx)), this.usageBusy || data?.usage_refreshing).text_size(11)))
       .when(Boolean(this.usageMessage), x => x.child(div().flex_none().text_size(10).text_color(/⚠|실패|오류/i.test(this.usageMessage) ? t.blocked : t.muted).child(this.usageMessage)))
-      .children(accountSections);
-    const manual = this.manual;
-    const manualText = manual?.phase === "running" ? (manual.joined ? "새로고침 중 · 진행 중이던 자동 갱신 결과를 기다립니다" : "새로고침 중")
-      : manual?.phase === "done" ? `갱신 완료 · ${manual.changed ? "변경 있음" : "변경 없음"} · ${clock(manual.completedAt / 1000)}${manual.joined ? " · 자동 갱신 결과 사용" : ""}`
-        : manual?.phase === "failed" ? `⚠ 갱신 실패 · 기존 자료 유지 · ${display(manual.error).slice(0, 120)}` : null;
-    return v_flex().id("team-operations").size_full().min_h(0).min_w(0).overflow_hidden().bg(t.background).text_color(t.foreground).text_size(13)
-      .font_family(this.config?.font_family || settings().font_family || "monospace")
-      .on_size_change((size, cx) => {
-        const width = Math.floor(size.width);
-        if (this.viewWidth !== width) { this.viewWidth = width; cx.notify(); }
-      })
-      .child(h_flex().min_h(48).flex_none().flex_wrap().px(14).py(6).gap(8).items_center().border_b(1).border_color(t.border)
-        .child(div().font_semibold().text_size(16).child("팀 운영 현황")).child(div().flex_1())
-        .child(v_flex().min_w(0).items_end().gap(1)
-          .child(div().min_w(0).whitespace_normal().text_size(11).text_color(t.dim).child(`${this.error ? "갱신 실패 · 이전 자료" : this.stale ? "갱신 지연 · 이전 자료" : data?.synchronization?.state === "partial" ? "일부 자료 미확인" : "조회 성공"} · 관찰 ${clock(data?.observed_at)} · 수신 ${this.lastSuccessAt ? clock(this.lastSuccessAt / 1000) : DUMMY}`))
-          .when(Boolean(manualText), el => el.child(div().id("manual-refresh-status").min_w(0).whitespace_normal().text_size(11).text_color(manual.phase === "failed" ? t.blocked : manual.phase === "running" ? t.working : t.muted).child(manualText))))
-        .child(button("refresh", manual?.phase === "running" ? "새로고침 중" : this.busy ? "불러오는 중" : "새로고침", cx => { this.refresh(cx, true); }, this.busy || manual?.phase === "running")))
-      .when(Boolean(this.error), el => el.child(div().px(12).py(7).text_color(t.blocked).child(`갱신에 실패했습니다. 기존 자료는 이전 관찰값입니다: ${this.error}`)))
-      .when(Boolean(this.configError), el => el.child(div().px(12).py(7).text_color(t.blocked).child(`로컬 backend 설정을 읽을 수 없습니다: ${this.configError}`)))
-      .when(this.busy && !data, el => el.child(div().p(14).text_color(t.dim).child("운영 현황을 읽는 중입니다.")))
-      .child(v_flex().id("operations-content").w_full().min_w(0).flex_1().min_h(0).gap(6).p(8).when(narrow, el => el.overflow_y_scrollbar())
+      .children(this.showAccounts ? accountSections : []);
+    const boardControls = v_flex().id("board-controls").w_full().flex_none().gap(6)
+      .on_size_change((size,cx)=>{const h=Math.ceil(size.height);if(this.controlsHeight!==h){this.controlsHeight=h;cx.notify();}})
         .child(v_flex().w_full().flex_none().gap(3)
           .child(h_flex().flex_wrap().gap(12).text_size(12).font_semibold()
             .child(statusControl("blocked"))
@@ -1082,9 +1103,33 @@ export default class TeamOperations extends View {
         .when(actionRows.length > 0, el => el.child(v_flex().flex_none().gap(3).children(actionRows)))
         .child(v_flex().flex_none().gap(3)
           .child(div().whitespace_nowrap().text_size(11).font_semibold().text_color(t.muted).child("작업 목록"))
-          .child(h_flex().flex_wrap().gap(12).text_size(11).text_color(t.muted)
-            .child(div().whitespace_nowrap().child(`남은 구축 ${remaining}건`))
-            .child(div().whitespace_nowrap().child(`완료 카드 ${completedCount}건`))))
+          .child(h_flex().flex_wrap().items_center().gap(10).text_size(12).text_color(t.muted)
+            .child(div().child(`활성 ${allCards.filter(c => c.category !== "complete" && c.disposition !== "archived").length} · 완료 기록 ${completedCount}`))
+            .child(button("toggle-archived",this.showArchived ? "활성 카드로 돌아가기" : `보관된 카드 ${archived.length}`,cx=>{this.showArchived=!this.showArchived;cx.notify();}))
+            .child(div().child("정리 완료·보관은 실제 업무와 승인 상태를 바꾸지 않습니다."))))
+        .when(Boolean(this.boardMessage),el=>el.child(words(this.boardMessage).text_size(12).text_color(t.muted)));
+    const manual = this.manual;
+    const manualText = manual?.phase === "running" ? (manual.joined ? "새로고침 중 · 진행 중이던 자동 갱신 결과를 기다립니다" : "새로고침 중")
+      : manual?.phase === "done" ? `갱신 완료 · ${manual.changed ? "변경 있음" : "변경 없음"} · ${clock(manual.completedAt / 1000)}${manual.joined ? " · 자동 갱신 결과 사용" : ""}`
+        : manual?.phase === "failed" ? `⚠ 갱신 실패 · 기존 자료 유지 · ${display(manual.error).slice(0, 120)}` : null;
+    return v_flex().id("team-operations").size_full().min_h(0).min_w(0).overflow_hidden().bg(t.background).text_color(t.foreground).text_size(13)
+      .font_family(settings().ui_font || "Pretendard")
+      .on_size_change((size, cx) => {
+        const width = Math.floor(size.width), height = Math.floor(size.height);
+        if (this.viewWidth !== width || this.viewHeight !== height) { this.viewWidth = width; this.viewHeight = height; cx.notify(); }
+      })
+      .child(h_flex().min_h(48).flex_none().flex_wrap().px(14).py(6).gap(8).items_center().border_b(1).border_color(t.border)
+        .on_size_change((size,cx)=>{const h=Math.ceil(size.height);if(this.headerHeight!==h){this.headerHeight=h;cx.notify();}})
+        .child(div().font_semibold().text_size(16).child("팀 운영 현황")).child(div().flex_1())
+        .child(v_flex().min_w(0).items_end().gap(1)
+          .child(div().min_w(0).whitespace_normal().text_size(11).text_color(t.dim).child(`${this.error ? "갱신 실패 · 이전 자료" : this.stale ? "갱신 지연 · 이전 자료" : data?.synchronization?.state === "partial" ? "일부 자료 미확인" : "조회 성공"} · 관찰 ${clock(data?.observed_at)} · 수신 ${this.lastSuccessAt ? clock(this.lastSuccessAt / 1000) : DUMMY}`))
+          .when(Boolean(manualText), el => el.child(div().id("manual-refresh-status").min_w(0).whitespace_normal().text_size(11).text_color(manual.phase === "failed" ? t.blocked : manual.phase === "running" ? t.working : t.muted).child(manualText))))
+        .child(button("refresh", manual?.phase === "running" ? "새로고침 중" : this.busy ? "불러오는 중" : "새로고침", cx => { this.refresh(cx, true); }, this.busy || manual?.phase === "running")))
+      .when(Boolean(this.error), el => el.child(div().px(12).py(7).text_color(t.blocked).child(`갱신에 실패했습니다. 기존 자료는 이전 관찰값입니다: ${this.error}`)))
+      .when(Boolean(this.configError), el => el.child(div().px(12).py(7).text_color(t.blocked).child(`로컬 backend 설정을 읽을 수 없습니다: ${this.configError}`)))
+      .when(this.busy && !data, el => el.child(div().p(14).text_color(t.dim).child("운영 현황을 읽는 중입니다.")))
+      .child(v_flex().id("operations-content").w_full().min_w(0).flex_1().min_h(0).gap(6).p(8).when(narrow, el => el.overflow_y_scrollbar())
+        .child(boardControls)
         .child(board)
         .child(accountArea));
   }

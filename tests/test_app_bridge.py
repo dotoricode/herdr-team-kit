@@ -135,7 +135,8 @@ class AppBridgeTests(test_cli.Fixture):
         doc=document_view(self.config,self.state,'W1')
         self.assertEqual(doc['phase'],'approved')
         self.assertFalse(doc['can_approve'])
-        self.assertIn('feature.txt',doc['body'])
+        self.assertIn('feature.txt',doc['contract']['allowed_paths'])
+        self.assertEqual(doc['body'],doc['source_body'])
 
     def test_tui_configuration_cannot_approve_through_app(self):
         self.setup_work();self.call('work','submit','W1')

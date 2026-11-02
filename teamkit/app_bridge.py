@@ -15,7 +15,7 @@ import uuid
 from .config import load
 from .dashboard import model, clean
 from .workflow import document, snapshot
-from .app_feedback import card_detail, card_answer, decorate_feedback, question_set, validate_send
+from .app_feedback import card_detail as feedback_card_detail, card_answer, decorate_feedback, question_set, validate_send
 
 
 def core_read():
@@ -62,6 +62,39 @@ def inventory(path):
         if match:
             holds.append({'id':match[1], 'reason':match[2]})
     return rows, holds
+
+
+def card_detail(config_path,state,binding_path,kind,ident,*,_source=False):
+    from .app_board import presentation,board_state
+    from .app_reading import reading_view
+    card=feedback_card_detail(config_path,state,binding_path,kind,ident,_include_signature=True)
+    config=load(config_path);linked=bindings(binding_path,config)
+    profile=linked.get('card_briefs',{}).get(kind+':'+ident)
+    detail=work_detail(config_path,state,binding_path,ident) if kind=='work' else None
+    contract={'title':card['title'],'allowed_paths':[],'requirements':[],'steps':[]}
+    if kind=='work':
+        source=next(w for w in readonly_snapshot(state)['works'] if w['id']==ident)
+        try:contract=document(config,source)[1]
+        except (OSError,ValueError):pass
+    reading=reading_view('',contract,card,profile)
+    card['brief']=reading['brief'];card['brief_state']=reading['brief_state']
+    authored=reading['brief'] if reading['brief_state']=='current' else None
+    if kind=='inventory' and isinstance(profile,dict):authored=profile
+    card['presentation']=presentation(card,detail,authored)
+    if authored and isinstance(profile.get('title'),str):card['presentation']['title']=profile['title']
+    card['board']=board_state(state,card)
+    if _source and detail is not None:card['_source_row']=detail
+    if not _source:card.pop('_view_signature',None)
+    return card
+
+
+def card_board_action(config_path,state,binding_path,kind,ident,action,rid,revision):
+    from .app_board import board_action
+    if bindings(binding_path,load(config_path)).get('actions_enabled') is not True:
+        raise ValueError('보드 정리 기능이 비활성화돼 있습니다.')
+    card=card_detail(config_path,state,binding_path,kind,ident)
+    result=board_action(state,card,action,rid,revision)
+    return {'board':result,'message':'보드 정리 상태를 변경했습니다. 실제 업무 완료·승인·전달은 변경하지 않습니다.'}
 
 
 def view(config_path, state, binding_path):
@@ -111,6 +144,22 @@ def view(config_path, state, binding_path):
         feedback_error='카드 상태·답변·전달 기록을 함께 확인하지 못했습니다. 다음 갱신에서 다시 확인합니다.'
         for row in [*rows,*value['rows']]:
             row['interaction']={'state':'unknown','column':'review','label':'카드 동기화 확인 필요','reason':feedback_error,'action':'기록 확인'}
+    try:
+        for kind,collection in (('inventory',rows),('work',value['rows'])):
+            for row in collection:
+                projected=card_detail(config_path,state,binding_path,kind,row['id'],_source=True)
+                if kind=='work':
+                    from .app_feedback import _work_view_signature
+                    if _work_view_signature(row)!=projected['_view_signature']:raise ValueError('work snapshot changed')
+                    source=projected['_source_row']
+                    if any(source.get(k)!=v for k,v in row.items() if k not in ('native_state','feedback','previous_feedback','interaction','presentation','board')):raise ValueError('execution snapshot changed')
+                elif (row['name'],row['status'],row['condition'])!=(projected['title'],projected['status'],projected['condition']):raise ValueError('inventory snapshot changed')
+                row['presentation']=projected['presentation'];row['board']=projected['board']
+    except (OSError,ValueError):
+        feedback_error='카드의 현재 세션·정리 상태를 함께 확인하지 못했습니다. 다시 갱신해 주세요.'
+        for row in [*rows,*value['rows']]:
+            row['presentation']={'summary':row.get('title') or row.get('name'),'current_activity':'최근 상태를 확인하지 못했습니다.','owner_label':'담당자 미확인','sessions':[],'waiting_on':'상태 갱신 대기','attention':[{'label':'동기화 미확인','reason':feedback_error}],'decision_required':False,'decision_label':'','column':'waiting'}
+            row.pop('board',None)
     from .app_usage import read_coverage
     coverage=read_coverage(config,state).get('accounts',{})
     for account in value['accounts']:
@@ -147,7 +196,7 @@ def view(config_path, state, binding_path):
             'coordinator':coordinator_status(state,linked,list(native.values()),bool(error))}
 
 
-def document_view(config_path, state, ident):
+def document_view(config_path, state, ident, binding_path=None):
     config = load(config_path)
     data = readonly_snapshot(state)
     work = next((w for w in data['works'] if w['id'] == ident), None)
@@ -167,10 +216,7 @@ def document_view(config_path, state, ident):
                            json.dumps(contract,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
     if check != digest:
         raise ValueError('읽는 동안 문서 내용이 바뀌었습니다.')
-    body = '\n'.join(clean(line) for line in raw.decode().splitlines())
-    body += '\n\n승인 대상 범위\n'+ '\n'.join('- '+clean(x) for x in contract['allowed_paths'])
-    body += '\n\n필수 조건\n'+ '\n'.join('- '+clean(x) for x in contract['requirements'])
-    body += '\n\n완료 단계\n'+ '\n'.join('- '+clean(s['title'])+' ('+str(s['weight'])+'%)' for s in contract['steps'])
+    body=raw.decode()
     # A second committed snapshot detects revisions changed while reading.
     if next((w for w in readonly_snapshot(state)['works'] if w['id'] == ident), None) != work:
         raise ValueError('문서가 바뀌었습니다. 다시 읽어 주세요.')
@@ -182,9 +228,16 @@ def document_view(config_path, state, ident):
                       if t.get('work_id') == ident and t['state'] == 'handed_off' and not t.get('owner')
                       and t.get('runtime',{}).get('backend') == 'core' and t.get('checkpoint')
                       and t['role'] != 'leader']
-    return {'id':ident, 'title':work['title'], 'revision':work['revision'], 'digest':digest,
-            'body':body, 'phase':work['phase'], 'can_approve':work['phase'] == 'awaiting_approval',
-            'resumable':resumable}
+    from .app_reading import reading_view
+    profile=None
+    card={'title':work['title'],'document_revision':work['revision'],'document_digest':digest}
+    if binding_path:
+        linked=bindings(binding_path,config);profile=linked.get('card_briefs',{}).get('work:'+ident)
+        card=feedback_card_detail(config_path,state,binding_path,'work',ident)
+    reading=reading_view(body,contract,card,profile)
+    return {'id':ident,'title':work['title'],'revision':work['revision'],'digest':digest,
+            **reading,'phase':work['phase'],'can_approve':work['phase']=='awaiting_approval','resumable':resumable}
+
 
 
 def session_read(address):
@@ -215,6 +268,9 @@ def work_detail(config_path, state, binding_path, ident):
     config=load(config_path);linked=bindings(binding_path,config);data=readonly_snapshot(state)
     row=next((w for w in model(data,config)['rows'] if w['id']==ident),None)
     if row is None:raise ValueError('GUI 작업 기록에 없는 작업입니다.')
+    source=next(w for w in data['works'] if w['id']==ident)
+    try:current_digest=document(config,source)[2]
+    except (OSError,ValueError):current_digest=None
     native_error=''
     try:native={t['address']:t for t in core_read()['terminals']}
     except (OSError,ValueError,subprocess.SubprocessError):
@@ -232,7 +288,9 @@ def work_detail(config_path, state, binding_path, ident):
                 verified,status=verified_session(task,terminal)
                 if verified:app_state=status.get('state','unknown')
             except (OSError,ValueError,subprocess.SubprocessError):pass
-        tasks.append({'id':task['id'],'goal':'\n'.join(clean(line) for line in task.get('goal','').split('\n')),
+        current_design=bool(current_digest and task.get('design_digest')==current_digest and task.get('design_revision')==source['revision'])
+        tasks.append({'current_design':current_design,'design_revision':task.get('design_revision'),'design_digest':task.get('design_digest'),
+            'id':task['id'],'goal':'\n'.join(clean(line) for line in task.get('goal','').split('\n')),
             'state':task['state'],'role':task['role'],'owner':task.get('owner'),'current_owner':bool(task.get('owner')),
             'attempt':task.get('attempt_count',0),'provider':task.get('provider'),'account':task.get('account'),
             'model_requested':task.get('model'),'effort_requested':task.get('effort'),'root':task['root'],
@@ -644,7 +702,7 @@ def main():
     parser.add_argument('--config', default=str(Path.home()/'.config/herdr-team-kit-app/config.json'))
     parser.add_argument('--state', default=str(Path.home()/'.local/state/herdr-team-kit-app/state.sqlite'))
     parser.add_argument('--bindings', default=str(Path.home()/'.config/herdr-team-kit-app/bindings.json'))
-    parser.add_argument('action', choices=('view','document','work-detail','approve','resume','resume-job','recover-coordinator','coordinator-job','refresh-usage','usage-job','card-detail','card-answer','card-question-set','card-send','card-send-job','card-send-status','card-receipt'))
+    parser.add_argument('action', choices=('view','document','work-detail','approve','resume','resume-job','recover-coordinator','coordinator-job','refresh-usage','usage-job','card-detail','card-answer','card-question-set','card-send','card-send-job','card-send-status','card-receipt','card-board-action'))
     parser.add_argument('--work'); parser.add_argument('--revision', type=int); parser.add_argument('--digest')
     parser.add_argument('--task'); parser.add_argument('--owner'); parser.add_argument('--request')
     parser.add_argument('--attempt',type=int)
@@ -652,14 +710,16 @@ def main():
     parser.add_argument('--card-revision');parser.add_argument('--choice');parser.add_argument('--answer-text',default='')
     parser.add_argument('--question-file');parser.add_argument('--expected-question-revision',type=int,default=0)
     parser.add_argument('--send-json');parser.add_argument('--request-id')
+    parser.add_argument('--board-action',choices=('done','archive','restore'));parser.add_argument('--board-revision')
     parser.add_argument('--outcome',choices=('responded','deferred'))
     parser.add_argument('--confirmed', action='store_true')
     args = parser.parse_args()
     try:
         if args.action == 'view': result = view(args.config, args.state, args.bindings)
-        elif args.action == 'document': result = document_view(args.config, args.state, args.work)
+        elif args.action == 'document': result = document_view(args.config, args.state, args.work,args.bindings)
         elif args.action == 'work-detail': result = work_detail(args.config,args.state,args.bindings,args.work)
         elif args.action == 'card-detail':result=card_detail(args.config,args.state,args.bindings,args.kind,args.work)
+        elif args.action == 'card-board-action':result=card_board_action(args.config,args.state,args.bindings,args.kind,args.work,args.board_action,args.request_id,args.board_revision)
         elif args.action == 'card-answer':result=card_answer(args.config,args.state,args.bindings,args.kind,args.work,args.card_revision,args.choice,args.answer_text)
         elif args.action == 'card-question-set':result=card_question_set(args.config,args.state,args.bindings,args.kind,args.work,args.task,args.owner,args.attempt,args.question_file,args.expected_question_revision)
         elif args.action == 'card-send':result=card_send(args.config,args.state,args.bindings,args.send_json)
