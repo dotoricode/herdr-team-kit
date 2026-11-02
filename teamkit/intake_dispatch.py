@@ -12,7 +12,7 @@ import time
 from . import admission, providers
 from .app_coordinator import read_record, scope as app_scope
 from .config import binding, cached_quota, load, profile
-from .core_runtime import CoreRuntime, _call, _model_effort
+from .core_runtime import CoreRuntime, _call
 from .departments import organization
 from .policy import eligible
 from .prompt_state import empty_input
@@ -63,7 +63,7 @@ def _save_attempt(db, attempt):
                (attempt['id'], attempt['instruction'], json.dumps(attempt)))
 
 
-def _bound(config, state, ready=False):
+def _bound(config, state, ready=False, *, observe_policy=False):
     record = read_record(state)
     if (record.get('phase') != 'ready' or config.get('coordinator', {}).get('provider') != 'codex'
             or not record.get('nonce') or not record.get('terminal')
@@ -78,19 +78,21 @@ def _bound(config, state, ready=False):
                              runtime=dict(backend='core', name=name, terminal=record['terminal'],
                                           native_pid=record['native_pid'])))
     native = actor._native(name, ready=ready)
-    if _model_effort('codex', native.get('foreground', {}).get('argv')) != (pr['model'], pr.get('effort', 'low')):
-        raise ValueError('기존 총괄의 모델·추론 설정 대조 대기')
+    from .coordinator_policy import verify
+    proof = verify(config, state, record, pr, actor, native, name, allow_probe=observe_policy and ready)
+    native = {**native, '_coordinator_policy': proof}
     return record, pr, actor, native, name
 
 
 def _ready(config, state):
-    record, pr, actor, native, name = _bound(config, state, ready=True)
+    record, pr, actor, native, name = _bound(config, state, ready=True, observe_policy=True)
     screen = _call('read', '--json', record['terminal'])
     if screen.get('complete') is not True or not empty_input(screen.get('text', '')):
         raise ValueError('총괄 화면 조회 불명 또는 미전송 입력이 있어 분류 전달 대기')
     after = actor._native(name, ready=True)
     if after.get('turn') != native.get('turn'):
         raise ValueError('총괄이 원 지시를 처리 중이어서 다음 실제 idle 대기')
+    after = {**after, '_coordinator_policy': native['_coordinator_policy']}
     return record, pr, actor, after, name
 
 
@@ -122,6 +124,9 @@ def _send_guard(config_path, config_bytes, config, state, queue, attempt):
             or binding(profile(config, 'codex', record['account'], config['coordinator'])) != attempt['profile_binding']):
         raise ValueError('분류 실제 전송 직전 설정·총괄 연결 변경; 입력하지 않았습니다.')
     _quota(config, state, record)
+    from .coordinator_policy import fence
+    fence(config, state, record, profile(config, 'codex', record['account'], config['coordinator']),
+          attempt.get('coordinator_policy'))
     with queue.transaction():
         current = _attempt(queue.db, attempt['id'])
         item = _instruction(queue.db, attempt['instruction'])
@@ -179,7 +184,8 @@ def tick(config_path, state):
                 attempt = dict(id=ident, instruction=item['id'], instruction_digest=digest(
                     {'text': item['text'], 'source': item['source']}), phase='intent', owner=record['nonce'],
                     terminal=record['terminal'], pid=record['native_pid'], profile_binding=record['profile_binding'],
-                    session=record.get('context_session_id'), turn_baseline=native.get('turn'), created_at=time.time())
+                    session=record.get('context_session_id'), turn_baseline=native.get('turn'), created_at=time.time(),
+                    coordinator_policy=native['_coordinator_policy'])
                 with queue.transaction():
                     fresh = _instruction(queue.db, item['id'])
                     if fresh != item or queue.db.execute('SELECT 1 FROM operation_intake_attempts WHERE instruction=?',
@@ -203,6 +209,7 @@ def tick(config_path, state):
             try:
                 current, _, actor, ready, name = _ready(config, state)
                 if (not _same_actor(attempt, current) or ready.get('turn') != attempt['turn_baseline']
+                        or ready.get('_coordinator_policy') != attempt['coordinator_policy']
                         or Path(config_path).read_bytes() != config_bytes):
                     raise ValueError('예약 후 총괄 실행이 바뀌어 원 전달 대조 필요')
                 from .context_handoff import cli
@@ -280,10 +287,14 @@ def submit(config, state, instruction_id, attempt_id, owner, terminal, packet):
     _schema(queue.db)
     try:
         attempt = _attempt(queue.db, attempt_id)
-        record, _, _, _, _ = _bound(config, state)
+        record, pr, _, native, _ = _bound(config, state)
         if (attempt['instruction'] != instruction_id or owner != attempt['owner'] or terminal != attempt['terminal']
                 or not _same_actor(attempt, record)):
             raise ValueError('현재 연결된 원 총괄·실행 시도와 분류 제출 신원이 다릅니다.')
+        from .coordinator_policy import fence
+        if native['_coordinator_policy'] != attempt.get('coordinator_policy'):
+            raise ValueError('classification policy snapshot changed')
+        fence(config, state, record, pr, attempt['coordinator_policy'])
         if attempt.get('submission_digest'):
             if attempt['submission_digest'] != digest(packet):
                 raise ValueError('이미 저장한 분류안과 다른 제출은 덮어쓸 수 없습니다.')
