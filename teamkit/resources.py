@@ -15,7 +15,8 @@ import time
 
 PROFILES = tuple(p + '/' + a for p in ('codex', 'claude') for a in ('team', 'personal'))
 IDENTITY = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}\Z')
-COVERAGE = 'HC terminals with model identity/status; host-wide activity is not controlled'
+COVERAGE = ('HC foreground model processes/status; nested agents and API model calls are not separately counted; '
+            'direct starts and host-wide activity are not controlled')
 
 
 class ResourceUnavailable(ValueError):

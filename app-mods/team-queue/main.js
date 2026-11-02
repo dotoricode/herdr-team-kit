@@ -188,6 +188,7 @@ export default class TeamQueue extends View {
           " · 관측 지연 "+String(Math.round(data.supervisor?.heartbeat_age_seconds??0))+"초").text_size(11).text_color(data.supervisor?.alive?t.muted:t.blocked))
         .when(Boolean(data.supervisor?.dispatch?.last_error),el=>el.child(words("배정 소비기 오류 · "+String(data.supervisor?.dispatch?.last_error?.reason??"관측 필요")).text_size(11).text_color(t.blocked)))
         .child(words("장부 밖 HC 실행 "+String(data.capacity?.outside_ledger??"미확인")+"개를 관측하여 합산합니다. 직접 시작·HC 밖 모델 실행은 통제 범위 밖입니다. 슬롯·프로필·준비 후보는 서로 다른 수치입니다.").text_size(11).text_color(t.muted))
+        .child(words("HC 터미널의 foreground 상태 기준입니다. 내부 하위 에이전트·API 모델 호출은 별도 집계하지 못합니다.").text_size(11).text_color(t.muted))
         .child(h_flex().flex_wrap().gap(8).children(Object.entries(data.profiles??{}).map(([key,value])=>{
           const [p,a]=key.split("/"); return v_flex().gap(3).px(8).py(5).border_1().border_color(t.border)
             .child(div().text_size(11).child(account(a)+" "+provider(p)+" · "+(value.eligible?"사용량 조건 통과":"사용량 확인·회복 대기")))
