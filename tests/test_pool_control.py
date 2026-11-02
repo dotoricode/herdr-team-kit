@@ -82,9 +82,28 @@ class PoolControlTests(Fixture):
         message = self.root / 'working-pin.txt'
         message.write_text('Do not interrupt the current work.')
         request = control.enqueue(self.config, self.state, 'alpha', message, 'claude', 'team')
-        with patch('teamkit.core_runtime.CoreRuntime._native', side_effect=RuntimeError('working')):
+        with patch('teamkit.core_runtime.CoreRuntime._native', return_value={'status': {'state': 'working'}}):
             control.advance(self.config, self.state, request['id'])
         self.assertNotIn('execution_constraint', self.call('show', 'L1'))
+        self.assertEqual(control.requests(self.state)[0]['phase'], 'pending')
+
+    def test_pin_identity_failure_is_uncertain_not_retryable(self):
+        self.dispatched()
+        message = self.root / 'identity-pin.txt'
+        message.write_text('Preserve mismatched native identity.')
+        request = control.enqueue(self.config, self.state, 'alpha', message, 'claude', 'team')
+        with patch('teamkit.core_runtime.CoreRuntime._native', side_effect=RuntimeError('owner changed')):
+            control.advance(self.config, self.state, request['id'])
+        self.assertEqual(control.requests(self.state)[0]['phase'], 'uncertain')
+
+    def test_unpinned_busy_native_is_pending_without_sending(self):
+        self.dispatched()
+        message = self.root / 'busy.txt'
+        message.write_text('Wait for current work.')
+        request = control.enqueue(self.config, self.state, 'alpha', message)
+        with patch.object(context, 'capacity_available', return_value=True), patch('teamkit.core_runtime.CoreRuntime._native', return_value={'status': {'state': 'working'}}), patch.object(control, 'official') as sent:
+            control.advance(self.config, self.state, request['id'])
+        sent.assert_not_called()
         self.assertEqual(control.requests(self.state)[0]['phase'], 'pending')
 
     def test_request_constraint_waits_instead_of_using_another_eligible_account(self):

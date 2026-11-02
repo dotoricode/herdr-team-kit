@@ -137,6 +137,18 @@ def requests(state):
     return [read(p) for p in sorted(root.glob('*.json')) if JOB.fullmatch(p.stem)]
 
 
+def idle_native(task,config,state):
+    """Identity failures propagate; a verified busy/dirty terminal only waits."""
+    from .core_runtime import CoreRuntime
+    from . import context_handoff as context
+    runtime=CoreRuntime(task)
+    value=runtime._native(task['runtime']['name'])
+    if (value.get('status') or {}).get('state') not in ('idle','done'):return None
+    value=runtime._native(task['runtime']['name'],ready=True)
+    target=next(t for t in context.targets(config,state) if t['id']==task['id'])
+    return value if context.clean_prompt(value,target) else None
+
+
 def advance(config_path,state,ident):
     from . import context_handoff as context
     path=folder(state)/(ident+'.json')
@@ -163,15 +175,8 @@ def advance(config_path,state,ident):
                         if task.get('execution_constraint')!=requested:
                             if task['state'] not in ('ready','queued','handed_off'):
                                 return save('pending','기존 담당 실행이 안전한 경계에 도달하기를 기다립니다.')
-                            if task.get('owner'):
-                                from .core_runtime import CoreRuntime
-                                try:
-                                    native=CoreRuntime(task)._native(task['runtime']['name'],ready=True)
-                                    target=next(t for t in context.targets(config,state) if t['id']==task['id'])
-                                    if not context.clean_prompt(native,target):
-                                        return save('pending','기존 담당 입력을 보존하고 안전한 경계를 기다립니다.')
-                                except Exception:
-                                    return save('pending','기존 담당 실행·신원을 확인한 뒤 선택을 변경합니다.')
+                            if task.get('owner') and idle_native(task,config,state) is None:
+                                return save('pending','기존 담당 작업·입력을 보존하고 안전한 경계를 기다립니다.')
                             if requested is None:task.pop('execution_constraint',None)
                             else:task['execution_constraint']=requested
                             store._save(task,'execution_constraint',{'request':job['id'],'selection':requested})
@@ -207,9 +212,8 @@ def advance(config_path,state,ident):
                 store=Store(state)
                 try:task=store.get(job['task'])
                 finally:store.close()
-                from .core_runtime import CoreRuntime
-                native=CoreRuntime(task)._native(task['runtime']['name'],ready=True)
-                if not context.clean_prompt(native,target):return save('pending','입력 초안·확인 창을 보존하고 기다립니다.')
+                if idle_native(task,config,state) is None:
+                    return save('pending','현재 작업·입력 초안을 보존하고 기다립니다.')
                 latest=plan(config_path,state,job['team'])
                 keys=('action','owner','attempt','selection')
                 if any(latest.get(k)!=route.get(k) for k in keys):
