@@ -105,14 +105,19 @@ def _current(config_path,state,binding_path,kind,ident):
                'team':row['team'],'work_revision':work['revision'],'_view_signature':_work_view_signature(row),
                'leader':leader,'reason':reason,'condition':condition,
                'prompt':question if isinstance(question,str) and question.strip() else PROMPT}
-        try:doc={'state':'available','digest':document(config,work)[2]}
+        try:
+            digest=document(config,work)[2]
+            changed=(work['phase']=='awaiting_approval' and digest!=work.get('submitted_digest')) or (work.get('approval') and digest!=work['approval']['digest'])
+            doc={'state':'invalid' if changed else 'available','digest':digest}
+            if changed:doc['reason']='현재 설계가 확인 요청·승인 기록과 다릅니다. 담당자가 설계 버전을 확인해야 합니다.'
         except FileNotFoundError:doc={'state':'missing'}
         except OSError:doc={'state':'unreadable'}
         except ValueError:doc={'state':'invalid'}
         value['document_state']=doc['state']
+        if doc.get('reason'):value['document_reason']=doc['reason']
         value['document_revision']=work['revision'];value['document_digest']=doc.get('digest')
         if doc['state']!='available':
-            value['reason']+=' · 설계 문서를 읽지 못했습니다. 일반 답변만 기록하며 설계 승인으로 처리하지 않습니다.'
+            value['reason']+=' · '+doc.get('reason','설계 문서를 읽지 못했습니다. 일반 답변만 기록하며 설계 승인으로 처리하지 않습니다.')
         basis={'source':str(Path(state).resolve()),'work':work,'document':doc,
                'tasks':[t for t in data['tasks'] if t.get('work_id')==ident],'leader':leader}
         value['execution_states']=[t['state'] for t in basis['tasks'] if t.get('role')!='leader'

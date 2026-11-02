@@ -360,7 +360,7 @@ class QuestionTests(FeedbackFixture):
         self.assertEqual(first['document_revision'],1);self.assertEqual(self.detail('W1','work')['question_state']['state'],'ready')
         (self.root/'private-plans/W1/r1/plan.md').write_text('changed design')
         changed=self.detail('W1','work')
-        self.assertEqual(changed['question_state']['state'],'stale');self.assertIsNone(changed['question'])
+        self.assertEqual(changed['question_state']['state'],'document_unavailable');self.assertIsNone(changed['question'])
         (self.root/'private-plans/W1/r1/plan.md').unlink()
         value=self.detail('W1','work');self.assertEqual(value['question_state']['state'],'document_unavailable')
         with self.assertRaisesRegex(ValueError,'설계 문서'):self.ask('W1','work',expected=1,prompt='문서가 없을 때')

@@ -6,6 +6,40 @@ from teamkit import app_bridge
 
 
 class WorkspaceTests(FeedbackFixture):
+    def test_document_rejects_a_newer_card_loaded_after_its_source_snapshot(self):
+        self.setup_work();self.call('work','submit','W1')
+        current=app_bridge.feedback_card_detail
+        def newer(*args,**kwargs):
+            card=current(*args,**kwargs)
+            card['document_revision']+=1
+            return card
+        with patch('teamkit.app_bridge.feedback_card_detail',side_effect=newer):
+            with self.assertRaisesRegex(ValueError,'문서가 바뀌었습니다'):
+                app_bridge.document_view(self.config,self.state,'W1',self.links)
+
+    def test_changed_submitted_document_is_operations_attention_not_a_user_decision(self):
+        self.setup_work();self.call('work','submit','W1')
+        path=self.root/'private-plans/W1/r1/plan.md'
+        path.write_text(path.read_text()+'\n바뀐 내용\n')
+        card=app_bridge.card_detail(self.config,self.state,self.links,'work','W1')
+        self.assertFalse(card['presentation']['decision_required'])
+        self.assertEqual(card['presentation']['column'],'waiting')
+        self.assertTrue(card['presentation']['attention'])
+        with self.assertRaisesRegex(ValueError,'문서가 바뀌었습니다'):
+            app_bridge.document_view(self.config,self.state,'W1')
+
+    def test_changed_approved_document_cannot_offer_a_new_decision(self):
+        self.setup_work();self.call('work','submit','W1')
+        self.call('work','approve','W1','--user-approved','--approval-reference','Fixture selected design')
+        path=self.root/'private-plans/W1/r1/plan.md'
+        path.write_text(path.read_text()+'\n바뀐 내용\n')
+        card=app_bridge.card_detail(self.config,self.state,self.links,'work','W1')
+        self.assertEqual(card['document_state'],'invalid')
+        self.assertFalse(card['presentation']['decision_required'])
+        self.assertTrue(card['presentation']['attention'])
+        with self.assertRaisesRegex(ValueError,'승인한 설계 내용이 바뀌었습니다'):
+            app_bridge.document_view(self.config,self.state,'W1')
+
     def test_document_source_is_exact_and_contract_is_separate(self):
         self.setup_work();self.call('work','submit','W1')
         raw=(self.root/'private-plans/W1/r1/plan.md').read_text()

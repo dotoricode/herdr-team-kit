@@ -35,7 +35,7 @@ def presentation(card, detail=None, profile=None):
     question=card.get('question') or {};decision=card.get('decision') or {}
     suppressed=state in ('pending','sending','sent','unknown','responded','deferred','recorded','complete')
     actionable=bool(question.get('options') or decision.get('options') or (phase=='awaiting_approval' and card.get('document_state')=='available'))
-    required=actionable and not complete and not suppressed and card.get('can_answer',True) is True
+    required=actionable and not complete and not suppressed and card.get('can_answer',True) is True and (card.get('kind')!='work' or card.get('document_state')=='available')
     summary=_text(profile.get('summary')) or _text(card.get('prompt'))
     if summary=='무엇을 확인했고 어떤 조치가 필요한가요?':summary=''
     summary=summary or _text(card.get('title')) or '작업 요약이 준비되지 않았습니다.'
@@ -68,7 +68,7 @@ def presentation(card, detail=None, profile=None):
     if card.get('delivery_error'):issue('전달 기록 확인 필요',card['delivery_error'])
     if detail.get('native_error'):issue('실행 관찰 미확인',detail['native_error'])
     if card.get('kind')=='work' and card.get('document_state') in ('missing','unreadable','invalid'):
-        issue('현재 설계 문서 확인 필요','현재 설계 문서를 읽을 수 없어 승인 대상과 실행 연결을 확인해야 합니다.')
+        issue('현재 설계 문서 확인 필요',card.get('document_reason') or '현재 설계 문서를 읽을 수 없어 승인 대상과 실행 연결을 확인해야 합니다.')
     if card.get('question_state',{}).get('state') in ('invalid','stale','document_unavailable'):
         issue('질문 기록 확인 필요',card['question_state'].get('reason'))
     if actionable and card.get('can_answer') is False and not complete:

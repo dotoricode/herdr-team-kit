@@ -234,7 +234,11 @@ def document_view(config_path, state, ident, binding_path=None):
     if binding_path:
         linked=bindings(binding_path,config);profile=linked.get('card_briefs',{}).get('work:'+ident)
         card=feedback_card_detail(config_path,state,binding_path,'work',ident)
+        if (card.get('document_revision'),card.get('document_digest'),card.get('status'),card.get('document_state'))!=(work['revision'],digest,work['phase'],'available'):
+            raise ValueError('문서가 바뀌었습니다. 다시 읽어 주세요.')
     reading=reading_view(body,contract,card,profile)
+    if next((w for w in readonly_snapshot(state)['works'] if w['id']==ident),None)!=work:
+        raise ValueError('문서가 바뀌었습니다. 다시 읽어 주세요.')
     return {'id':ident,'title':work['title'],'revision':work['revision'],'digest':digest,
             **reading,'phase':work['phase'],'can_approve':work['phase']=='awaiting_approval','resumable':resumable}
 
