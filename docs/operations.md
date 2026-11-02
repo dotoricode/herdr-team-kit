@@ -152,3 +152,31 @@ GUI core 배정은 실제 응답에 연결된 statusline 자료와 검증된 공
 같은 세션의 다른 owner 재임대는 하지 않는다. 나간 세션의 정상 종료와 공식 owner 해제를 확인한 뒤에만 새 세대로 보충한다. Context만 찬 경우에는 같은 계정의 새 세대가 선택될 수 있다. 구독 한도가 찬 경우에는 기존 우선순위의 사용 가능한 다른 계정을 선택한다. ready·awaiting_review는 빈 슬롯이 아니다. 기존 사용자 대화·초안 있는 세션을 준비 슬롯으로 자동 편입하지 않는다.
 
 기존 한도 소진 팀장을 보존하면서 새 연결용 고정 TASK를 구성할 수 있다. 이때 진행 중인 팀 작업이 없어야 하며 새 팀장의 초기 범위는 수신·기록 확인·대기다. 과거 담당의 writer 중단을 추정하거나 그 업무를 완료·인계 처리하지 않는다. 제품 작업과 승인 기록은 원래 상태로 보존한다.
+
+## 업무 연결과 팀별 확인 담당
+
+`pool assign`의 `--work`는 큐의 안정 업무 ID입니다. 원 제품 장부와 연결하려면 `--workflow WORK-ID`를 함께 지정합니다. 그때의 문서 revision/digest/root를 고정하고, 소비 직전 현재 승인과 허용 경로를 다시 확인합니다. 연결 없는 기존 요청의 의미는 유지합니다. 변경된 설계를 새 요청의 승인으로 자동 승계하지 않습니다.
+
+`--priority 0..9`는 대기 요청 사이의 순서를 조정하며 기본 0은 접수 순서입니다. 이미 수신·실행·불명인 같은 팀의 업무를 선점하지 않습니다. `--depends-on REQUEST-ID`는 여러 번 지정할 수 있고 실제 `completed`만 의존성 충족으로 봅니다. 보류·취소·수신은 완료가 아닙니다. 각 요청은 연결된 제품 root 또는 팀 root를 자원으로 보호합니다. 추가 `--resource /srv/example/shared`는 설정된 팀·공유 root 안에서만 허용하며, 다른 팀의 진행 업무와 부모/자식 경로가 겹치면 기다립니다.
+
+연결된 업무의 큐 완료는 원 workflow의 공식 complete·승인 버전·milestone·별도 최신 reviewer 근거를 확인한 뒤 기록합니다. 일반 프로그램은 이미 수신 확인된 요청만 정합화하며 unknown을 자동 복구하거나 새 전송하지 않습니다. receiver와 현재 담당이 바뀌거나 입력이 남으면 기존 요청과 담당을 보존합니다. 긴 native 전달 대기 동안 전역 model-start 잠금은 해제하지만, 팀별 소비 잠금과 sending intent·공식 dispatch/tell 내부의 admission 검사는 유지합니다.
+
+팀별 개인 Codex 확인 역할은 선택 설정 `team_dispatch`로 켭니다. 제품 팀장 task와 별도 ID를 사용하며 같은 사용량을 팀별로 복제하지 않습니다.
+
+```json
+{
+  "team_dispatch": {
+    "enabled": true,
+    "tasks": {"alpha": "DISPATCH-ALPHA"},
+    "stall_seconds": 900
+  }
+}
+```
+
+`tasks`에는 설정한 모든 팀이 필요하며, 기존 core backend·session_pool·context_handoff가 켜져 있어야 합니다. `team-dispatch prepare`는 읽기 전용 판단용 task만 등록합니다. `team-dispatch bootstrap --team alpha`는 명시 실행으로 기존 공식 배정·실제 신원/receipt 경로를 사용해 개인 Codex를 준비합니다. standby를 자동 생성하거나 다른 계정으로 대체하지 않습니다. 공통 실행기는 Codex `--approve-for-me --no-daemon`, Claude `--permission-mode auto`를 사용합니다. 확인 담당은 실제 native 인자·모델·effort와 빈 입력을 대조한 뒤 이벤트를 받습니다. 기존 세션의 mode나 owner를 임의 변경하지 않습니다.
+
+기존 supervisor가 큐의 의미상 변화와 장기 정체를 디스크 이벤트로 기록하고, 판단이 필요할 때만 확인 담당에게 전달합니다. 관측 시각만 바뀌면 새 이벤트나 모델 턴을 만들지 않습니다. 실제 의미가 변한 시각을 별도로 보존하므로 주기적인 pending 갱신이 정체를 숨기지 않습니다. 긴 이벤트 전달은 기존 executor에서 처리하며 별도 AI polling·상주 orchestrator를 만들지 않습니다. 개인 한도·인증·native·입력 확인이 안 되면 이벤트를 보존하고 대기합니다.
+
+확인 담당은 전달 메시지에 있는 `team-dispatch ack` 명령을 본인의 실제 관리 terminal·owner·attempt로 실행하고 park합니다. acknowledgement는 관측 보고 수신이며 제품 업무나 큐의 완료가 아닙니다. `team-dispatch status`로 담당·이벤트·verification·heartbeat를 조회할 수 있습니다. 전송 시작 후 crash/timeout은 uncertain으로 보존하며 자동 재전송하지 않습니다. UI가 필요하면 기존 UI 검증실 요청 경로를 사용하고 실제 화면은 test-macbook의 개인 Codex 담당이 한 건씩 처리합니다.
+
+새 옵션과 기록 형식의 단위 검사는 실제 native 계정·권한·다건 전달 완주를 증명하지 않습니다. 운영 반영 전에는 현재 소스 fingerprint, 진행 중인 배정·인계, 기존 요청을 대조하고 supervisor만 안전하게 교체해야 합니다. 팀장·제품 세션은 보존합니다.

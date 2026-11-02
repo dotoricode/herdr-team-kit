@@ -113,7 +113,7 @@ def plan(config_path,state,team,provider=None,account=None):
         return {**result,'action':'wait','reason':'preferred session is not prepared; account order was not changed'}
 
 
-def enqueue(config_path,state,team,message_file,provider=None,account=None,work_id=None,completion_file=None):
+def enqueue(config_path,state,team,message_file,provider=None,account=None,work_id=None,completion_file=None,workflow_id=None,priority=0,dependencies=(),resource_paths=()):
     config=load(config_path)
     if not pool.enabled(config):raise ValueError('team leader pool disabled')
     requested=constraint(config,provider,account)
@@ -124,10 +124,21 @@ def enqueue(config_path,state,team,message_file,provider=None,account=None,work_
     text=source.read_text()
     if not text.strip():raise ValueError('empty assignment')
     task=pool.task_id(config,team)
+    from . import queue_policy
+    workflow_ref=queue_policy.capture_work(config,state,team,workflow_id)
+    claimed_resources=queue_policy.resources(config,team,workflow_ref,resource_paths)
+    if type(priority) is not int or not 0<=priority<=9:
+        raise ValueError('priority must be an integer in 0..9')
+    from .context_handoff import JOB
+    if (not isinstance(dependencies,(tuple,list)) or len(dependencies)>64
+            or any(not isinstance(d,str) or not JOB.fullmatch(d) for d in dependencies)
+            or len(set(dependencies))!=len(dependencies)):
+        raise ValueError('dependencies require distinct queue request identities')
+    dependencies=sorted(dependencies)
     from .context_handoff import locked
     with locked(folder(state)/'requests'):
         digest=hashlib.sha256(text.encode()).hexdigest()
-        work_id = work_id or ('message-' + digest)
+        work_id = work_id or workflow_id or ('message-' + digest)
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}',work_id):
             raise ValueError('bounded stable work identity required')
         completion = None
@@ -141,12 +152,19 @@ def enqueue(config_path,state,team,message_file,provider=None,account=None,work_
         for old in previous:
             old_key=old.get('work_id') or ('message-'+old['digest'])
             if old.get('task')==task and old_key==work_id:
-                if old.get('digest')==digest and old.get('execution_constraint')==requested and old.get('completion_requirements')==completion:
+                old_resources=old.get('resources',queue_policy.resources(config,team,old.get('workflow_ref')))
+                if (old.get('digest')==digest and old.get('execution_constraint')==requested
+                        and old.get('completion_requirements')==completion
+                        and old.get('workflow_ref')==workflow_ref and old.get('priority',0)==priority
+                        and old.get('dependencies',[])==dependencies and old_resources==claimed_resources):
                     return {k:v for k,v in old.items() if k!='message'}
                 raise ValueError('work identity already has different immutable request content')
+        if any(d not in {j['id'] for j in previous} for d in dependencies):
+            raise ValueError('dependency must name an existing immutable queue request')
         sequence=max((j.get('sequence',0) for j in previous),default=0)+1
         value={'id':uuid.uuid4().hex,'team':team,'task':task,'message':text,'digest':digest,
                'work_id':work_id,'sequence':sequence,'completion_requirements':completion,
+               'workflow_ref':workflow_ref,'priority':priority,'dependencies':dependencies,'resources':claimed_resources,
                'execution_constraint':requested,
                'phase':'pending','at':time.time(),'updated_at':time.time()}
         write_request(folder(state)/(value['id']+'.json'),value)
@@ -194,18 +212,22 @@ def _advance(config_path,state,ident):
         if not job or job['phase'] in ('done','received','completed','deferred','uncertain','cancelled'):return
         config=load(config_path)
         if not pool.enabled(config):return
-        earlier=[j for j in requests(state) if j['team']==job['team']]
-        for previous in earlier:
-            if previous['id']==ident:break
-            if previous['phase'] not in ('completed','deferred','cancelled'):
-                job.update(reason='앞선 요청의 업무 완료·보류 인계를 기다립니다.',updated_at=time.time())
-                write_request(path,job);return
+        team_jobs=[j for j in requests(state) if j['team']==job['team']]
+        active=[j for j in team_jobs if j['id']!=ident and j['phase'] not in ('pending','completed','deferred','cancelled')]
+        waiting=sorted((j for j in team_jobs if j['phase']=='pending'),
+                       key=lambda j:(-j.get('priority',0),j.get('sequence',0),j.get('at',0),j['id']))
+        if job['phase']=='pending' and (active or waiting and waiting[0]['id']!=ident):
+            job.update(reason='앞선 요청의 업무 완료·보류 인계를 기다립니다.',updated_at=time.time())
+            write_request(path,job);return
         def save(phase,reason):
             job.update(phase=phase,reason=reason,updated_at=time.time());write_request(path,job)
         try:
             if job['task']!=pool.task_id(config,job['team']):return save('uncertain','담당 설정이 변경됐습니다. 요청을 보존했습니다.')
             if job['phase'] in ('sending','dispatching'):
                 return save('uncertain','전송·배정 결과를 확인해야 합니다. 반복 실행하지 않습니다.')
+            from . import queue_policy
+            reason=queue_policy.admission(config,state,job,requests(state))
+            if reason:return save('pending',reason)
             if 'execution_constraint' in job:
                 store=Store(state)
                 try:
@@ -246,32 +268,36 @@ def _advance(config_path,state,ident):
             with context.locked(context.directory(state)/'model-start'):
                 target=next((t for t in context.targets(config,state) if t['id']==job['task']),None)
                 if not context.capacity_available(state,target):return save('pending','동시 실행 여유를 기다립니다.')
+                reason=queue_policy.admission(config,state,job,requests(state))
+                if reason:return save('pending',reason)
                 if route['action']=='dispatch':
                     save('dispatching','준비된 세션에 공식 배정합니다.')
-                    result=official(config_path,state,'dispatch',job['task'],'--expected-attempt',str(route['attempt']))
-                    if result.get('state')!='ready':return save('uncertain','새 담당의 수신·대기를 확인해야 합니다.')
-                    return save('pending','새 담당 준비가 끝났습니다. 다음 경계에서 요청을 전달합니다.')
-                store=Store(state)
-                try:task=store.get(job['task'])
-                finally:store.close()
-                if idle_native(task,config,state) is None:
-                    return save('pending','현재 작업·입력 초안을 보존하고 기다립니다.')
-                latest=plan(config_path,state,job['team'])
-                keys=('action','owner','attempt','selection')
-                if any(latest.get(k)!=route.get(k) for k in keys):
-                    return save('pending','사용량·선택·소유권이 바뀌어 전달 전에 다시 확인합니다.')
-                message=path.with_suffix('.txt')
-                text=('WORK ID: '+job.get('work_id',job['id'])+'\n'
-                      'Receipt is not work completion. Report evidence and park; only the verified queue resolve releases the next work.\n')
-                if job.get('completion_requirements'):
-                    text+='COMPLETION REQUIREMENTS:\n'+job['completion_requirements']+'\n'
-                message.write_text(text+'\n'+job['message'])
-                message.chmod(0o600)
-                save('sending','선택된 팀장에게 요청을 전달합니다.')
-                result=official(config_path,state,'tell',job['task'],'--message-file',str(message),
-                    '--expected-owner',route['owner'],'--expected-attempt',str(route['attempt']))
-                job['receiver']={'terminal':result['runtime']['terminal'],'owner':result['owner'],'attempt':result['attempt_count']}
-                save('received','요청 수신을 확인했습니다. 업무 완료·보류 인계 증거를 기다립니다.')
+                else:
+                    store=Store(state)
+                    try:task=store.get(job['task'])
+                    finally:store.close()
+                    if idle_native(task,config,state) is None:
+                        return save('pending','현재 작업·입력 초안을 보존하고 기다립니다.')
+                    latest=plan(config_path,state,job['team'])
+                    keys=('action','owner','attempt','selection')
+                    if any(latest.get(k)!=route.get(k) for k in keys):
+                        return save('pending','사용량·선택·소유권이 바뀌어 전달 전에 다시 확인합니다.')
+                    message=path.with_suffix('.txt')
+                    text=('WORK ID: '+job.get('work_id',job['id'])+'\n'
+                          'Receipt is not work completion. Report evidence and park; only the verified queue resolve releases the next work.\n')
+                    if job.get('completion_requirements'):
+                        text+='COMPLETION REQUIREMENTS:\n'+job['completion_requirements']+'\n'
+                    message.write_text(text+'\n'+job['message'])
+                    message.chmod(0o600)
+                    save('sending','선택된 팀장에게 요청을 전달합니다.')
+            if route['action']=='dispatch':
+                result=official(config_path,state,'dispatch',job['task'],'--expected-attempt',str(route['attempt']))
+                if result.get('state')!='ready':return save('uncertain','새 담당의 수신·대기를 확인해야 합니다.')
+                return save('pending','새 담당 준비가 끝났습니다. 다음 경계에서 요청을 전달합니다.')
+            result=official(config_path,state,'tell',job['task'],'--message-file',str(message),
+                '--expected-owner',route['owner'],'--expected-attempt',str(route['attempt']))
+            job['receiver']={'terminal':result['runtime']['terminal'],'owner':result['owner'],'attempt':result['attempt_count']}
+            save('received','요청 수신을 확인했습니다. 업무 완료·보류 인계 증거를 기다립니다.')
         except Exception as error:
             job['error_type']=type(error).__name__
             job['error_stage']=job['phase']
@@ -310,6 +336,11 @@ def resolve(config_path,state,ident,outcome,evidence_file,owner,attempt):
         if outcome=='deferred' and (not isinstance(evidence.get('next'),str) or not evidence['next'].strip()):
             raise ValueError('deferred work requires an explicit handoff next step')
         config=load(config_path)
+        if outcome=='completed' and job.get('workflow_ref'):
+            from .queue_policy import completion
+            proof=completion(config,state,job)
+            if proof is None:raise ValueError('linked workflow has not passed its official completion gate')
+            evidence={**evidence,'workflow_completion':proof}
         store=Store(state)
         try:task=store.get(job['task'])
         finally:store.close()
@@ -321,6 +352,27 @@ def resolve(config_path,state,ident,outcome,evidence_file,owner,attempt):
                    reason='업무 완료 증거를 확인했습니다.' if outcome=='completed' else '보류 인계 증거를 확인했습니다.')
         write_request(path,job)
         return {k:v for k,v in job.items() if k!='message'}
+
+
+def reconcile(config_path,state,ident):
+    """Advance only a formally completed linked work; never repair uncertain transport."""
+    from . import context_handoff as context
+    from .queue_policy import completion
+    job=context.read(folder(state)/(ident+'.json'))
+    if not job or job['phase'] not in ('received','done') or not job.get('workflow_ref'):return
+    try:
+        proof=completion(load(config_path),state,job)
+        if proof is None:return
+        receiver=job.get('receiver') or {}
+        evidence={'work_id':job['work_id'],'owner':receiver.get('owner'),'attempt':receiver.get('attempt'),
+                  'writer_stopped':True,'verification':proof['verification']}
+        if job.get('completion_requirements'):evidence['completion_requirements']=job['completion_requirements']
+        path=folder(state)/(ident+'.workflow-proof.json')
+        context.write(path,evidence)
+        return resolve(config_path,state,ident,'completed',path,receiver.get('owner'),receiver.get('attempt'))
+    except (ValueError,KeyError,OSError):
+        # Keep received ownership and its evidence intact for a manager to inspect.
+        return
 
 
 def handle(args):
@@ -338,7 +390,7 @@ def handle(args):
                 row={k:quota.get(k) for k in ('source','observed_at','five_hour','weekly','unavailable','ordinary_usage_allowed') if k in quota}
                 row.update(provider=provider,account=account,eligible=eligible(quota,time.time(),config['quota_ttl_seconds']))
                 accounts.append(row)
-        return {**pool.status(config,args.state),'accounts':accounts,'requests':[{k:j.get(k) for k in ('id','team','task','work_id','phase','reason','receiver','execution_constraint','completion_requirements','error_type','error_stage','error_code')} for j in requests(args.state)]}
+        return {**pool.status(config,args.state),'accounts':accounts,'requests':[{k:j.get(k) for k in ('id','team','task','work_id','phase','reason','receiver','execution_constraint','completion_requirements','error_type','error_stage','error_code','workflow_ref','priority','dependencies','resources')} for j in requests(args.state)]}
     if args.action=='plan':return plan(args.config,args.state,args.team,getattr(args,'provider',None),getattr(args,'account',None))
     from .core_runtime import require_managed
     require_managed()
@@ -356,7 +408,8 @@ def handle(args):
         if not args.team or not args.message_file:raise ValueError('team and approved message file required')
         from .context_handoff import ensure
         ensure(args.config,args.state)
-        return enqueue(args.config,args.state,args.team,args.message_file,getattr(args,'provider',None),getattr(args,'account',None),getattr(args,'work',None),getattr(args,'completion_file',None))
+        return enqueue(args.config,args.state,args.team,args.message_file,getattr(args,'provider',None),getattr(args,'account',None),getattr(args,'work',None),getattr(args,'completion_file',None),
+                       getattr(args,'workflow',None),getattr(args,'priority',0),getattr(args,'depends_on',[]),getattr(args,'resource',[]))
     if not args.team:raise ValueError('team required')
     store=Store(args.state)
     try:task=store.get(pool.task_id(config,args.team))

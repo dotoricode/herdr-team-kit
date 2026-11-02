@@ -145,6 +145,10 @@ def parser():
     x.add_argument('--message-file')
     x.add_argument('--work')
     x.add_argument('--completion-file')
+    x.add_argument('--workflow')
+    x.add_argument('--priority',type=int,default=0)
+    x.add_argument('--depends-on',action='append',default=[])
+    x.add_argument('--resource',action='append',default=[])
     x.add_argument('--request')
     x.add_argument('--outcome',choices=('completed','deferred'))
     x.add_argument('--evidence-file')
@@ -152,6 +156,13 @@ def parser():
     x.add_argument('--expected-attempt',type=int)
     x.add_argument('--provider', choices=('codex', 'claude'))
     x.add_argument('--account', choices=('team', 'personal'))
+    x=commands.add_parser('team-dispatch')
+    x.add_argument('action',choices=('status','prepare','bootstrap','ack'))
+    x.add_argument('--team')
+    x.add_argument('--event')
+    x.add_argument('--owner')
+    x.add_argument('--attempt',type=int)
+    x.add_argument('--evidence-file')
     x=commands.add_parser('auto-context')
     x.add_argument('action',choices=('serve','status','register','enroll','checkpoint','verify-request'))
     x.add_argument('--once',action='store_true')
@@ -168,6 +179,9 @@ def run(args):
     args.config = str(Path(args.config).expanduser().resolve())
     args.state = str(Path(args.state).expanduser().resolve())
     config = load(args.config)
+    if args.command == 'team-dispatch':
+        from .team_dispatch import handle
+        return handle(args)
     if args.command == 'pool':
         from .pool_control import handle
         return handle(args)

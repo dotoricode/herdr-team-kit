@@ -107,9 +107,14 @@ def targets(config, state, starting=False):
         result = []
         for task in task_rows:
             from . import session_pool
+            from .team_dispatch import settings as dispatch_settings
+            dispatch=dispatch_settings(config)
+            observer=(dispatch['enabled'] and dispatch['tasks'].get(task['team'])==task['id']
+                      and task.get('team_dispatch_team')==task['team']
+                      and task.get('execution_constraint')=={'provider':'codex','account':'personal'})
             if (session_pool.enabled(config) and task.get('role')=='leader' and not task.get('work_id')
                     and task.get('classification',{}).get('kind','general')=='general'
-                    and task['id']!=session_pool.task_id(config,task['team'])):
+                    and task['id']!=session_pool.task_id(config,task['team']) and not observer):
                 continue
             runtime = task.get('runtime', {})
             if (task['state'] not in ('running', 'ready') or not task.get('owner')
@@ -753,10 +758,17 @@ def tick(config_path, state, pool=None, futures=None):
     if session_pool.enabled(config):
         from . import pool_control
         for assignment in pool_control.requests(state):
-            if assignment['phase'] in ('done','received','completed','deferred','uncertain','cancelled'):continue
+            if assignment['phase'] in ('completed','deferred','uncertain','cancelled'):continue
+            operation=pool_control.reconcile if assignment['phase'] in ('done','received') else pool_control.advance
             key='assignment-'+assignment['id']
-            if pool is None:pool_control.advance(config_path,state,assignment['id'])
-            elif key not in futures:futures[key]=pool.submit(pool_control.advance,config_path,state,assignment['id'])
+            if pool is None:operation(config_path,state,assignment['id'])
+            elif key not in futures:futures[key]=pool.submit(operation,config_path,state,assignment['id'])
+    from . import team_dispatch
+    dispatch_state=team_dispatch.tick(config_path,state)
+    for team in dispatch_state.get('teams',[]):
+        key='team-dispatch-'+team
+        if pool is None:team_dispatch.advance(config_path,state,team)
+        elif key not in futures:futures[key]=pool.submit(team_dispatch.advance,config_path,state,team)
     return {'enabled':True, 'jobs':[{k:j.get(k) for k in ('id', 'phase', 'reason')} for j in jobs(state)]}
 
 
