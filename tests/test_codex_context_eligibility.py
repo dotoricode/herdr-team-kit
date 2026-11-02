@@ -21,11 +21,31 @@ class CodexEligibilityTests(unittest.TestCase):
         self.assertEqual(result['not_applicable'], ['five_hour'])
         self.assertNotIn('five_hour', result)
 
-    def test_low_percentages_cannot_override_explicit_spend_blocks(self):
+    def test_included_allowance_survives_credit_only_spend_cap(self):
+        for position in ('top', 'bucket'):
+            raw = native()
+            raw['rateLimitsByLimitId']['codex']['secondary'] = {
+                'usedPercent': 10, 'windowDurationMins': 300, 'resetsAt': NOW+1000}
+            target = raw if position == 'top' else raw['rateLimitsByLimitId']['codex']
+            target.update(spendControlReached=True, rateLimitReachedType=None)
+            with self.subTest(position=position):
+                self.assertTrue(eligible(normalize_quota('codex', raw, NOW), NOW))
+
+    def test_server_classified_limits_block_included_allowance(self):
+        for reason in ('rate_limit_reached', 'workspace_owner_credits_depleted',
+                       'workspace_member_credits_depleted', 'workspace_owner_usage_limit_reached',
+                       'workspace_member_usage_limit_reached'):
+            raw = native()
+            raw['rateLimitsByLimitId']['codex']['rateLimitReachedType'] = reason
+            with self.subTest(reason=reason):
+                self.assertFalse(eligible(normalize_quota('codex', raw, NOW), NOW))
+
+    def test_spend_cap_without_explicit_allowance_stays_unavailable(self):
         for position in ('top', 'bucket'):
             for key, value in (('spendControlReached', True),
                                ('rateLimitReachedType', 'workspace_member_credits_depleted')):
                 raw = native()
+                raw.pop('ordinaryUsageAllowed')
                 raw['rateLimitsByLimitId']['codex']['secondary'] = {
                     'usedPercent': 10, 'windowDurationMins': 300, 'resetsAt': NOW+1000}
                 target = raw if position == 'top' else raw['rateLimitsByLimitId']['codex']

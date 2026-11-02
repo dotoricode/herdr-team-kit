@@ -93,9 +93,11 @@ def normalize_quota(provider, raw, now):
         allowed = raw.get('ordinaryUsageAllowed')
         if type(allowed) is bool:
             result['ordinary_usage_allowed'] = allowed
+        # Included usage can remain permitted after the credit spend cap is reached.
+        # Only explicit native allowance distinguishes that case from an unknown block.
         if allowed is False or any(
-                data.get('spendControlReached') is True
-                or data.get('rateLimitReachedType') == 'workspace_member_credits_depleted'
+                data.get('rateLimitReachedType') is not None
+                or (data.get('spendControlReached') is True and allowed is not True)
                 for data in (raw, bucket) if isinstance(data, dict)):
             result['unavailable'] = True
         valid_bucket = isinstance(bucket, dict)
