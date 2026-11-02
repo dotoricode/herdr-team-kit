@@ -143,6 +143,8 @@ def parser():
     x.add_argument('action',choices=('prepare','recheck','present','status','plan','bootstrap','assign','refresh'))
     x.add_argument('--team')
     x.add_argument('--message-file')
+    x.add_argument('--provider', choices=('codex', 'claude'))
+    x.add_argument('--account', choices=('team', 'personal'))
     x=commands.add_parser('auto-context')
     x.add_argument('action',choices=('serve','status','register','enroll','checkpoint','verify-request'))
     x.add_argument('--once',action='store_true')
@@ -249,7 +251,7 @@ def run(args):
             if args.command=='tell' and args.expected_owner is not None and task.get('owner')!=args.expected_owner:
                 raise ValueError('selected task owner changed; inspect before sending')
         if args.command == 'plan':
-            return (select_execution(config, store, task, now) if 'execution_preference' in config
+            return (select_execution(config, store, task, now) if 'execution_preference' in config or task.get('execution_constraint')
                     else execution_policy(config, task))
         if args.command == 'authorize':
             decision = json.loads(Path(args.decision_file).read_text())

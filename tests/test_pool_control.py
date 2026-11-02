@@ -64,6 +64,63 @@ class PoolControlTests(Fixture):
         self.identity_mock.assert_called()
         return result
 
+    def test_request_constraint_waits_instead_of_using_another_eligible_account(self):
+        from teamkit.__main__ import select_execution
+        self.prepare()
+        task = self.call('show', 'L1')
+        task['execution_constraint'] = {'provider': 'codex', 'account': 'personal'}
+        store = Store(self.state)
+        try:
+            selected = select_execution(load(self.config), store, task, time.time())
+        finally:
+            store.close()
+        self.assertEqual(selected['action'], 'wait')
+
+    def test_cli_pinned_assignment_waits_without_fallback_and_records_constraint(self):
+        self.prepare()
+        message = self.root / 'pin-request.txt'
+        message.write_text('Inspect the approved SDK scope only.')
+        with patch.object(context, 'ensure'), patch.object(context, 'refresh_candidates'):
+            request = self.call('pool', 'assign', '--team', 'alpha', '--message-file', str(message),
+                                '--provider', 'claude', '--account', 'team')
+            control.advance(self.config, self.state, request['id'])
+        self.assertEqual(request['execution_constraint'], {'provider': 'claude', 'account': 'team'})
+        self.assertEqual(self.call('show', 'L1')['execution_constraint'], request['execution_constraint'])
+        self.assertEqual(self.call('pool', 'plan', '--team', 'alpha')['action'], 'wait')
+        self.assertEqual(self.call('plan', 'L1')['action'], 'wait')
+        self.assertEqual(control.requests(self.state)[0]['phase'], 'pending')
+        self.assertEqual(self.call('show', 'L1')['state'], 'queued')
+
+    def test_requested_provider_account_survives_official_handoff_and_dispatch(self):
+        previous = self.dispatched('claude')
+        self.prepare('codex')
+        message = self.root / 'fixed-request.txt'
+        message.write_text('Inspect this SDK using only the requested profile.')
+        with patch.object(context, 'ensure'):
+            request = self.call('pool', 'assign', '--team', 'alpha', '--message-file', str(message),
+                                '--provider', 'codex', '--account', 'team')
+        with patch.object(context, 'observe', return_value=None):
+            control.advance(self.config, self.state, request['id'])
+        self.assertEqual(control.plan(self.config, self.state, 'alpha')['selection']['provider'], 'codex')
+        job = next(j for j in context.jobs(self.state) if j['target']['id'] == 'L1')
+        self.assertEqual((job['next_session']['provider'], job['next_session']['account']), ('codex', 'team'))
+        with patch('teamkit.core_runtime.CoreRuntime.prompt') as sent:
+            with self.assertRaises(ValueError):
+                self.call('tell', 'L1', '--message-file', str(message), '--expected-owner', previous['owner'])
+            sent.assert_not_called()
+        evidence = self.root / 'stopped.json'
+        evidence.write_text(json.dumps({'verification': ['fixture writer stopped'], 'next': 'Continue the fixed request.'}))
+        self.call('handoff', 'L1', '--owner', previous['owner'], '--writer-stopped', '--evidence-file', str(evidence))
+
+        def received(runtime, store, config_path, task, owner, text):
+            store.receipt('L1', owner)
+            store.park('L1', owner)
+
+        with patch.object(context, 'ensure'), patch('teamkit.receipt.prompt', side_effect=received):
+            result = self.call('dispatch', 'L1')
+        self.assertEqual((result['provider'], result['account']), ('codex', 'team'))
+        self.assertEqual(result['execution_constraint'], {'provider': 'codex', 'account': 'team'})
+
     def test_codex_dispatch_uses_prepared_native_with_common_claim_and_receipt(self):self.dispatched()
     def test_claude_dispatch_uses_prepared_statusline_and_actual_profile_receipt(self):self.dispatched('claude')
 

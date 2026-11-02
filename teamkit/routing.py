@@ -63,6 +63,15 @@ def execution_preference(config):
 
 def execution_candidates(config, task, role, now):
     """Return ordered flexible candidates, or None for role-fixed execution."""
+    constraint = task.get('execution_constraint')
+    if constraint is not None:
+        if (not isinstance(constraint, dict) or set(constraint) != {'provider', 'account'}
+                or constraint.get('provider') not in config['profiles']
+                or constraint.get('account') not in ('team', 'personal')):
+            raise ValueError('execution constraint requires a configured provider and account')
+        provider, account = constraint['provider'], constraint['account']
+        return [{**role, **constraint,
+                 'model': role['model'] if provider == role['provider'] else config['profiles'][provider][account]['model']}]
     preference = execution_preference(config)
     cls = task.get('classification', {'kind': 'general', 'risks': []})
     if (preference is None or task.get('user_decision') or task['role'] not in ('leader', 'implementer')
