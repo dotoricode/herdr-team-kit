@@ -11,6 +11,7 @@ const provider = x => ({ codex: "Codex", claude: "Claude" })[x] ?? "미확인";
 const account = x => ({ personal: "개인", team: "회사" })[x] ?? "계정 미확인";
 const clock = x => x == null ? "—" : new Date(x * 1000).toLocaleString();
 const percent = x => x == null ? "미제공" : typeof x === "number" && Number.isFinite(x) ? String(x)+"%" : "미확인";
+const periodUsage = (value,key) => value.not_applicable?.includes(key) ? "해당 없음" : percent(value[key]?.used);
 const clean = x => String(x ?? "").replaceAll("장부", "작업 기록");
 const categoryColor = (category, t) => ({ attention: t.blocked, waiting: t.idle, progress: t.working, history: t.muted })[category] ?? t.muted;
 // Each word is its own unbroken native text item; long paths wrap only at separators.
@@ -179,17 +180,18 @@ export default class TeamQueue extends View {
         .child(h_flex().flex_wrap().gap(8)
           .child(badge("승인·의존성 통과 "+String(data.policy_ready_count??"미확인"),t.muted,t))
           .child(badge("가용 실행 슬롯 "+String(data.capacity?.available??"미확인"),t.foreground,t))
+          .child(badge("사용/상한 "+String(data.capacity?.used??"미확인")+"/"+String(data.capacity?.global_limit??"미확인"),t.muted,t))
           .child(badge("프로필 "+String(data.account_profiles)+" · 준비 후보 "+String(data.candidate_slots),t.muted,t)))
         .child(h_flex().flex_wrap().gap(6).children(Object.entries(data.waiting??{}).map(([label,count])=>badge(label+" "+String(count),t.muted,t))))
         .child(words((data.supervisor?.alive && data.supervisor?.heartbeat_fresh && data.supervisor?.source_matches && data.supervisor?.dispatch_healthy ? "소비기 정상" : "소비기 확인 필요")+
           " · 소스 "+String(data.supervisor?.source_fingerprint??"미확인").slice(0,12)+
           " · 관측 지연 "+String(Math.round(data.supervisor?.heartbeat_age_seconds??0))+"초").text_size(11).text_color(data.supervisor?.alive?t.muted:t.blocked))
         .when(Boolean(data.supervisor?.dispatch?.last_error),el=>el.child(words("배정 소비기 오류 · "+String(data.supervisor?.dispatch?.last_error?.reason??"관측 필요")).text_size(11).text_color(t.blocked)))
-        .child(words("HC 밖 모델 실행은 통제 범위 밖입니다. 슬롯·프로필·준비 후보는 서로 다른 수치입니다.").text_size(11).text_color(t.muted))
+        .child(words("장부 밖 HC 실행 "+String(data.capacity?.outside_ledger??"미확인")+"개를 관측하여 합산합니다. 직접 시작·HC 밖 모델 실행은 통제 범위 밖입니다. 슬롯·프로필·준비 후보는 서로 다른 수치입니다.").text_size(11).text_color(t.muted))
         .child(h_flex().flex_wrap().gap(8).children(Object.entries(data.profiles??{}).map(([key,value])=>{
           const [p,a]=key.split("/"); return v_flex().gap(3).px(8).py(5).border_1().border_color(t.border)
-            .child(div().text_size(11).child(account(a)+" "+provider(p)+" · "+(value.eligible?"배정 가능":"사용량 확인·회복 대기")))
-            .child(div().text_size(11).text_color(t.muted).child("5h "+percent(value.five_hour?.used)+" · 주간 "+percent(value.weekly?.used)))
+            .child(div().text_size(11).child(account(a)+" "+provider(p)+" · "+(value.eligible?"사용량 조건 통과":"사용량 확인·회복 대기")))
+            .child(div().text_size(11).text_color(t.muted).child("5h "+periodUsage(value,"five_hour")+" · 주간 "+periodUsage(value,"weekly")))
             .child(div().text_size(10).text_color(t.dim).child("관측 "+clock(value.observed_at)));
         })))))
       .child(v_flex().id("queue-content").flex_1().min_h(0).min_w(0).overflow_y_scrollbar().p(16).gap(10)
