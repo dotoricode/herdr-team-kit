@@ -77,6 +77,11 @@ def parser():
     p.add_argument('--config', default=str(Path.home()/'.config/herdr-team-kit/config.json'))
     p.add_argument('--state', default=str(Path.home()/'.local/state/herdr-team-kit/state.sqlite'))
     commands = p.add_subparsers(dest='command', required=True)
+    from .queue_cli import parser as queue_parser
+    queue_parser(commands)
+    service = commands.add_parser('service')
+    service.add_argument('action', choices=('install', 'status', 'guard'))
+    service.add_argument('--once', action='store_true')
     commands.add_parser('doctor')
     x = commands.add_parser('statusline')
     x.add_argument('--account', choices=['team','personal'], required=True)
@@ -103,16 +108,19 @@ def parser():
     commands.add_parser('list')
     for cmd in ('receipt', 'park'):
         x = commands.add_parser(cmd); x.add_argument('task'); x.add_argument('--owner', required=True)
+        if cmd == 'park':
+            x.add_argument('--writer-stopped', action='store_true')
     x = commands.add_parser('retire');x.add_argument('task');x.add_argument('--owner',required=True)
     x.add_argument('--writer-stopped',action='store_true',required=True);x.add_argument('--evidence-file',required=True)
     x = commands.add_parser('tell'); x.add_argument('task'); x.add_argument('--message-file', required=True)
     x.add_argument('--expected-owner')
     x.add_argument('--expected-attempt',type=int)
+    x.add_argument('--accept-only',action='store_true',help='core: confirm accepted input without waiting for work completion')
+    x.add_argument('--delivery-id',help='stable identity for this accepted-input attempt')
     for cmd in ('handoff', 'complete'):
         x = commands.add_parser(cmd); x.add_argument('task'); x.add_argument('--owner', required=True)
         x.add_argument('--evidence-file', required=True)
-        if cmd == 'handoff':
-            x.add_argument('--writer-stopped', action='store_true')
+        x.add_argument('--writer-stopped', action='store_true')
     x = commands.add_parser('authorize'); x.add_argument('task')
     x.add_argument('--decision-file', required=True)
     x.add_argument('--user-approved', action='store_true', required=True)
@@ -140,7 +148,7 @@ def parser():
     x.add_argument('--publish',action='store_true');x.add_argument('--interval',type=float,default=3)
     x.add_argument('--color',choices=['auto','always','never'],default='auto')
     x=commands.add_parser('pool')
-    x.add_argument('action',choices=('prepare','recheck','present','status','plan','bootstrap','assign','refresh','resolve'))
+    x.add_argument('action',choices=('prepare','recheck','present','status','plan','bootstrap','assign','refresh','resolve','submit'))
     x.add_argument('--team')
     x.add_argument('--message-file')
     x.add_argument('--work')
@@ -154,6 +162,7 @@ def parser():
     x.add_argument('--evidence-file')
     x.add_argument('--expected-owner')
     x.add_argument('--expected-attempt',type=int)
+    x.add_argument('--delivery-id')
     x.add_argument('--provider', choices=('codex', 'claude'))
     x.add_argument('--account', choices=('team', 'personal'))
     x=commands.add_parser('team-dispatch')
@@ -174,6 +183,12 @@ def parser():
 
 
 def run(args):
+    if args.command == 'queue':
+        from .queue_cli import handle
+        return handle(args)
+    if args.command == 'service':
+        from .service import handle
+        return handle(args)
     if args.command == 'context':
         return {'action':context_action(args.used, args.safe_boundary)}
     args.config = str(Path(args.config).expanduser().resolve())
@@ -421,9 +436,30 @@ def run(args):
             from .retirement import retire
             return retire(store,config,args.task,args.owner,json.loads(Path(args.evidence_file).read_text()),args.writer_stopped)
         if args.command == 'park':
-            return store.park(args.task, args.owner)
+            return store.park(args.task, args.owner, writer_stopped=getattr(args, 'writer_stopped', False))
         if args.command == 'tell':
+            import re
             backend = config.get('runtime_backend', 'tui')
+            accept_only=getattr(args,'accept_only',False)
+            delivery_id=getattr(args,'delivery_id',None)
+            if delivery_id is not None and (not accept_only or not re.fullmatch(r'[a-f0-9]{32}',delivery_id)):
+                raise ValueError('delivery identity requires accept-only and a 32-character lowercase hex ID')
+            if accept_only and backend!='core':raise ValueError('accept-only requires the core runtime')
+            message=Path(args.message_file).read_text()
+            cached_delivery=None
+            if accept_only:
+                import hashlib
+                delivery_id=delivery_id or uuid.uuid4().hex
+                message_digest=hashlib.sha256(message.encode()).hexdigest()
+                previous=task.get('runtime',{}).get('last_delivery') or {}
+                if previous.get('delivery_id')==delivery_id:
+                    if (previous.get('owner')!=task.get('owner') or previous.get('attempt')!=task.get('attempt_count')
+                            or previous.get('message_sha256')!=message_digest
+                            or previous.get('native_pid')!=task.get('runtime',{}).get('native_pid')):
+                        raise ValueError('delivery identity content or owner changed; inspect before sending')
+                    if previous.get('phase')!='accepted':
+                        raise ValueError('previous input acceptance is uncertain; inspect before retry')
+                    cached_delivery=previous
             if task.get('runtime', {}).get('backend', 'tui') != backend:
                 raise KitError('task runtime differs from configured backend; inspect before sending')
             if backend == 'core':
@@ -434,6 +470,9 @@ def run(args):
                 if os.environ.get('HERDR_ENV') != '1':
                     raise KitError('tell must run inside Herdr')
                 runtime = Herdr()
+            if cached_delivery is not None:
+                runtime._native(task['runtime']['name'])
+                return {**task,'delivery':cached_delivery}
             from .workflow import check_task
             check_task(config,store,task)
             status = runtime.call('agent','get',task['runtime']['name'])
@@ -460,12 +499,29 @@ def run(args):
                 import shlex
                 park=[sys.executable,str(Path(__file__).resolve().parent.parent/'teamkit_cli.py'),
                       '--config',args.config,'--state',args.state,'park',args.task,'--owner',task['owner']]
-                runtime.prompt(task['runtime']['name'],
-                               'CONTINUATION OF AN ALREADY RECEIPTED TASK. The same owner is now running. '
+                text=('CONTINUATION OF AN ALREADY RECEIPTED TASK. The same owner is now running. '
                                'Do not execute the initial receipt command again; it only applies to a new submitted dispatch.\n'+
                                'Task '+args.task+' / owner '+task['owner']+' / attempt '+str(task.get('attempt_count',0))+'\n'+
-                               Path(args.message_file).read_text()+
+                               message+
                                '\nAfter processing and stopping task work, run this exact park command:\n'+shlex.join(park))
+                if accept_only:
+                    delivery={'delivery_id':delivery_id,'owner':task['owner'],'attempt':task['attempt_count'],
+                              'message_sha256':message_digest,'terminal':task['runtime']['terminal'],
+                              'native_pid':task['runtime']['native_pid'],'phase':'sending','at':time.time()}
+                    store.note(args.task,task['owner'],{'last_delivery':delivery})
+                    accepted=runtime.accept(task['runtime']['name'],text)
+                    delivery.update(accepted,phase='accepted',accepted_at=time.time())
+                    with store.transaction():
+                        current=store.get(args.task)
+                        prior=current.get('runtime',{}).get('last_delivery') or {}
+                        if (current.get('owner')!=task['owner'] or current.get('attempt_count')!=task['attempt_count']
+                                or current.get('runtime',{}).get('native_pid')!=delivery['native_pid']
+                                or prior.get('delivery_id')!=delivery_id or current['state'] not in ('running','ready')):
+                            raise ValueError('delivery result is stale; preserve the current execution')
+                        current['runtime']['last_delivery']=delivery
+                        store._save(current,'input_accepted',delivery)
+                    return {**current,'delivery':delivery}
+                runtime.prompt(task['runtime']['name'],text)
             except BaseException:
                 current = store.get(args.task)
                 if current['state'] == 'running':
@@ -501,8 +557,8 @@ def run(args):
                 head = task_head(task, config)
                 if git(task['root'],'status','--porcelain'):
                     raise ValueError('review completion requires a clean pinned Git worktree')
-                return store.complete(args.task, args.owner, head, evidence['verification'], evidence.get('reviewed_head'),evidence.get('review_verdict'))
-        return store.complete(args.task, args.owner, head, evidence['verification'])
+                return store.complete(args.task, args.owner, head, evidence['verification'], evidence.get('reviewed_head'),evidence.get('review_verdict'), writer_stopped=getattr(args, 'writer_stopped', False))
+        return store.complete(args.task, args.owner, head, evidence['verification'], writer_stopped=getattr(args, 'writer_stopped', False))
     finally:
         store.close()
 

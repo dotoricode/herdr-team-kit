@@ -114,6 +114,35 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(sends),1)
         self.assertIn('t8',sends[0]);self.assertEqual(sends[0][-1],'one task; $(never shell)')
         self.assertIn('--if',sends[0]);self.assertEqual(result['wait']['reason'],'status')
+
+    def test_accept_confirms_input_without_waiting_for_long_work(self):
+        self.hc.send={'started':True,'turn':1}
+        result=CoreRuntime(self.task).accept('tk-owner','long bounded work')
+        sends=[a for a,_ in self.hc.calls if a[:2]==['hc','send']]
+        self.assertEqual(len(sends),1)
+        self.assertNotIn('--wait',sends[0])
+        self.assertFalse(any(a[:2]==['hc','wait'] for a,_ in self.hc.calls))
+        self.assertTrue(result['accepted'])
+        self.assertEqual(result['terminal'],'t8')
+        self.assertEqual(result['native_pid'],88)
+        self.assertEqual(result['turn_baseline'],1)
+
+    def test_accept_unknown_delivery_never_sends_twice(self):
+        for response in ({'started':False,'turn':1},{'started':None},{}):
+            with self.subTest(response=response):
+                self.hc.calls=[];self.hc.send=response
+                with self.assertRaises(KitError):CoreRuntime(self.task).accept('tk-owner','once')
+                self.assertEqual(sum(a[:2]==['hc','send'] for a,_ in self.hc.calls),1)
+
+    def test_accept_rechecks_identity_after_input_without_replaying(self):
+        original=self.hc.__call__
+        def replaced(argv,**kwargs):
+            result=original(argv,**kwargs)
+            if argv[:2]==['hc','send']:self.hc.agent['foreground']['pid']=89
+            return result
+        with patch('teamkit.core_runtime.subprocess.run',side_effect=replaced):
+            with self.assertRaises(KitError):CoreRuntime(self.task).accept('tk-owner','once')
+        self.assertEqual(sum(a[:2]==['hc','send'] for a,_ in self.hc.calls),1)
     def test_done_is_a_settled_state_and_sends_once_without_force(self):
         self.hc.agent=terminal(status='done')
         CoreRuntime(self.task).prompt('tk-owner','next bounded task')

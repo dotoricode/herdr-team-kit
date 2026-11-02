@@ -1,0 +1,67 @@
+"""Official ticket actions; UI clients call these instead of editing the ledger."""
+import json
+import os
+from pathlib import Path
+
+from .config import load
+from .operations import NativeRuntime, tick, view
+from .tickets import TicketStore
+
+
+def parser(commands):
+    item = commands.add_parser('queue')
+    item.add_argument('action', choices=('create', 'approve', 'show', 'status', 'submit', 'receipt',
+                                        'wait-children', 'dependencies', 'tick'))
+    item.add_argument('ticket', nargs='?')
+    item.add_argument('--ticket-file')
+    item.add_argument('--key')
+    item.add_argument('--approval-file')
+    item.add_argument('--user-approved', action='store_true')
+    item.add_argument('--attempt')
+    item.add_argument('--owner')
+    item.add_argument('--result-file')
+    item.add_argument('--depends-on', action='append', default=[])
+    item.add_argument('--release-writes', action='store_true')
+
+
+def handle(args):
+    if args.action == 'status':
+        return view(args.config, args.state)
+    if args.action == 'tick':
+        return tick(args.config, args.state)
+    queue = TicketStore(args.state)
+    try:
+        if args.action == 'create':
+            if not args.ticket_file or not args.key:
+                raise ValueError('ticket-file and idempotency key required')
+            return queue.enqueue(json.loads(Path(args.ticket_file).read_text()), args.key)
+        if not args.ticket:
+            raise ValueError('ticket identity required')
+        if args.action == 'show':
+            return queue.get(args.ticket)
+        if args.action == 'approve':
+            if not args.user_approved or not args.approval_file:
+                raise ValueError('explicit user-approved action and exact scope approval file required')
+            return queue.approve(args.ticket, args.approval_file)
+        if args.action == 'dependencies':
+            queue.set_dependencies(args.ticket, args.depends_on)
+            return queue.get(args.ticket)
+        attempt = queue.attempt(args.attempt)
+        executor = attempt['executor']
+        if os.environ.get('HC_TERMINAL_ID') != executor['terminal'] or args.owner != executor['owner']:
+            raise ValueError('only the actual current execution terminal may report this attempt')
+        runtime = NativeRuntime(load(args.config), args.state)
+        if args.action == 'receipt':
+            native = runtime.native(executor, require_idle=False)
+            return queue.receipt(args.ticket, args.attempt, args.owner, executor['terminal'], native)
+        if args.action == 'submit':
+            runtime.native(executor, require_idle=False)
+            if not args.result_file or Path(args.result_file).stat().st_size > 256 * 1024:
+                raise ValueError('bounded JSON result file required')
+            return queue.submit(args.ticket, args.attempt, args.owner, json.loads(Path(args.result_file).read_text()))
+        if args.action == 'wait-children':
+            runtime.native(executor, require_idle=False)
+            return queue.request_children_wait(args.ticket, args.attempt, args.owner, args.release_writes)
+        raise ValueError('unsupported queue action')
+    finally:
+        queue.close()

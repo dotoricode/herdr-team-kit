@@ -265,6 +265,21 @@ class CoreRuntime:
         return {'agent':{'name':args[2], 'agent_status':status, 'pane_id':native['address'],
                          'interactive_ready':status in ('idle','done'), 'completion_seq':native.get('turn')}}
 
+    def accept(self, name, text):
+        """Confirm accepted input, independently of the model turn's completion."""
+        require_managed()
+        native = self._native(name, ready=True)
+        condition = ['--if', 'idle'] if native['status']['state'] == 'idle' else []
+        sent = _call('send', '--json', *condition, native['address'], text, timeout=30)
+        if (sent.get('started') is not True or type(sent.get('turn')) is not int
+                or sent['turn'] < native.get('turn', 0)):
+            raise RuntimeError('Core input acceptance unconfirmed; inspect before further input')
+        # An input can already be working here. Recheck identity, not readiness.
+        self._native(name)
+        return {'accepted': True, 'terminal': native['address'],
+                'native_pid': native['foreground']['pid'],
+                'turn_baseline': native.get('turn', 0), 'turn': sent['turn']}
+
     def prompt(self, name, text):
         require_managed()
         native = self._native(name, ready=True)

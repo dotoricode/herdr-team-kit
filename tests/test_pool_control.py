@@ -5,7 +5,7 @@ import subprocess
 import time
 from unittest.mock import patch
 
-from test_cli import Fixture
+from test_cli import Fixture, StoreContext
 from test_session_pool import FakeNative
 from teamkit import session_pool as pool, pool_control as control, context_handoff as context
 from teamkit.config import load,binding
@@ -140,6 +140,221 @@ class PoolControlTests(Fixture):
             self.assertEqual(sent.call_count, 1)
         self.assertEqual(context.read(control.folder(self.state)/(first['id']+'.json'))['phase'], 'received')
         self.assertEqual(context.read(control.folder(self.state)/(second['id']+'.json'))['phase'], 'pending')
+
+    def test_queue_records_receiver_before_accept_only_transport(self):
+        actor=self.dispatched();message=self.root/'long.txt';message.write_text('Long bounded work.')
+        job=control.enqueue(self.config,self.state,'alpha',message,work_id='LONG')
+        def transport(*args):
+            saved=context.read(control.folder(self.state)/(job['id']+'.json'))
+            self.assertEqual(saved['phase'],'sending')
+            self.assertEqual(saved['receiver']['owner'],actor['owner'])
+            self.assertEqual(saved['receiver']['attempt'],actor['attempt_count'])
+            self.assertEqual(saved['receiver']['native_pid'],actor['runtime']['native_pid'])
+            self.assertIn('--accept-only',args)
+            self.assertEqual(args[args.index('--delivery-id')+1],saved['delivery_id'])
+            # The accepted input keeps running beyond transport acknowledgement.
+            with StoreContext(self.state) as store:store.wake('L1',actor['owner'])
+            return {**actor,'state':'running','delivery':{'accepted':True,'delivery_id':saved['delivery_id'],
+                'terminal':actor['runtime']['terminal'],'native_pid':actor['runtime']['native_pid']}}
+        with patch.object(context,'capacity_available',return_value=True),patch.object(control,'official',side_effect=transport) as sent:
+            control.advance(self.config,self.state,job['id'])
+            control.advance(self.config,self.state,job['id'])
+        self.assertEqual(sent.call_count,1)
+        self.assertEqual(control.requests(self.state)[0]['phase'],'received')
+        self.assertEqual(self.call('show','L1')['state'],'running')
+
+    def test_uncertain_transport_preserves_intended_receiver_and_delivery_id(self):
+        actor=self.dispatched();message=self.root/'unknown.txt';message.write_text('Do once.')
+        job=control.enqueue(self.config,self.state,'alpha',message)
+        with patch.object(context,'capacity_available',return_value=True),patch.object(control,'official',side_effect=TimeoutError) as sent:
+            control.advance(self.config,self.state,job['id'])
+            saved=control.requests(self.state)[0]
+            self.assertEqual(saved['receiver']['owner'],actor['owner'])
+            delivery_id=saved['delivery_id']
+            control.advance(self.config,self.state,job['id'])
+        self.assertEqual(sent.call_count,1)
+        self.assertEqual(control.requests(self.state)[0]['delivery_id'],delivery_id)
+        self.assertEqual(saved['phase'],'uncertain')
+
+    def test_late_transport_result_cannot_replace_recorded_receiver(self):
+        actor=self.dispatched();message=self.root/'late.txt';message.write_text('Preserve receiver.')
+        job=control.enqueue(self.config,self.state,'alpha',message)
+        with patch.object(context,'capacity_available',return_value=True),patch.object(control,'official',return_value={**actor,'owner':'different-owner'}):
+            control.advance(self.config,self.state,job['id'])
+        saved=control.requests(self.state)[0]
+        self.assertEqual(saved['phase'],'uncertain')
+        self.assertEqual(saved['receiver']['owner'],actor['owner'])
+
+    def test_tell_accept_only_keeps_running_owner_and_records_acceptance(self):
+        actor=self.dispatched();message=self.root/'accept.txt';message.write_text('Long bounded work.')
+        receipt={'accepted':True,'terminal':actor['runtime']['terminal'],'native_pid':actor['runtime']['native_pid'],'turn_baseline':1}
+        with patch('teamkit.core_runtime.CoreRuntime.accept',return_value=receipt) as accepted,patch('teamkit.core_runtime.CoreRuntime.prompt') as completed:
+            result=self.call('tell','L1','--message-file',str(message),'--expected-owner',actor['owner'],
+                             '--accept-only','--delivery-id','a'*32)
+        accepted.assert_called_once();completed.assert_not_called()
+        self.assertEqual(result['state'],'running')
+        self.assertEqual(result['delivery']['delivery_id'],'a'*32)
+        saved=self.call('show','L1')
+        self.assertEqual(saved['runtime']['last_delivery']['delivery_id'],'a'*32)
+        self.assertEqual(saved['runtime']['last_delivery']['owner'],actor['owner'])
+
+    def test_accepted_delivery_retry_is_idempotent_while_work_is_running(self):
+        actor=self.dispatched();message=self.root/'same.txt';message.write_text('Do only once.')
+        receipt={'accepted':True,'terminal':actor['runtime']['terminal'],'native_pid':actor['runtime']['native_pid'],'turn_baseline':1}
+        with patch('teamkit.core_runtime.CoreRuntime.accept',return_value=receipt) as accepted:
+            first=self.call('tell','L1','--message-file',str(message),'--accept-only','--delivery-id','b'*32)
+            self.fake.rows[actor['runtime']['terminal']]['status']['state']='working'
+            second=self.call('tell','L1','--message-file',str(message),'--accept-only','--delivery-id','b'*32)
+        self.assertEqual(accepted.call_count,1)
+        self.assertEqual(first['delivery'],second['delivery'])
+        self.assertEqual(second['state'],'running')
+
+    def test_unknown_acceptance_retry_preserves_intent_without_resending(self):
+        actor=self.dispatched();message=self.root/'unknown-accept.txt';message.write_text('Preserve unknown delivery.')
+        with patch('teamkit.core_runtime.CoreRuntime.accept',side_effect=TimeoutError) as accepted:
+            with self.assertRaises(TimeoutError):
+                self.call('tell','L1','--message-file',str(message),'--accept-only','--delivery-id','c'*32)
+            with self.assertRaises(ValueError):
+                self.call('tell','L1','--message-file',str(message),'--accept-only','--delivery-id','c'*32)
+        self.assertEqual(accepted.call_count,1)
+        saved=self.call('show','L1')
+        self.assertEqual(saved['runtime']['last_delivery']['phase'],'sending')
+        self.assertEqual(saved['owner'],actor['owner'])
+
+    def test_cached_acceptance_does_not_bless_replaced_native_process(self):
+        actor=self.dispatched();message=self.root/'replaced.txt';message.write_text('Keep original native identity.')
+        receipt={'accepted':True,'terminal':actor['runtime']['terminal'],'native_pid':actor['runtime']['native_pid'],'turn_baseline':1}
+        with patch('teamkit.core_runtime.CoreRuntime.accept',return_value=receipt):
+            self.call('tell','L1','--message-file',str(message),'--accept-only','--delivery-id','d'*32)
+        self.fake.rows[actor['runtime']['terminal']]['foreground']['pid']+=1
+        from teamkit.runtime import RuntimeError as KitError
+        with self.assertRaises(KitError):
+            self.call('tell','L1','--message-file',str(message),'--accept-only','--delivery-id','d'*32)
+
+    def test_delivery_id_does_not_allow_different_message_content(self):
+        actor=self.dispatched();message=self.root/'immutable.txt';message.write_text('Original scope.')
+        receipt={'accepted':True,'terminal':actor['runtime']['terminal'],'native_pid':actor['runtime']['native_pid'],'turn_baseline':1}
+        with patch('teamkit.core_runtime.CoreRuntime.accept',return_value=receipt) as accepted:
+            self.call('tell','L1','--message-file',str(message),'--accept-only','--delivery-id','e'*32)
+            message.write_text('Different scope.')
+            with self.assertRaises(ValueError):
+                self.call('tell','L1','--message-file',str(message),'--accept-only','--delivery-id','e'*32)
+        self.assertEqual(accepted.call_count,1)
+
+    def accepted_job(self, requirements=None):
+        actor=self.dispatched();message=self.root/'submitted-work.txt';message.write_text('Write the bounded investigation report.')
+        extra=None
+        if requirements:
+            extra=self.root/'requirements.txt';extra.write_text(requirements)
+        job=control.enqueue(self.config,self.state,'alpha',message,work_id='REPORT',completion_file=extra)
+        with patch.object(context,'capacity_available',return_value=True),patch.object(control,'official',return_value=actor):
+            control.advance(self.config,self.state,job['id'])
+        saved=control.requests(self.state)[0]
+        receipt={'phase':'accepted','accepted':True,'delivery_id':saved['delivery_id'],
+                 'message_sha256':saved['delivery_message_sha256'],'owner':actor['owner'],
+                 'attempt':actor['attempt_count'],'terminal':actor['runtime']['terminal'],
+                 'native_pid':actor['runtime']['native_pid']}
+        with StoreContext(self.state) as store:
+            task=store.get('L1');task['runtime']['last_delivery']=receipt;store._save(task,'fixture_accepted')
+        artifact=self.root/'report.md';artifact.write_text('Investigation result and its limits.\n')
+        import hashlib
+        evidence=self.root/'result.json'
+        evidence.write_text(json.dumps({'request_id':saved['id'],'work_id':saved['work_id'],
+            'owner':actor['owner'],'attempt':actor['attempt_count'],'delivery_id':saved['delivery_id'],
+            'writer_stopped':True,'verification':['Checked the report against the bounded inputs.'],
+            'artifacts':[{'path':str(artifact),'sha256':hashlib.sha256(artifact.read_bytes()).hexdigest()}],
+            **({'completion_requirements':requirements} if requirements else {})}))
+        return actor,saved,evidence
+
+    def submit_result(self,actor,job,evidence):
+        with patch.dict(os.environ,{'HC_TERMINAL_ID':actor['runtime']['terminal']}):
+            return control.submit(self.config,self.state,job['id'],evidence,actor['owner'],actor['attempt_count'],job['delivery_id'])
+
+    def test_exact_accepted_receipt_recovers_new_uncertain_transport_without_send(self):
+        actor,job,evidence=self.accepted_job()
+        path=control.folder(self.state)/(job['id']+'.json');saved=context.read(path)
+        saved['phase']='uncertain';context.write(path,saved)
+        with patch.object(control,'official') as sent:
+            control.reconcile(self.config,self.state,job['id'])
+        sent.assert_not_called();self.assertEqual(context.read(path)['phase'],'received')
+
+    def test_receipt_recovery_rejects_wrong_delivery_and_legacy_unknown(self):
+        actor,job,evidence=self.accepted_job();path=control.folder(self.state)/(job['id']+'.json')
+        for delivery_id in ('f'*32,None):
+            saved=context.read(path);saved['phase']='uncertain'
+            if delivery_id is None:saved.pop('delivery_id',None)
+            else:saved['delivery_id']=delivery_id
+            context.write(path,saved);before=path.read_bytes()
+            control.reconcile(self.config,self.state,job['id'])
+            self.assertEqual(path.read_bytes(),before)
+
+    def test_submission_is_candidate_until_reconcile_and_releases_next_work(self):
+        actor,job,evidence=self.accepted_job()
+        self.submit_result(actor,job,evidence)
+        self.assertEqual(control.requests(self.state)[0]['phase'],'received')
+        control.reconcile(self.config,self.state,job['id'])
+        self.assertEqual(control.requests(self.state)[0]['phase'],'completed')
+        message=self.root/'next.txt';message.write_text('Next approved investigation.')
+        second=control.enqueue(self.config,self.state,'alpha',message,work_id='NEXT')
+        with patch.object(context,'capacity_available',return_value=True),patch.object(control,'official',return_value=actor) as sent:
+            control.advance(self.config,self.state,second['id'])
+        self.assertEqual(sent.call_count,1)
+
+    def test_changed_submitted_evidence_or_artifact_never_completes_work(self):
+        actor,job,evidence=self.accepted_job();self.submit_result(actor,job,evidence)
+        original=evidence.read_bytes();evidence.write_text('{}')
+        control.reconcile(self.config,self.state,job['id'])
+        self.assertEqual(control.requests(self.state)[0]['phase'],'received')
+        evidence.write_bytes(original);(self.root/'report.md').write_text('Changed after submission.')
+        control.reconcile(self.config,self.state,job['id'])
+        self.assertEqual(control.requests(self.state)[0]['phase'],'received')
+
+    def test_additional_plain_text_conditions_remain_pending_after_submission(self):
+        actor,job,evidence=self.accepted_job('Independent device behavior must be checked.')
+        self.submit_result(actor,job,evidence);control.reconcile(self.config,self.state,job['id'])
+        saved=control.requests(self.state)[0]
+        self.assertEqual(saved['phase'],'received')
+        self.assertIn('추가 완료 조건',saved['reason'])
+
+    def test_submission_rejects_stale_delivery_and_self_review_flag_without_artifacts(self):
+        actor,job,evidence=self.accepted_job();value=json.loads(evidence.read_text())
+        value['delivery_id']='e'*32;evidence.write_text(json.dumps(value))
+        with self.assertRaises(ValueError):self.submit_result(actor,job,evidence)
+        value['delivery_id']=job['delivery_id'];value.pop('artifacts');value['review_passed']=True
+        evidence.write_text(json.dumps(value))
+        with self.assertRaises(ValueError):self.submit_result(actor,job,evidence)
+
+    def test_submitted_result_cannot_complete_on_a_replaced_process(self):
+        actor,job,evidence=self.accepted_job();self.submit_result(actor,job,evidence)
+        with StoreContext(self.state) as store:
+            task=store.get('L1');task['runtime']['native_pid']+=1
+            store._save(task,'fixture_replaced')
+        self.fake.rows[actor['runtime']['terminal']]['foreground']['pid']+=1
+        control.reconcile(self.config,self.state,job['id'])
+        self.assertEqual(control.requests(self.state)[0]['phase'],'received')
+
+    def test_wrong_native_receipt_owner_cannot_submit_a_result(self):
+        actor,job,evidence=self.accepted_job()
+        with StoreContext(self.state) as store:
+            task=store.get('L1');task['runtime']['last_delivery']['owner']='another-owner'
+            store._save(task,'fixture_receipt_owner_changed')
+        with self.assertRaises(ValueError):self.submit_result(actor,job,evidence)
+
+    def test_submit_cli_exposes_exact_execution_identity(self):
+        from teamkit.__main__ import parser
+        args=parser().parse_args(['pool','submit','--request','a'*32,'--evidence-file','result.json',
+            '--expected-owner','owner','--expected-attempt','2','--delivery-id','b'*32])
+        self.assertEqual(args.action,'submit');self.assertEqual(args.delivery_id,'b'*32)
+
+    def test_submit_cli_routes_the_actual_candidate_and_reconciliation(self):
+        actor,job,evidence=self.accepted_job()
+        with patch.dict(os.environ,{'HC_TERMINAL_ID':actor['runtime']['terminal']}):
+            result=self.call('pool','submit','--request',job['id'],'--evidence-file',str(evidence),
+                '--expected-owner',actor['owner'],'--expected-attempt',str(actor['attempt_count']),
+                '--delivery-id',job['delivery_id'])
+        self.assertEqual(result['phase'],'received');self.assertIn('submission',result)
+        control.reconcile(self.config,self.state,job['id'])
+        self.assertEqual(control.requests(self.state)[0]['phase'],'completed')
 
 
     def test_work_id_conflicting_content_is_preserved_not_overwritten(self):

@@ -184,6 +184,12 @@ def run_job(request):
         finally:store.close()
         if current!=account:
             raise ValueError('총괄 구독 한도가 신원 확인 중 바뀌었습니다. 갱신 후 다시 확인하세요.')
+        from . import admission
+        resource_attempt = admission.reserve_external(state, 'coordinator:' + packet['nonce'],
+                                                      'GUI-COORDINATOR', 'codex/' + account, config)
+        if resource_attempt:
+            record['resource_attempt'] = resource_attempt
+            save(record_path(state), record)
         # Creation may succeed even when its response is lost. Persist uncertainty
         # before crossing the native boundary so a retry cannot duplicate it.
         launched=True
@@ -197,6 +203,8 @@ def run_job(request):
         runtime={'backend':'core','name':name,'terminal':record['terminal'],'native_pid':pid}
         actor=CoreRuntime({'id':'GUI-COORDINATOR','owner':packet['nonce'],'provider':'codex','runtime':runtime})
         actor._native(name,ready=True)
+        admission.bind_external(state, resource_attempt, dict(terminal=record['terminal'], pid=pid,
+                                                            owner=packet['nonce']))
         record['native_pid']=pid
         save(record_path(state),record)
         for command,values in [('space.rename',{'id':sp,'name':'GUI 총괄'}),('tab.rename',{'id':tab,'name':'총괄'})]:
@@ -222,6 +230,7 @@ def run_job(request):
             import shlex
             prompt += ' 먼저 실제 세션 식별자를 등록하세요: '+shlex.join(context_cli(packet['config'],state,'auto-context','register'))
         actor.prompt(name,prompt)
+        admission.release_external(state, resource_attempt, writer_stopped=True)
         record.update(phase='ready',native_pid=pid,reason='GUI 체크포인트에서 새 총괄 대화를 열었습니다. 제품 업무는 자동 재개하지 않았습니다.')
         save(record_path(state),record);save(Path(request).with_name('result.json'),{'terminal':record['terminal'],'phase':'ready'})
     except BaseException as error:

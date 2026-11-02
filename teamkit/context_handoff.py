@@ -733,6 +733,14 @@ def tick(config_path, state, pool=None, futures=None):
             if future.done():
                 future.result()
                 del futures[nonce]
+    from . import operations, admission
+    if operations.enabled(config):
+        admission.configure(state, operations.policy(config))
+        admission.reconcile_stopped(state)
+        if pool is None:
+            operations.tick(config_path, state)
+        elif 'operation-tickets' not in futures:
+            futures['operation-tickets'] = pool.submit(operations.tick, config_path, state)
     for target in targets(config, state):
         try:
             native(target, state)
@@ -758,8 +766,9 @@ def tick(config_path, state, pool=None, futures=None):
     if session_pool.enabled(config):
         from . import pool_control
         for assignment in pool_control.requests(state):
-            if assignment['phase'] in ('completed','deferred','uncertain','cancelled'):continue
-            operation=pool_control.reconcile if assignment['phase'] in ('done','received') else pool_control.advance
+            recoverable = bool(assignment.get('delivery_id')) and assignment['phase'] in ('sending','uncertain')
+            if assignment['phase'] in ('completed','deferred','cancelled') or assignment['phase']=='uncertain' and not recoverable:continue
+            operation=pool_control.reconcile if assignment['phase'] in ('done','received') or recoverable else pool_control.advance
             key='assignment-'+assignment['id']
             if pool is None:operation(config_path,state,assignment['id'])
             elif key not in futures:futures[key]=pool.submit(operation,config_path,state,assignment['id'])
@@ -779,7 +788,16 @@ def serve(config_path, state, once=False):
     fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        with ThreadPoolExecutor(max_workers=2) as pool:
+        from .wake import listener, wait
+        if source_fingerprint()!=LOADED_SOURCE_FINGERPRINT:
+            write(directory(state)/'supervisor.json', {'observed_at':time.time(), 'pid':os.getpid(),
+                  'enabled':False, 'reload_required':True, 'terminal':os.environ.get('HC_TERMINAL_ID'),
+                  'source_fingerprint':LOADED_SOURCE_FINGERPRINT})
+            return {'enabled':False, 'reload_required':True}
+        workers = load(config_path).get('operations', {}).get('consumer_workers', 2)
+        if type(workers) is not int or not 2 <= workers <= 16:
+            raise ValueError('consumer_workers must be an integer in 2..16')
+        with listener(state) as wake, ThreadPoolExecutor(max_workers=workers) as pool:
             futures={}
             while True:
                 if source_fingerprint()!=LOADED_SOURCE_FINGERPRINT:
@@ -790,7 +808,7 @@ def serve(config_path, state, once=False):
                 write(directory(state) / 'supervisor.json', {'observed_at':time.time(), 'pid':os.getpid(), 'enabled':value['enabled'], 'terminal':os.environ.get('HC_TERMINAL_ID'), 'source_fingerprint':LOADED_SOURCE_FINGERPRINT})
                 if once:
                     return value
-                time.sleep(settings(load(config_path))['interval'])
+                wait(wake, min(5, settings(load(config_path))['interval']))
     finally:
         os.close(fd)
 
@@ -889,9 +907,32 @@ def summary(config, state):
     return {'enabled':True,'healthy':healthy,'label':'자동 인계 · 90%' if healthy else '자동 인계 · 감시 확인 필요','active':active}
 
 
-def capacity_available(state, target=None, current_job=None):
+def capacity_available(state, target=None, current_job=None, config=None):
     store=Store(state)
-    try:tasks=store.list()
+    try:
+        tasks=store.list()
+        from . import admission
+        enabled, policy = admission.policy_for(config, store.db)
+        if enabled:
+            try:
+                observation = admission.observe_native()
+                snapshot = admission.snapshot(store.db, config, observation)
+                included = False
+                if target:
+                    runtime = next((t.get('runtime', {}) for t in tasks if t['id'] == target.get('id')), {})
+                    attempt = runtime.get('resource_attempt')
+                    if target.get('kind') == 'coordinator':
+                        from .app_coordinator import read_record
+                        attempt = read_record(state).get('resource_attempt')
+                    from .resources import ResourceLedger
+                    included = any(r['attempt'] == attempt and r['execution_reserved']
+                                   for r in ResourceLedger._rows(store.db))
+                    included |= any(r.get('terminal') == target.get('terminal')
+                                    and r.get('status') not in ('idle', 'done', 'blocked', 'finished')
+                                    for r in observation['terminals'])
+                return snapshot['used'] <= policy['global_limit'] if included else snapshot['available'] > 0
+            except Exception:
+                return False
     finally:store.close()
     aliases={t.get('runtime',{}).get('terminal'):'task:'+t['id'] for t in tasks}
     from .app_coordinator import read_record
