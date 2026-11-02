@@ -46,6 +46,7 @@ class CoordinatorPolicyTests(unittest.TestCase):
         self.draft = False
         self.incomplete = False
         self.ack_started = False
+        self.send_timeout = False
         self.freeze_screen = False
         self.now = 1000
         self.calls = []
@@ -92,6 +93,8 @@ class CoordinatorPolicyTests(unittest.TestCase):
         for key,value in os.environ.items():
             if key!='HC_TERMINAL_ID':self.assertEqual(kwargs['env'].get(key),value)
         self.sent+=1
+        if self.send_timeout:
+            raise subprocess.TimeoutExpired(argv,5)
         return subprocess.CompletedProcess(argv,0,stdout=json.dumps({'started':self.ack_started,'status':'idle','turn':7}))
 
     def context(self,model='gpt-test',effort='medium',at=1001):
@@ -240,6 +243,75 @@ class CoordinatorPolicyTests(unittest.TestCase):
         self.ack_started=False
         with self.assertRaises(ValueError):self.ready()
         self.assertEqual(self.sent,1)
+
+    def test_local_status_ack_timeout_can_verify_only_its_fresh_policy_output(self):
+        self.send_timeout=True
+        proof=self.ready()[3]['_coordinator_policy']
+        self.assertEqual(proof['mode'],'resumed-status')
+        self.assertEqual(self.sent,1)
+        cache=json.loads(policy._path(self.state).read_text())
+        self.assertEqual(cache['phase'],'verified')
+        self.assertEqual(cache['transport'],'local_command_ack_timeout')
+        self.assertEqual(self.native['turn'],7)
+
+    def test_local_status_ack_timeout_without_fresh_output_stays_unknown_without_retry(self):
+        self.sent=1;self.freeze_screen=True;self.send_timeout=True
+        with patch.object(policy.time,'sleep'):
+            with self.assertRaises(ValueError):self.ready()
+        self.assertEqual(self.sent,2)
+        cache=json.loads(policy._path(self.state).read_text())
+        self.assertEqual(cache['phase'],'uncertain')
+        self.assertEqual(cache['transport'],'local_command_ack_timeout')
+        self.send_timeout=False
+        with self.assertRaises(ValueError):self.ready()
+        self.assertEqual(self.sent,2)
+
+    def test_local_status_ack_timeout_never_bypasses_policy_or_same_turn_checks(self):
+        self.send_timeout=True
+        self.status=self.status.replace('test@example.invalid','other@example.invalid')
+        with self.assertRaises(ValueError):self.ready()
+        self.assertEqual(json.loads(policy._path(self.state).read_text())['phase'],'uncertain')
+
+    def timeout_with_native_change(self, change):
+        self.send_timeout=True;original=self.process
+        def process(argv,**kwargs):
+            try:
+                return original(argv,**kwargs)
+            except subprocess.TimeoutExpired:
+                change()
+                raise
+        with patch.object(policy.subprocess,'run',side_effect=process):
+            with self.assertRaises((ValueError,intake_dispatch.NativeError)):self.ready()
+        self.assertEqual(self.sent,1)
+        self.assertEqual(json.loads(policy._path(self.state).read_text())['phase'],'uncertain')
+
+    def test_local_status_timeout_with_changed_native_turn_stays_unknown(self):
+        self.timeout_with_native_change(lambda:self.native.update(turn=8))
+
+    def test_local_status_timeout_with_changed_native_owner_stays_unknown(self):
+        self.timeout_with_native_change(lambda:self.native['labels'].update({'teamkit.owner':'replacement'}))
+
+    def test_invalid_ack_cannot_be_replaced_by_fresh_policy_output(self):
+        original=self.process
+        def invalid(argv,**kwargs):
+            result=original(argv,**kwargs)
+            if argv[0]=='hc':result.stdout='[]'
+            return result
+        with patch.object(policy.subprocess,'run',side_effect=invalid):
+            with self.assertRaises(ValueError):self.ready()
+        self.assertEqual(self.sent,1)
+        self.assertEqual(json.loads(policy._path(self.state).read_text())['phase'],'uncertain')
+
+    def test_other_command_failure_cannot_be_reconciled_from_fresh_output(self):
+        original=self.process
+        def failed(argv,**kwargs):
+            result=original(argv,**kwargs)
+            if argv[0]=='hc':raise subprocess.CalledProcessError(1,argv)
+            return result
+        with patch.object(policy.subprocess,'run',side_effect=failed):
+            with self.assertRaises(ValueError):self.ready()
+        self.assertEqual(self.sent,1)
+        self.assertEqual(json.loads(policy._path(self.state).read_text())['phase'],'uncertain')
 
     def test_unchanged_old_status_screen_is_not_reused_as_fresh_evidence(self):
         self.sent=1;self.freeze_screen=True

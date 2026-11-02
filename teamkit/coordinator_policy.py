@@ -218,8 +218,11 @@ def _write(path, value):
 
 
 def _cache_shape(cached):
+    fields = {'schema', 'phase', 'basis', 'cid', 'observed_at', 'controller', 'journal'}
     return (isinstance(cached, dict)
-            and set(cached) == {'schema', 'phase', 'basis', 'cid', 'observed_at', 'controller', 'journal'}
+            and set(cached) in (fields, fields | {'transport'})
+            and ('transport' not in cached or cached['transport'] in
+                 ('acknowledged_no_model_turn', 'local_command_ack_timeout'))
             and cached['schema'] == CACHE_SCHEMA and cached['phase'] in ('verified', 'intent', 'uncertain')
             and isinstance(cached['basis'], dict) and cached['cid'] == digest(cached['basis'])
             and type(cached['observed_at']) in (int, float) and math.isfinite(cached['observed_at'])
@@ -295,12 +298,20 @@ def _observe(config, state, record, pr, actor, native, name):
             env.pop('HC_TERMINAL_ID', None)
             # Fixed whitelist: no public raw-send/text parameter exists.
             condition = ['--if', 'idle'] if after['status']['state'] == 'idle' else []
-            sent = subprocess.run(['hc', 'send', '--json', *condition, record['terminal'], '/status'],
-                                  env=env, capture_output=True, text=True, timeout=5, check=True)
-            ack = json.loads(sent.stdout)
-            if (ack.get('started') is not False or ack.get('status') not in ('idle', 'done')
-                    or ack.get('turn') != native.get('turn')):
-                raise ValueError('native status may have started a model turn; preserve and inspect')
+            try:
+                sent = subprocess.run(['hc', 'send', '--json', *condition, record['terminal'], '/status'],
+                                      env=env, capture_output=True, text=True, timeout=5, check=True)
+            except subprocess.TimeoutExpired:
+                # The local command can finish without a model-turn ACK. Keep
+                # the exact original baseline and inspect only that send's
+                # output below; never infer ACK success or send a second time.
+                value['transport'] = 'local_command_ack_timeout'
+            else:
+                ack = json.loads(sent.stdout)
+                if (not isinstance(ack, dict) or ack.get('started') is not False
+                        or ack.get('status') not in ('idle', 'done') or ack.get('turn') != native.get('turn')):
+                    raise ValueError('native status may have started a model turn; preserve and inspect')
+                value['transport'] = 'acknowledged_no_model_turn'
             observed = None
             for _ in range(10):
                 try:
