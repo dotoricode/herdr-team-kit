@@ -1021,7 +1021,7 @@ export default class TeamOperations extends View {
       const visible = definition.id === "complete" && !this.showCompleted && !this.showArchived ? [] : cards;
       return v_flex().id(`kanban-${definition.id}`).min_w(0).gap(10).p(8).rounded(8).bg(t.chrome)
         .when(narrow, el => el.w_full().flex_none())
-        .when(!narrow, el => el.h_full().min_h(0).when(cards.length === 0, x => x.w(155).flex_none()).when(cards.length > 0, x => x.flex_1()))
+        .when(!narrow, el => el.h_full().min_h(0).when(visible.length === 0, x => x.w(165).flex_none()).when(visible.length > 0, x => x.flex_1()))
         .child(h_flex().flex_none().items_center().justify_between().gap(6)
           .child(h_flex().items_center().gap(6).child(div().w(7).h(7).rounded_full().bg(definition.color)).child(div().whitespace_nowrap().font_semibold().text_size(13).child(definition.title)).child(badge(String(cards.length),cards.length ? definition.color : t.muted)))
           .when(definition.id === "complete" && cards.length > 0, el => el.child(button("toggle-completed",this.showCompleted ? "접기" : "보기",cx=>{this.showCompleted=!this.showCompleted;cx.notify();}).text_size(11))))
@@ -1074,7 +1074,7 @@ export default class TeamOperations extends View {
     // No horizontal scroll: columns share the window width (min_w 0) or stack vertically when it is narrow.
     const board = (narrow ? v_flex().id("operations-kanban").w_full().flex_none().gap(8) : h_flex().id("operations-kanban").w_full().min_w(0).h(Math.max(220, (this.viewHeight ?? 700) - (this.headerHeight ?? 48) - (this.controlsHeight ?? 150) - (this.accountHeight ?? 40) - 28)).flex_none().min_h(0).items_stretch().gap(8))
       .children(boardColumns.map(column));
-    const accountArea = v_flex().id("account-area").on_size_change((size,cx)=>{ const h=Math.ceil(size.height); if(this.accountHeight!==h){this.accountHeight=h;cx.notify();} }).w_full().max_h(250).flex_none().min_h(0).gap(6).overflow_y_scrollbar()
+    const accountArea = v_flex().id("account-area").on_size_change((size,cx)=>{ const h=Math.ceil(size.height); if(this.accountHeight!==h){this.accountHeight=h;cx.notify();} }).w_full().h(this.showAccounts ? 250 : 40).flex_none().min_h(0).gap(6).overflow_y_scrollbar()
       .child(h_flex().flex_none().justify_between().items_center()
         .child(button("toggle-accounts", this.showAccounts ? "계정 사용량 접기" : "계정 사용량 보기", cx => { this.showAccounts = !this.showAccounts; cx.notify(); }))
         .child(h_flex().flex_1().min_w(0).gap(10).px(12).text_size(10)
