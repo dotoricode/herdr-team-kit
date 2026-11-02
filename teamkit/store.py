@@ -67,6 +67,15 @@ class Store:
         except BaseException:
             self.db.execute('ROLLBACK')
             raise
+        self._notify()
+
+    def _notify(self):
+        # Wakeups are hints. A failed hint must not undo a committed ledger.
+        try:
+            from .wake import notify
+            notify(self.path)
+        except Exception:
+            pass
 
     def get(self, task):
         row = self.db.execute('SELECT body FROM tasks WHERE id=?', (task,)).fetchone()
@@ -290,5 +299,7 @@ class Store:
     def quota(self, profile, value=None):
         if value is not None:
             self.db.execute('INSERT OR REPLACE INTO quotas VALUES (?,?)', (profile, json.dumps(value)))
+            if not self.db.in_transaction:
+                self._notify()
         row = self.db.execute('SELECT body FROM quotas WHERE profile=?', (profile,)).fetchone()
         return json.loads(row[0]) if row else None
