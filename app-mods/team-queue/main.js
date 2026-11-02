@@ -10,6 +10,7 @@ const GROUPS = [
 const provider = x => ({ codex: "Codex", claude: "Claude" })[x] ?? "미확인";
 const account = x => ({ personal: "개인", team: "회사" })[x] ?? "계정 미확인";
 const clock = x => x == null ? "—" : new Date(x * 1000).toLocaleString();
+const percent = x => x == null ? "미제공" : typeof x === "number" && Number.isFinite(x) ? String(x)+"%" : "미확인";
 const clean = x => String(x ?? "").replaceAll("장부", "작업 기록");
 const categoryColor = (category, t) => ({ attention: t.blocked, waiting: t.idle, progress: t.working, history: t.muted })[category] ?? t.muted;
 // Each word is its own unbroken native text item; long paths wrap only at separators.
@@ -77,6 +78,8 @@ export default class TeamQueue extends View {
       if(!item) return shell.p(18).gap(10).child(words("요청 정보를 찾을 수 없습니다")).child(button("queue-detail-close","닫기",()=>closeOverlay(this.options.overlay),t));
       const current=terminals().find(x => x.address === item.current_terminal);
       const nativeState=current?.status?.state ?? current?.status ?? null;
+      const isWorking=item.phase==="running" && item.verified_working === true && item.receiver_matches_current === true && nativeState==="working";
+      const displayState=isWorking ? "진행 중" : item.phase==="running" ? "결과 제출 대기" : item.phase==="received" ? "입력 전달 확인 · 실행 수신 대기" : item.state_label;
       const nativeLabel = typeof nativeState === "string" ? ({working:"응답 중",done:"새 응답 있음",idle:"대기",blocked:"입력 필요"}[nativeState] ?? nativeState) : "앱 상태 미확인";
       const linkedSession=item.current_terminal ? `${account(item.account)} ${provider(item.provider)} · ${nativeLabel}` : "현재 실행자 미배정";
       const pair=(label,value) => v_flex().min_w(0).gap(4).child(div().text_size(11).text_color(t.muted).child(label)).child(words(value).line_height("20px"));
@@ -86,7 +89,7 @@ export default class TeamQueue extends View {
           .child(h_flex().min_w(0).items_start().gap(12)
             .child(words(item.title).flex_1().text_size(19).font_semibold().line_height("25px"))
             .child(button("queue-detail-close","닫기",()=>closeOverlay(this.options.overlay),t)))
-          .child(h_flex().flex_wrap().items_center().gap(7).child(badge(item.team_label,t.foreground,t)).child(badge(item.state_label,categoryColor(item.category,t),t)))
+          .child(h_flex().flex_wrap().items_center().gap(7).child(badge(item.team_label,t.foreground,t)).child(badge(displayState,categoryColor(item.category,t),t)))
           .when(Boolean(this.failure),el => el.child(fail())))
         .child(v_flex().id("queue-detail-body").flex_1().min_h(0).min_w(0).overflow_y_scrollbar().p(18).gap(20)
           .when(Boolean(item.reason),el => el.child(section("진행 상태",words(item.reason).text_color(item.category === "attention" ? t.blocked : t.foreground).line_height("21px"))))
@@ -105,6 +108,7 @@ export default class TeamQueue extends View {
             .when(Boolean(item.evidence_file),el=>el.child(pair("수신 확인 근거",item.evidence_file)))
             .when(Boolean(item.superseded_by),el=>el.child(pair("이어지는 요청",item.superseded_by)))
             .when(Boolean(item.technical_reason) && item.technical_reason !== item.reason,el=>el.child(pair("원 기록의 대기 이유",item.technical_reason)))
+            .when(Boolean(item.technical_next_action) && item.technical_next_action !== item.next_action,el=>el.child(pair("원 기록의 다음 행동",item.technical_next_action)))
             .child(pair("원 요청 기록",item.source_file)).child(pair("요청 ID",item.id)))));
     }
     const data=this.data;
@@ -113,8 +117,8 @@ export default class TeamQueue extends View {
     const nativeTerminals=terminals();
     const terminalFor=address=>nativeTerminals.find(x=>x.address===address);
     const nativeState=terminal=>terminal?.status?.state ?? terminal?.status ?? "unknown";
-    const verifiedWorking=item=>["received","running"].includes(item.phase) && !item.completion_intent && !item.work_completion_confirmed && item.receiver_matches_current === true && nativeState(terminalFor(item.receiver_terminal))==="working";
-    const itemState=item=>item.requires_user_decision ? "답변 대기" : item.work_completion_confirmed ? "업무 완료" : item.completion_intent ? "결과 확인 중" : verifiedWorking(item) ? "진행 중" : item.phase==="received" ? "맡은 지시" : ["uncertain","waiting_handoff"].includes(item.phase) ? "담당 연결 대기" : item.state_label;
+    const verifiedWorking=item=>item.phase==="running" && item.verified_working === true && !item.completion_intent && !item.work_completion_confirmed && item.receiver_matches_current === true && nativeState(terminalFor(item.receiver_terminal))==="working";
+    const itemState=item=>item.work_completion_confirmed ? "업무 완료" : verifiedWorking(item) ? "진행 중" : item.phase==="running" ? "결과 제출 대기" : item.phase==="received" ? "입력 전달 확인 · 실행 수신 대기" : item.state_label;
     const itemColor=item=>item.requires_user_decision ? t.blocked : verifiedWorking(item) ? t.working : item.phase==="received" ? t.muted : item.category==="attention" ? t.ansi3 : categoryColor(item.category,t);
     const results=allJobs.filter(x=>x.work_completion_confirmed || x.history_kind==="deferred");
     const counts={next:allJobs.filter(x=>["queued","pending"].includes(x.phase)).length,
@@ -131,7 +135,8 @@ export default class TeamQueue extends View {
         .child(div().whitespace_nowrap().child(item.team_label))
         .child(div().whitespace_nowrap().child(item.current_terminal ? account(item.account)+" "+provider(item.provider) : "실행자 연결 대기"))
         .child(div().whitespace_nowrap().child(clock(item.created_at)))))
-      .when(!compact && Boolean(item.reason),el=>el.child(words(item.reason).text_size(12).line_height("19px").text_color(t.muted)));
+      .when(!compact && Boolean(item.reason),el=>el.child(words(item.reason).text_size(12).line_height("19px").text_color(t.muted)))
+      .when(Boolean(item.next_action),el=>el.child(words("다음 행동: "+item.next_action).text_size(11).line_height("19px").text_color(t.muted)));
     const empty=(title,body)=>v_flex().min_w(0).p(10).gap(4).child(div().text_size(12).text_color(t.muted).child(title)).when(Boolean(body),el=>el.child(words(body).text_size(11).text_color(t.dim)));
     const lane=definition=>{
       const laneJobs=jobs.filter(x=>x.team===definition.team);
@@ -184,7 +189,7 @@ export default class TeamQueue extends View {
         .child(h_flex().flex_wrap().gap(8).children(Object.entries(data.profiles??{}).map(([key,value])=>{
           const [p,a]=key.split("/"); return v_flex().gap(3).px(8).py(5).border_1().border_color(t.border)
             .child(div().text_size(11).child(account(a)+" "+provider(p)+" · "+(value.eligible?"배정 가능":"사용량 확인·회복 대기")))
-            .child(div().text_size(11).text_color(t.muted).child("5h "+String(value.five_hour?.used??"미제공")+" · 주간 "+String(value.weekly?.used??"미제공")))
+            .child(div().text_size(11).text_color(t.muted).child("5h "+percent(value.five_hour?.used)+" · 주간 "+percent(value.weekly?.used)))
             .child(div().text_size(10).text_color(t.dim).child("관측 "+clock(value.observed_at)));
         })))))
       .child(v_flex().id("queue-content").flex_1().min_h(0).min_w(0).overflow_y_scrollbar().p(16).gap(10)
