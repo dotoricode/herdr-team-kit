@@ -21,7 +21,7 @@ from .resources import ResourceLedger
 from .routing import execution_candidates, execution_policy
 from .runtime import RuntimeError as NativeError, launch_spec
 from .store import Store
-from .tickets import TicketStore, digest, within
+from .tickets import TicketStore, digest, within, execution_resources
 
 
 DEFAULT_ROLES = {'leader': 'leader', 'investigator': 'leader',
@@ -167,6 +167,10 @@ def _fence(store, ticket, attempt):
             or current['executor']['owner'] != attempt['executor']['owner']
             or _ticket_signature(item) != attempt['executor']['ticket_signature']):
         raise ValueError('worker attempt, owner, ticket or approval scope changed')
+    lease=next((r for r in ResourceLedger._rows(store.db) if r['attempt']==attempt['id']),{})
+    if (not lease.get('execution_reserved') or not lease.get('writes_held')
+            or lease.get('resources')!=execution_resources(item)):
+        raise ValueError('worker resource reservation differs from the host execution contract')
     return item, current
 
 
@@ -243,7 +247,9 @@ def launch(config_path, state, ticket, attempt):
             if not ticket_scoped_department:
                 check_task(config, store, staged)
             reservation = next((r for r in ResourceLedger._rows(store.db) if r['attempt'] == attempt['id']), None)
-            if (not reservation or not reservation['execution_reserved'] or reservation['ticket'] != item['id']
+            if (not reservation or not reservation['execution_reserved'] or not reservation['writes_held']
+                    or reservation['ticket'] != item['id']
+                    or reservation['resources']!=execution_resources(item)
                     or reservation['profile'] != executor['provider'] + '/' + executor['account']
                     or reservation.get('session') is not None):
                 raise ValueError('worker has no matching unbound execution reservation')

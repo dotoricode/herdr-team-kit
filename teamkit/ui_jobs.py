@@ -18,7 +18,7 @@ from .prompt_state import empty_input
 from .resources import ResourceLedger
 from .runtime import RuntimeError as NativeError
 from .store import Store
-from .tickets import TicketStore, digest, file_digest, strings, within
+from .tickets import TicketStore, digest, file_digest, strings, within, execution_resources
 
 
 BOUNDARY = ('Only linked UI-lab requests are managed; other UI work and physical screen users remain outside control. '
@@ -159,7 +159,8 @@ def _before_submit(config_path, config_bytes, config, settings, queue, ticket, a
     if not eligible(quota, time.time(), config['quota_ttl_seconds']):
         raise ValueError('UI quota changed after reservation; request not submitted')
     reservation = next((r for r in ResourceLedger._rows(queue.db) if r['attempt'] == attempt['id']), {})
-    if not reservation.get('execution_reserved') or not reservation.get('writes_held'):
+    if (not reservation.get('execution_reserved') or not reservation.get('writes_held')
+            or reservation.get('resources')!=execution_resources(current)):
         raise ValueError('UI execution/screen reservation changed before submission')
 
 

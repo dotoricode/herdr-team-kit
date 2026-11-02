@@ -55,6 +55,25 @@ def strings(value, name, nonempty=True):
     return value
 
 
+def _resource_contract(ticket):
+    """Derived exclusion locks restrict concurrency; they grant no file access."""
+    from .resources import normalize_resources
+    constraints=[]
+    reference=ticket.get('workflow_ref')
+    if reference:
+        root=reference.get('root') if isinstance(reference,dict) else None
+        if not isinstance(root,str) or not Path(root).is_absolute():
+            raise ValueError('workflow resource constraint requires an absolute pinned root')
+        constraints=[dict(kind='named',name='worktree:'+str(Path(root).resolve()),
+                          mode='write' if 'write' in ticket['scope']['actions'] else 'read')]
+    return constraints,normalize_resources([*ticket['resources'],*constraints])
+
+
+def execution_resources(ticket):
+    """The host's single lease calculation, separate from declared permissions."""
+    return _resource_contract(ticket)[1]
+
+
 class TicketStore:
     def __init__(self, state, clock=time.time, *, read_only=False):
         self.path = Path(state)
@@ -108,6 +127,12 @@ class TicketStore:
             raise ValueError('unknown ticket: ' + ident)
         return json.loads(row[0])
 
+    def approval_template(self, ident):
+        item=self.get(ident)
+        contract=self.db.execute('SELECT digest FROM operation_tickets WHERE id=?',(ident,)).fetchone()[0]
+        return {'requires_user_approval':True,'packet':{'ticket':ident,'scope_digest':digest(item['scope']),
+                'contract_digest':contract,'approved_by':'사용자'}}
+
     def list(self):
         if not self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='operation_tickets'").fetchone():
             return []
@@ -135,6 +160,8 @@ class TicketStore:
         if type(user_approved) is not bool:
             raise ValueError('user_approved must be explicit boolean')
         spec = json.loads(json.dumps(spec))
+        if 'resource_constraints' in spec:
+            raise ValueError('resource_constraints are host-derived exclusions, not caller permissions')
         ident = spec.get('id', '')
         if not IDENT.fullmatch(ident) or not isinstance(registration_key, str) or not registration_key:
             raise ValueError('ticket identity and idempotency key required')
@@ -345,10 +372,12 @@ class TicketStore:
             attempt = dict(id=uuid.uuid4().hex, ticket=ident, ordinal=item['attempt_count'] + 1,
                            executor=executor, phase='reserved', created_at=self.clock(),
                            delivery_id=uuid.uuid4().hex, estimated_tokens=estimate)
+            constraints,resources=_resource_contract(item)
+            attempt['resource_constraints']=constraints
             self._continue_own_writes(item, attempt, executor, observation)
             from .admission import reserve_in_transaction
             reserve_in_transaction(self.db, attempt['id'], ident, profile,
-                                   item['resources'], policy, observation,
+                                   resources, policy, observation,
                                    session=None if planned else {k: executor[k] for k in ('terminal', 'pid', 'owner')})
             budget['attempts'] += 1
             budget['tokens_reserved'] += estimate
@@ -491,7 +520,7 @@ class TicketStore:
         return item
 
     def _check_child_lease_release(self, ident, attempt_id, release_writes):
-        from .resources import ResourceLedger, _conflict, normalize_resources
+        from .resources import ResourceLedger, _conflict
         if type(release_writes) is not bool:
             raise ValueError('release_writes must be an explicit boolean')
         if release_writes:
@@ -503,7 +532,7 @@ class TicketStore:
         conflicts = [child for child in self.incomplete_children(ident)
                      if any(_conflict(parent_resource, child_resource)
                             for parent_resource in retained['resources']
-                            for child_resource in normalize_resources(self.get(child)['resources']))]
+                            for child_resource in execution_resources(self.get(child)))]
         if conflicts:
             raise ValueError('부모의 보유 자원이 필수 하위 작업 ' + ', '.join(conflicts)
                              + '와 충돌합니다. 모든 쓰기 중단을 확인한 뒤 wait-children --release-writes로 다시 요청하세요.')
