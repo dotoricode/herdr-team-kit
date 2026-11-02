@@ -635,7 +635,7 @@ export default class TeamOperations extends View {
       this.message = "이 링크는 이 화면에서 열 수 없습니다."; cx.notify();
     };
     // Purpose / task goal read as one continuous Markdown body (headings, lists, code, links), same font as the design.
-    const readable = (id, source) => TextView.markdown(`${id}-${shortHash(source)}`, documentPreview(display(source).replaceAll("장부", "작업 기록"))).selectable(true).scrollable(false)
+    const readable = (id, source) => TextView.markdown(`${id}-${shortHash(source)}`, documentPreview(display(source))).selectable(true).scrollable(false)
       .w_full().min_w(0).max_w(700).flex_none().font_family(this.config?.document_font || "Pretendard").font_normal().text_size(16).line_height("24px").on_link_click(openLink);
     const pair = (a, b, scroll = false) => h_flex().gap(6).items_start()
       .child(div().flex_none().whitespace_nowrap().text_color(t.muted).child(a))

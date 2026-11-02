@@ -18,6 +18,14 @@ def card():
 
 
 class PresentationTests(unittest.TestCase):
+    def test_unavailable_native_observation_never_claims_no_session_is_running(self):
+        for detail in ({'native_error':'관찰 실패'}, {'tasks':[{'current_design':True,'identity_verified':False}]},
+                       {'tasks':[{'current_design':True,'identity_verified':True,'native_state':'unknown'}]}):
+            with self.subTest(detail=detail):
+                shown=presentation(card(),detail)
+                self.assertEqual(shown['current_activity'],'실행 상태 미확인')
+                self.assertNotEqual(shown['column'],'progress')
+
     def test_approval_is_a_user_action_but_operational_attention_is_not(self):
         value=card();self.assertTrue(presentation(value)['decision_required'])
         value.update(status='inspect',status_label='실행 결과 확인 필요',reason='실행 기록을 확인해야 합니다.')
@@ -42,14 +50,15 @@ class PresentationTests(unittest.TestCase):
         for changed in ({'current_design':False},{'identity_verified':False},{'native_state':'done'}):
             with self.subTest(changed=changed):
                 shown=presentation(value,{'tasks':[{**task,**changed}]})
-                self.assertEqual(shown['column'],'waiting');self.assertIn('현재 실행 중인 세션 없음',shown['current_activity'])
+                self.assertEqual(shown['column'],'waiting')
+                self.assertIn('실행 상태 미확인' if changed.get('identity_verified') is False else '확인된 실행 세션 없음',shown['current_activity'])
                 if changed.get('current_design') is False:self.assertEqual(shown['sessions'],[])
                 if changed.get('identity_verified') is False:self.assertFalse(shown['sessions'][0]['can_focus'])
 
     def test_authored_brief_is_not_mistaken_for_a_live_process(self):
         shown=presentation(card(),profile={'summary':'선택한 범위만 화면에 반영합니다.','current_activity':'구현 및 검증'})
         self.assertEqual(shown['summary'],'선택한 범위만 화면에 반영합니다.')
-        self.assertIn('현재 실행 중인 세션 없음',shown['current_activity'])
+        self.assertIn('확인된 실행 세션 없음',shown['current_activity'])
         self.assertIn('작업 내용: 구현 및 검증',shown['current_activity'])
 
     def test_actionable_question_and_operations_are_separate(self):

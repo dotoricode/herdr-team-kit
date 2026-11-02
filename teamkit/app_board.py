@@ -54,7 +54,8 @@ def presentation(card, detail=None, profile=None):
     if running:
         activity='실행 중 · '+(authored or running[0]['goal'] or running[0]['role_label'])
     else:
-        activity='현재 실행 중인 세션 없음'
+        uncertain=bool(detail.get('native_error')) or any(not item['identity_verified'] or item['native_state']=='unknown' for item in sessions)
+        activity='실행 상태 미확인' if uncertain else '확인된 실행 세션 없음'
         if authored:activity+=' · 작업 내용: '+authored
     attention=[]
     def issue(label,reason):
