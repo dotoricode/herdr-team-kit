@@ -35,7 +35,7 @@ class CoordinatorPolicyTests(unittest.TestCase):
         record_path(self.state).write_text(json.dumps(self.record))
         self.name = 'gui-coordinator-'+scope(self.state)
         self.argv = ['codex','--no-daemon','--no-alt-screen','resume',self.sid]
-        self.native = dict(address='t1',state='live',name=self.name,turn=7,
+        self.native = dict(address='t1',state='live',name=self.name,turn=7,rows=57,
             labels={'teamkit.owner':'owner','teamkit.task':'GUI-COORDINATOR','teamkit.name':self.name},
             foreground={'name':'codex','pid':123,'argv':self.argv},status={'state':'idle','app':'codex'})
         self.status = ('/status\n\n  >_ OpenAI Codex (v0.0.0)\n\n'
@@ -67,9 +67,19 @@ class CoordinatorPolicyTests(unittest.TestCase):
         return copy.deepcopy(self.native)
 
     def read(self,*args,**kwargs):
-        self.assertEqual(args,('read','--json','t1'))
-        return {'complete':not self.incomplete,'text':'› unsent draft' if self.draft else
+        self.assert_read(args)
+        return {'complete':not self.incomplete,'how':'stitched' if '--lines' in args else 'screen',
+                'text':'› unsent draft' if self.draft else
                 self.status*(1 if self.freeze_screen else self.sent) if self.sent else '› Ask Codex to do anything\n'}
+
+    def assert_read(self,args):
+        self.assertEqual(args[:2],('read','--json'))
+        self.assertEqual(args[-1],'t1')
+        if len(args)!=3:
+            self.assertEqual(len(args),5)
+            self.assertEqual(args[2],'--lines')
+            self.assertTrue(str(args[3]).isdigit())
+            self.assertTrue(1<=int(args[3])<=8192)
 
     def process(self,argv,**kwargs):
         self.calls.append(argv)
@@ -105,6 +115,80 @@ class CoordinatorPolicyTests(unittest.TestCase):
         two=self.ready()[3]['_coordinator_policy']
         self.assertEqual(one,two)
         self.assertEqual(self.sent,2)
+
+    def test_identical_clipped_live_viewport_uses_new_bounded_history_block(self):
+        def read(*args,**kwargs):
+            result=self.read(*args,**kwargs)
+            if '--lines' not in args and self.sent:
+                result['text']=self.status  # Both visible viewports look identical.
+            return result
+        with patch.object(policy,'_call',side_effect=read),patch.object(intake_dispatch,'_call',side_effect=read):
+            first=self.ready()[3]['_coordinator_policy'];self.now+=1
+            second=self.ready()[3]['_coordinator_policy']
+        self.assertEqual(first,second)
+        self.assertEqual(self.sent,2)
+
+    def test_fresh_history_with_a_live_draft_cannot_verify(self):
+        def read(*args,**kwargs):
+            result=self.read(*args,**kwargs)
+            if '--lines' not in args and self.sent:
+                result['text']='› new live draft'
+            return result
+        with patch.object(policy,'_call',side_effect=read),patch.object(intake_dispatch,'_call',side_effect=read):
+            with self.assertRaises(ValueError):self.ready()
+        self.assertEqual(self.sent,1)
+        self.assertEqual(json.loads(policy._path(self.state).read_text())['phase'],'uncertain')
+
+    def test_history_unknown_format_or_byte_cap_fails_before_local_command(self):
+        for changes in ({'how':'unknown'},{'complete':False},{'text':'x'*(policy.STATUS_HISTORY_BYTES+1)}):
+            with self.subTest(fields=list(changes)):
+                def read(*args,**kwargs):
+                    result=self.read(*args,**kwargs)
+                    if '--lines' in args or changes.get('complete') is False:result.update(changes)
+                    return result
+                with patch.object(policy,'_call',side_effect=read),patch.object(intake_dispatch,'_call',side_effect=read):
+                    with self.assertRaises(ValueError):self.ready()
+                self.assertEqual(self.sent,0)
+
+    def test_incomplete_max_history_adapts_and_fixes_the_same_complete_budget(self):
+        budgets=[]
+        def read(*args,**kwargs):
+            result=self.read(*args,**kwargs)
+            if '--lines' not in args:
+                return result
+            lines=int(args[3]);budgets.append(lines)
+            available=899+self.sent*10
+            live=result['text'];live='\n'*max(0,57-len(live.splitlines()))+live
+            result.update(how='history' if lines==8192 else 'stitched',complete=lines<=available,
+                          text='prior context\n'*min(lines,available)+live)
+            return result
+        with patch.object(policy,'_call',side_effect=read),patch.object(intake_dispatch,'_call',side_effect=read):
+            first=self.ready()[3]['_coordinator_policy'];self.now+=1
+            second=self.ready()[3]['_coordinator_policy']
+        self.assertEqual(first,second)
+        self.assertEqual(budgets,[8192,898,898,8192,908,908])
+        self.assertEqual(self.sent,2)
+
+    def test_incomplete_post_command_history_is_unknown_and_never_resends(self):
+        def read(*args,**kwargs):
+            result=self.read(*args,**kwargs)
+            if '--lines' in args and self.sent:result['complete']=False
+            return result
+        with patch.object(policy,'_call',side_effect=read),patch.object(intake_dispatch,'_call',side_effect=read), \
+             patch.object(policy.time,'sleep'):
+            with self.assertRaises(ValueError):self.ready()
+        self.assertEqual(self.sent,1)
+        with self.assertRaises(ValueError):self.ready()
+        self.assertEqual(self.sent,1)
+
+    def test_legacy_weak_freshness_cache_is_preserved_but_not_trusted_or_reprobed(self):
+        self.ready();path=policy._path(self.state)
+        cache=json.loads(path.read_text());cache['schema']=1;path.write_text(json.dumps(cache))
+        old=path.read_bytes();calls=len(self.calls)
+        with self.assertRaises(ValueError):intake_dispatch._bound(self.config,self.state)
+        with self.assertRaises(ValueError):self.ready()
+        self.assertEqual(path.read_bytes(),old)
+        self.assertEqual(len(self.calls),calls)
 
     def test_old_preselection_turn_context_does_not_override_actual_status(self):
         self.context(effort='low',at=900)
@@ -164,6 +248,42 @@ class CoordinatorPolicyTests(unittest.TestCase):
         self.assertEqual(self.sent,2)
         with self.assertRaises(ValueError):self.ready()
         self.assertEqual(self.sent,2)
+
+    def stale_status_with_noise(self, noise):
+        self.sent=1;self.freeze_screen=True
+        before=self.status
+        def read(*args,**kwargs):
+            self.assert_read(args)
+            text=before if self.sent<2 else noise(before) if callable(noise) else before+noise
+            return {'complete':True,'how':'stitched' if '--lines' in args else 'screen','text':text}
+        with patch.object(policy,'_call',side_effect=read), \
+             patch.object(intake_dispatch,'_call',side_effect=read), patch.object(policy.time,'sleep'):
+            with self.assertRaises(ValueError):self.ready()
+        self.assertEqual(self.sent,2)
+        self.assertEqual(json.loads(policy._path(self.state).read_text())['phase'],'uncertain')
+        with self.assertRaises(ValueError):self.ready()
+        self.assertEqual(self.sent,2)
+
+    def test_old_valid_status_plus_unrelated_newline_does_not_verify(self):
+        self.stale_status_with_noise('\n')
+
+    def test_old_valid_status_plus_other_output_does_not_verify(self):
+        self.stale_status_with_noise(lambda before:'background observation finished\n'+before)
+
+    def test_new_status_echo_without_its_new_result_block_does_not_verify(self):
+        self.stale_status_with_noise('\n/status\n› Ask Codex to do anything\n')
+
+    def test_new_marker_and_complete_block_survive_unrelated_viewport_clipping(self):
+        before='earlier unrelated history\n'+self.status
+        after=self.status+self.status
+        observed=policy._status_increment(before,after)
+        self.assertEqual((observed['model'],observed['effort']),('gpt-test','medium'))
+
+    def test_viewport_with_unobservable_command_increment_remains_unknown(self):
+        with self.assertRaises(ValueError):
+            policy._status_increment(self.status,self.status+'\n')
+        with self.assertRaises(ValueError):
+            policy._status_increment(self.status,self.status)  # Old marker clipped, no increment evidence.
 
     def test_malformed_cache_and_changed_cid_fail_without_status(self):
         proof=self.ready()[3]['_coordinator_policy'];calls=len(self.calls)

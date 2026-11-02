@@ -24,6 +24,9 @@ from .tickets import digest
 
 
 FLAGS = {'--no-daemon', '--no-alt-screen', '--approve-for-me'}
+STATUS_HISTORY_LINES = 8192
+STATUS_HISTORY_BYTES = 8*1024*1024
+CACHE_SCHEMA = 2  # Prior text-difference observations cannot attest this contract.
 
 
 def _path(state):
@@ -73,6 +76,51 @@ def _status(text):
         raise ValueError('native model/account/permissions formatter is unknown or unsupported')
     return dict(model=model[1].casefold(), effort=model[2], account=account[1].casefold(),
                 session=field('Session'), permissions='workspace-approve-for-me')
+
+
+def _status_increment(prior, current):
+    """Require one new literal command marker and its own complete result.
+
+    The viewport may clip unrelated text at the top. If clipping also makes the
+    command increment unobservable, leave the outcome unknown rather than
+    treating an older valid block or unrelated screen changes as fresh policy.
+    """
+    marker = r'(?m)^/status[ \t]*\r?$'
+    old = list(re.finditer(marker, prior))
+    new = list(re.finditer(marker, current))
+    if len(new) != len(old)+1:
+        raise ValueError('new local status command marker increment is unconfirmed')
+    return _status(current[new[len(old)].start():])
+
+
+def _history_read(terminal, lines):
+    history = ('--lines', str(lines)) if lines else ()
+    result = _call('read', '--json', *history, terminal)
+    if (type(result.get('complete')) is not bool or result.get('how') not in ('screen', 'history', 'stitched')
+            or not isinstance(result.get('text'), str) or len(result['text'].encode()) > STATUS_HISTORY_BYTES):
+        raise ValueError('bounded native status history is incomplete or unknown')
+    return result
+
+
+def _status_history(terminal, lines):
+    result = _history_read(terminal, lines)
+    if result['complete'] is not True:
+        raise ValueError('bounded native status history is incomplete')
+    return result['text']
+
+
+def _status_history_before(terminal, rows):
+    maximum = _history_read(terminal, STATUS_HISTORY_LINES)
+    if maximum['complete'] is True:
+        return maximum['text'], STATUS_HISTORY_LINES
+    # HC reports an incomplete read when fewer requested history lines exist.
+    # Its text is only an availability hint, never successful policy evidence.
+    if type(rows) is not int or not 1 <= rows <= 4096:
+        raise ValueError('native row count is unavailable for bounded history selection')
+    lines = max(0, len(maximum['text'].splitlines())-rows-1)
+    if lines >= STATUS_HISTORY_LINES:
+        raise ValueError('incomplete native history line accounting is unknown')
+    return _status_history(terminal, lines), lines
 
 
 def _process_home(pid, argv, expected):
@@ -172,7 +220,7 @@ def _write(path, value):
 def _cache_shape(cached):
     return (isinstance(cached, dict)
             and set(cached) == {'schema', 'phase', 'basis', 'cid', 'observed_at', 'controller', 'journal'}
-            and cached['schema'] == 1 and cached['phase'] in ('verified', 'intent', 'uncertain')
+            and cached['schema'] == CACHE_SCHEMA and cached['phase'] in ('verified', 'intent', 'uncertain')
             and isinstance(cached['basis'], dict) and cached['cid'] == digest(cached['basis'])
             and type(cached['observed_at']) in (int, float) and math.isfinite(cached['observed_at'])
             and 0 < cached['observed_at'] <= time.time()
@@ -233,7 +281,13 @@ def _observe(config, state, record, pr, actor, native, name):
         screen = _call('read', '--json', record['terminal'])
         if screen.get('complete') is not True or not empty_input(screen.get('text', '')):
             raise ValueError('native input changed immediately before local status command')
-        value = dict(schema=1, phase='intent', basis=basis, cid=digest(basis),
+        prior_text, history_lines = _status_history_before(record['terminal'], after.get('rows'))
+        # History is only freshness evidence. A history-only empty prompt cannot
+        # establish that today's live input is empty.
+        screen = _call('read', '--json', record['terminal'])
+        if screen.get('complete') is not True or not empty_input(screen.get('text', '')):
+            raise ValueError('native input changed while reading status history')
+        value = dict(schema=CACHE_SCHEMA, phase='intent', basis=basis, cid=digest(basis),
                      observed_at=time.time(), controller=controller, journal=journal)
         _write(path, value)
         try:
@@ -247,17 +301,20 @@ def _observe(config, state, record, pr, actor, native, name):
             if (ack.get('started') is not False or ack.get('status') not in ('idle', 'done')
                     or ack.get('turn') != native.get('turn')):
                 raise ValueError('native status may have started a model turn; preserve and inspect')
-            prior_text = screen.get('text', '')
+            observed = None
             for _ in range(10):
-                screen = _call('read', '--json', record['terminal'])
-                if screen.get('complete') is True and screen.get('text') != prior_text:
+                try:
+                    observed = _status_increment(prior_text, _status_history(record['terminal'], history_lines))
+                except ValueError:
+                    pass  # Poll the same command's output; never send again.
+                else:
                     break
                 time.sleep(.02)
+            if observed is None:
+                raise ValueError('native status command/result did not advance; fresh result increment is unconfirmed')
+            screen = _call('read', '--json', record['terminal'])
             if screen.get('complete') is not True or not empty_input(screen.get('text', '')):
-                raise ValueError('native status result or empty prompt is unconfirmed')
-            if screen.get('text') == prior_text:
-                raise ValueError('native status screen did not advance; prior output is not fresh policy evidence')
-            observed = _status(screen['text'])
+                raise ValueError('native live input is unconfirmed after local status')
             expected_email = pr.get('identity', {}).get('email')
             if (not isinstance(expected_email, str) or observed['account'] != expected_email.casefold()
                     or any(observed[k] != basis[k] for k in ('model', 'effort', 'session'))):
