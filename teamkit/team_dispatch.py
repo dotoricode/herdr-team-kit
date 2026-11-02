@@ -157,8 +157,12 @@ def verify_tell(config_path, state, expected):
     pr=profile(config,'codex','personal')
     if task.get('runtime',{}).get('profile_binding')!=binding(pr):
         raise ValueError('observer receipt profile binding changed')
+    ready=_ready(config,state,task['team'])
+    if ready is None or ready.get('owner')!=task['owner'] or ready.get('attempt_count')!=task['attempt_count']:
+        raise ValueError('observer is busy or has unsubmitted input')
     providers.identity('codex',pr)
     current=load(config_path)
+    _task(current,state,task['team'])
     store=Store(state)
     try:
         latest=store.get(task['id'])
@@ -169,9 +173,6 @@ def verify_tell(config_path, state, expected):
             or any(chosen.get(k)!=task.get(k) for k in ('provider','account','model','effort'))
             or binding(profile(current,'codex','personal'))!=binding(pr)):
         raise ValueError('observer quota, policy, profile or owner changed before tell')
-    ready=_ready(current,state,task['team'])
-    if ready is None or ready.get('owner')!=task['owner'] or ready.get('attempt_count')!=task['attempt_count']:
-        raise ValueError('observer is busy or has unsubmitted input')
 
 
 def bootstrap(config_path, state, team):

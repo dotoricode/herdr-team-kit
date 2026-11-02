@@ -82,3 +82,35 @@ class DispatchIntegrationTests(unittest.TestCase):
             result=self.f.call('tell','D1','--message-file',str(message))
         self.assertEqual(result['state'],'running')
         prompt.assert_called_once();identity.assert_called_once()
+
+    def test_final_native_probe_precedes_latest_quota_and_profile_check(self):
+        for change in ('quota','profile'):
+            with self.subTest(change=change):
+                task=self.f.ready()
+                store=Store(self.f.state)
+                task['runtime']['profile_binding']=binding(self.f.value['profiles']['codex']['personal'])
+                store._save(task,'fixture');store.close()
+                native={**self.f.native(),'address':'tmanager','status':{'state':'idle','app':'codex'}}
+                reads=[]
+                def native_read(*args,**kwargs):
+                    reads.append(True)
+                    if len(reads)==2:
+                        if change=='quota':
+                            store=Store(self.f.state);quota=store.quota('codex/personal')
+                            quota['five_hour']['used']=90;store.quota('codex/personal',quota);store.close()
+                        else:
+                            self.f.value['profiles']['codex']['personal']['home']=str(self.f.root/'late-profile')
+                            self.f.config.write_text(json.dumps(self.f.value))
+                    return native
+                message=self.f.root/'late-event.txt';message.write_text('Observe current queue.')
+                with patch('teamkit.core_runtime.require_managed',return_value='tcontroller'),\
+                     patch('teamkit.core_runtime.CoreRuntime._native',side_effect=native_read),\
+                     patch('teamkit.context_handoff.clean_prompt',return_value=True),\
+                     patch('teamkit.core_runtime.CoreRuntime.prompt') as prompt,\
+                     patch('teamkit.providers.identity'):
+                    with self.assertRaises(ValueError):
+                        self.f.call('tell','D1','--message-file',str(message))
+                prompt.assert_not_called()
+                self.assertEqual(self.f.call('show','D1')['state'],'ready')
+                self.f.value['profiles']['codex']['personal']['home']=str(self.f.root/'personal')
+                self.f.config.write_text(json.dumps(self.f.value))
