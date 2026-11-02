@@ -370,10 +370,19 @@ def reconcile(config_path,state,ident):
     try:
         proof=completion(load(config_path),state,job)
         if proof is None:return
+        if job.get('completion_requirements'):
+            path=folder(state)/(ident+'.json')
+            with context.locked(path):
+                current=context.read(path)
+                if current and current['phase'] in ('received','done') and current.get('workflow_ref')==job['workflow_ref']:
+                    reason='공식 업무 완료는 확인됐지만 추가 완료 조건의 별도 검증 근거가 필요합니다.'
+                    if current.get('reason')!=reason:
+                        current.update(reason=reason,updated_at=time.time())
+                        write_request(path,current)
+            return
         receiver=job.get('receiver') or {}
         evidence={'work_id':job['work_id'],'owner':receiver.get('owner'),'attempt':receiver.get('attempt'),
                   'writer_stopped':True,'verification':proof['verification']}
-        if job.get('completion_requirements'):evidence['completion_requirements']=job['completion_requirements']
         path=folder(state)/(ident+'.workflow-proof.json')
         context.write(path,evidence)
         return resolve(config_path,state,ident,'completed',path,receiver.get('owner'),receiver.get('attempt'))

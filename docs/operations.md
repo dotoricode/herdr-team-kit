@@ -159,7 +159,7 @@ GUI core 배정은 실제 응답에 연결된 statusline 자료와 검증된 공
 
 `--priority 0..9`는 대기 요청 사이의 순서를 조정하며 기본 0은 접수 순서입니다. 이미 수신·실행·불명인 같은 팀의 업무를 선점하지 않습니다. `--depends-on REQUEST-ID`는 여러 번 지정할 수 있고 실제 `completed`만 의존성 충족으로 봅니다. 보류·취소·수신은 완료가 아닙니다. 각 요청은 연결된 제품 root 또는 팀 root를 자원으로 보호합니다. 추가 `--resource /srv/example/shared`는 설정된 팀·공유 root 안에서만 허용하며, 다른 팀의 진행 업무와 부모/자식 경로가 겹치면 기다립니다.
 
-연결된 업무의 큐 완료는 원 workflow의 공식 complete·승인 버전·milestone·별도 최신 reviewer 근거를 확인한 뒤 기록합니다. 일반 프로그램은 이미 수신 확인된 요청만 정합화하며 unknown을 자동 복구하거나 새 전송하지 않습니다. receiver와 현재 담당이 바뀌거나 입력이 남으면 기존 요청과 담당을 보존합니다. 긴 native 전달 대기 동안 전역 model-start 잠금은 해제하지만, 팀별 소비 잠금과 sending intent·공식 dispatch/tell 내부의 admission 검사는 유지합니다.
+연결된 업무의 큐 완료는 원 workflow의 공식 complete·승인 버전·milestone·별도 최신 reviewer 근거를 확인한 뒤 기록합니다. 일반 프로그램은 이미 수신 확인된 요청만 정합화하며 unknown을 자동 복구하거나 새 전송하지 않습니다. 큐에 별도 `--completion-file` 조건이 있으면 업무 장부 완료만으로 그 조건을 충족했다고 추정하지 않습니다. 자동 마감은 보류하고 추가 조건의 실제 증거를 확인한 명시적 `pool resolve`를 기다립니다. 조건 원문을 자동 복사해 검증 근거로 만들지 않습니다. receiver와 현재 담당이 바뀌거나 입력이 남으면 기존 요청과 담당을 보존합니다. 긴 native 전달 대기 동안 전역 model-start 잠금은 해제하지만, 팀별 소비 잠금과 sending intent·공식 dispatch/tell 내부의 admission 검사는 유지합니다.
 
 팀별 개인 Codex 확인 역할은 선택 설정 `team_dispatch`로 켭니다. 제품 팀장 task와 별도 ID를 사용하며 같은 사용량을 팀별로 복제하지 않습니다.
 

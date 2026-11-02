@@ -107,6 +107,49 @@ class QueueIntegrationTests(unittest.TestCase):
         value=context.read(control.folder(self.f.state)/(job['id']+'.json'))
         self.assertEqual(value['phase'],'pending');self.assertTrue(value.get('reason'))
 
+    def completed_job(self, extra=False):
+        actor=self.f.dispatched()
+        self.f.value['teams']['alpha']['roles']['reviewer']={'provider':'codex','model':'fixture','effort':'high'}
+        self.work()
+        requirements=self.f.root/'additional.txt'
+        requirements.write_text('Actual device verification must be independently reported.')
+        job=control.enqueue(self.f.config,self.f.state,'alpha',self.message,work_id='WORK-1',
+            workflow_id='WORK-1',completion_file=requirements if extra else None)
+        evidence=self.f.root/'verified.json';evidence.write_text(json.dumps({'verification':['Fixture behavior checked']}))
+        self.f.call('work','record','WORK-1','--step','behavior','--evidence-file',str(evidence))
+        self.f.call('create','REVIEW-1','--team','alpha','--role','reviewer','--root',str(self.f.repo),
+            '--goal-file',str(self.f.root/'goal.txt'),'--work','WORK-1')
+        from teamkit.store import Store
+        store=Store(self.f.state)
+        store.claim('REVIEW-1','reviewer','codex','team','fixture','high',approval_config=load(self.f.config))
+        store.update('REVIEW-1','reviewer','launching',{})
+        store.update('REVIEW-1','reviewer','submitted',{})
+        store.receipt('REVIEW-1','reviewer')
+        head=store.get('REVIEW-1')['base']
+        store.complete('REVIEW-1','reviewer',head,['Independent fixture check'],head,'pass')
+        store.close()
+        self.f.call('work','finish','WORK-1','--review-task','REVIEW-1')
+        path=control.folder(self.f.state)/(job['id']+'.json');value=context.read(path)
+        value.update(phase='received',receiver={'owner':actor['owner'],'attempt':actor['attempt_count'],
+                                              'terminal':actor['runtime']['terminal']})
+        context.write(path,value)
+        return job,path
+
+    def test_formal_work_completion_does_not_fabricate_additional_condition_evidence(self):
+        job,path=self.completed_job(extra=True)
+        with patch.object(control,'idle_native',return_value={'status':{'state':'done'}}):
+            control.reconcile(self.f.config,self.f.state,job['id'])
+        self.assertEqual(context.read(path)['phase'],'received')
+        self.assertNotIn('work_resolution',context.read(path))
+        self.assertIn('추가 완료 조건',context.read(path)['reason'])
+
+    def test_formal_work_completion_can_release_a_queue_without_extra_conditions(self):
+        job,path=self.completed_job()
+        with patch.object(control,'idle_native',return_value={'status':{'state':'done'}}):
+            control.reconcile(self.f.config,self.f.state,job['id'])
+        self.assertEqual(context.read(path)['phase'],'completed')
+        self.assertEqual(context.read(path)['work_resolution']['workflow_completion']['work_id'],'WORK-1')
+
     def test_cli_exposes_linked_queue_contract(self):
         from teamkit.__main__ import parser
         parsed=parser().parse_args(['pool','assign','--team','alpha','--message-file','message.txt',
