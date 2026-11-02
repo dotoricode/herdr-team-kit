@@ -21,7 +21,9 @@ from .store import Store
 from .tickets import TicketStore, digest, file_digest, strings, within
 
 
-BOUNDARY = 'Only linked UI-lab requests are managed; other UI work and physical screen users remain outside control'
+BOUNDARY = ('Only linked UI-lab requests are managed; other UI work and physical screen users remain outside control. '
+            'The final guard is not atomic with the official subprocess or uncooperative external file writes; '
+            'the worker must pass the official ticket receipt before any UI action.')
 ERRORS = (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError, NativeError)
 SCREEN = dict(kind='named', name='screen:test-macbook', mode='write')
 
@@ -120,6 +122,45 @@ def _remember(queue, ticket_id, attempt_id, **detail):
         attempt.update(detail)
         queue._save_attempt(attempt)
         queue._save(ticket, 'ui_lab_observed', {'attempt': attempt_id})
+
+
+def _before_submit(config_path, config_bytes, config, settings, queue, ticket, attempt, request):
+    # Native/input is the last external observation; all following checks are
+    # local protocol state and grants, directly before the official submit.
+    status = _lab(settings, 'status')
+    _registry(config, settings, status, attempt['executor'])
+    _available(status)
+    _native(attempt['executor'])
+    if Path(config_path).read_bytes() != config_bytes:
+        raise ValueError('UI execution config changed after reservation; request not submitted')
+    from .operations import work_gate
+    from .workers import _ticket_signature
+    current = queue.get(ticket['id'])
+    current_attempt = queue.attempt(attempt['id'])
+    if (current['attempt'] != attempt['id'] or current['state'] != 'dispatching'
+            or current_attempt['phase'] != 'reserved'
+            or current_attempt['executor'] != attempt['executor']
+            or _ticket_signature(current) != _ticket_signature(ticket)
+            or current.get('ui') != ticket.get('ui')
+            or current.get('dependencies') != ticket.get('dependencies')
+            or current_attempt.get('ui_delivery', {}).get('request') != request):
+        raise ValueError('UI ticket/attempt/executor or failure policy changed after reservation')
+    if queue.gate(ticket['id']):
+        raise ValueError('UI approval/dependency changed after reservation; request not submitted')
+    work_gate(config, queue.path, current)
+    pr = profile(config, 'codex', 'personal')
+    if current_attempt['executor']['profile_binding'] != binding(pr):
+        raise ValueError('UI fixed profile changed after reservation')
+    store = Store(queue.path)
+    try:
+        quota = cached_quota(config, store, 'codex', 'personal')
+    finally:
+        store.close()
+    if not eligible(quota, time.time(), config['quota_ttl_seconds']):
+        raise ValueError('UI quota changed after reservation; request not submitted')
+    reservation = next((r for r in ResourceLedger._rows(queue.db) if r['attempt'] == attempt['id']), {})
+    if not reservation.get('execution_reserved') or not reservation.get('writes_held'):
+        raise ValueError('UI execution/screen reservation changed before submission')
 
 
 def _manifest(queue, ticket, attempt, job):
@@ -223,6 +264,7 @@ def _reconcile(config, settings, queue, ticket):
 
 
 def tick(config_path, state):
+    config_bytes = Path(config_path).read_bytes()
     config = load(config_path)
     settings = config.get('operations', {}).get('ui_lab', {})
     if config.get('operations', {}).get('enabled') is not True:
@@ -277,9 +319,17 @@ def tick(config_path, state):
                 admission.configure(queue.db, policy(config))
                 attempt = queue.reserve(ticket['id'], executor, policy(config), admission.observe(queue.db))
                 request = _request(ticket, attempt, requester)
+                from .context_handoff import cli
+                import shlex
+                receipt = shlex.join(cli(config_path, state, 'queue', 'receipt', ticket['id'],
+                                        '--attempt', attempt['id'], '--owner', executor['owner']))
+                request['steps'] = ['Before any screen/browser/UI action, run this exact official ticket receipt: '
+                                    + receipt + '. If receipt fails or approval is unavailable, stop; do not perform any UI steps.',
+                                    *request['steps']]
                 _remember(queue, ticket['id'], attempt['id'], ui_delivery=dict(phase='intent', request=request,
                           request_digest=digest(request), created_at=time.time()))
                 try:
+                    _before_submit(config_path, config_bytes, config, settings, queue, ticket, attempt, request)
                     response = _lab(settings, 'submit', payload=request)
                     if response.get('id') != request['id']:
                         raise ValueError('UI submit response differs from the original request')

@@ -66,6 +66,12 @@ class UIJobsTests(unittest.TestCase):
             store.close()
         for target, kwargs in [
             ('subprocess.run', {'side_effect': AssertionError('real process call forbidden')}),
+            ('subprocess.Popen', {'side_effect': AssertionError('real process launch forbidden')}),
+            ('subprocess.call', {'side_effect': AssertionError('real process call forbidden')}),
+            ('subprocess.check_call', {'side_effect': AssertionError('real process call forbidden')}),
+            ('subprocess.check_output', {'side_effect': AssertionError('real process call forbidden')}),
+            ('teamkit.ui_jobs.CoreRuntime.launch', {'side_effect': AssertionError('real model launch forbidden')}),
+            ('teamkit.ui_jobs.CoreRuntime.accept', {'side_effect': AssertionError('real model input forbidden')}),
             ('os.kill', {'side_effect': AssertionError('real process control forbidden')}),
             ('teamkit.core_runtime._call', {'side_effect': self.hc}),
             ('teamkit.ui_jobs._call', {'side_effect': self.read_screen}),
@@ -277,6 +283,52 @@ class UIJobsTests(unittest.TestCase):
         self.run_tick()
         self.assertNotEqual(self.ticket()['state'], 'completed')
         self.assertTrue(ResourceLedger._rows(self.queue.db)[0]['execution_reserved'])
+
+    def after_reservation_change(self, change):
+        reserve = TicketStore.reserve
+        def changed(queue, *args, **kwargs):
+            result = reserve(queue, *args, **kwargs)
+            change(result)
+            return result
+        with patch.object(TicketStore, 'reserve', changed):
+            self.start()
+        self.assertEqual(self.submissions(), [])
+
+    def test_approval_revoked_after_reservation_never_submits(self):
+        self.after_reservation_change(lambda _: self.approval.write_text('Revoked after reservation'))
+
+    def test_config_changed_after_reservation_never_submits(self):
+        self.after_reservation_change(lambda _: self.config_path.write_text(json.dumps(dict(self.config, quota_ttl_seconds=100))))
+
+    def test_failure_policy_changed_after_reservation_never_submits(self):
+        def change(attempt):
+            ticket = self.ticket()
+            ticket['failures'] = [{'kind':'reasoning','cause':'unresolved','effort':'high'}]
+            self.queue.db.execute('UPDATE operation_tickets SET body=? WHERE id=?',
+                                  (json.dumps(ticket),ticket['id']))
+        self.after_reservation_change(change)
+
+    def test_input_changed_after_reservation_never_submits(self):
+        self.after_reservation_change(lambda _: self.screen.update(text='› unrelated draft'))
+
+    def test_quota_expired_after_reservation_never_submits(self):
+        def expired(attempt):
+            store = Store(self.state)
+            try:
+                quota = store.quota('codex/personal')
+                quota['observed_at'] = time.time()-121
+                store.quota('codex/personal', quota)
+            finally:
+                store.close()
+        self.after_reservation_change(expired)
+
+    def test_first_ui_step_requires_exact_official_receipt_before_any_ui_action(self):
+        self.start()
+        attempt = self.queue.attempt(self.ticket()['attempt'])
+        first = self.submissions()[0][2]['steps'][0]
+        self.assertIn('queue receipt UI-TICKET --attempt '+attempt['id']+' --owner ui-owner', first)
+        self.assertIn('If receipt fails', first)
+        self.assertIn(str(self.state), first)
 
     def test_timeout_after_submit_preserves_uncertain_attempt_without_retry(self):
         self.timeout = True

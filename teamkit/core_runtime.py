@@ -265,10 +265,12 @@ class CoreRuntime:
         return {'agent':{'name':args[2], 'agent_status':status, 'pane_id':native['address'],
                          'interactive_ready':status in ('idle','done'), 'completion_seq':native.get('turn')}}
 
-    def accept(self, name, text):
+    def accept(self, name, text, before_send=None):
         """Confirm accepted input, independently of the model turn's completion."""
         require_managed()
         native = self._native(name, ready=True)
+        if before_send is not None:
+            before_send()
         condition = ['--if', 'idle'] if native['status']['state'] == 'idle' else []
         sent = _call('send', '--json', *condition, native['address'], text, timeout=30)
         if (sent.get('started') is not True or type(sent.get('turn')) is not int

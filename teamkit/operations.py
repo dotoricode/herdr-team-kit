@@ -148,11 +148,11 @@ class NativeRuntime:
         self.native(executor)
         return executor
 
-    def send(self, executor, text):
+    def send(self, executor, text, before_send=None):
         from .core_runtime import CoreRuntime
         task = dict(id=executor['task'], owner=executor['owner'], provider=executor['provider'],
                     runtime=executor['runtime'])
-        return CoreRuntime(task).accept(executor['runtime']['name'], text)
+        return CoreRuntime(task).accept(executor['runtime']['name'], text, before_send=before_send)
 
     def launch(self, config_path, ticket, attempt):
         from .workers import launch
@@ -206,6 +206,12 @@ def verify(ticket, attempt, config=None, state=None):
     if config is not None:
         work_gate(config, state, ticket)
     submission = attempt['submission']
+    if not isinstance(submission,dict) or not isinstance(submission.get('artifact'),str):
+        raise ValueError('submission requires an artifact file object')
+    source = submission.get('source')
+    if ticket['kind'] in ('code','integration') and (not isinstance(source,dict)
+            or any(not isinstance(source.get(key),str) or not source[key] for key in ('root','head','fingerprint'))):
+        raise ValueError('code submission requires a typed source root/head/fingerprint object')
     current = file_digest(submission['artifact'])
     if current != submission['artifact_digest'] or Path(submission['artifact']).stat().st_size == 0:
         raise ValueError('submitted artifact changed or is empty')
@@ -332,7 +338,10 @@ def reconcile(queue, runtime, config=None):
 
 
 def tick(config_path, state, runtime=None):
+    config_bytes = Path(config_path).read_bytes()
     config = load(config_path)
+    if Path(config_path).read_bytes() != config_bytes:
+        raise ValueError('configuration changed while loading; dispatch deferred')
     if not enabled(config):
         return {'enabled': False}
     runtime = runtime or NativeRuntime(config, state)
@@ -385,10 +394,30 @@ def tick(config_path, state, runtime=None):
                         executor = runtime.launch(config_path, ticket, attempt)
                         attempt = queue.attempt(attempt['id'])
                     runtime.native(executor)
-                    accepted = runtime.send(executor, prompt(config_path, state, ticket, attempt))
+                    def final_guard():
+                        if Path(config_path).read_bytes() != config_bytes:
+                            raise ValueError('configuration changed after reservation; no input sent')
+                        current = queue.get(ticket['id'])
+                        reserved = queue.attempt(attempt['id'])
+                        if (current['attempt'] != attempt['id'] or reserved['phase'] != 'reserved'
+                                or reserved['executor'] != executor or queue.gate(current['id'])):
+                            raise ValueError('approval or attempt changed after reservation; no input sent')
+                        work_gate(config,state,current)
+                        store=Store(state)
+                        try:
+                            quota=cached_quota(config,store,executor['provider'],executor['account'])
+                        finally:store.close()
+                        if isinstance(runtime,NativeRuntime) and not eligible(quota,time.time(),config['quota_ttl_seconds']):
+                            raise ValueError('profile quota changed before delivery; no input sent')
+                        if Path(config_path).read_bytes() != config_bytes or queue.gate(current['id']):
+                            raise ValueError('approval/configuration changed before delivery; no input sent')
+                    final_guard()
+                    text = prompt(config_path, state, ticket, attempt)
+                    accepted = (runtime.send(executor,text,before_send=final_guard) if isinstance(runtime,NativeRuntime)
+                                else runtime.send(executor,text))
                     queue.delivery(attempt['id'], True, accepted)
                 except Exception as error:
-                    queue.delivery(attempt['id'], False, {'error': type(error).__name__})
+                    queue.delivery(attempt['id'], False, {'error': type(error).__name__,'reason':str(error)})
                 started.append(dict(ticket=ticket['id'], attempt=attempt['id'],
                                     enqueue_to_dispatch_seconds=attempt['created_at'] - ticket['created_at'],
                                     eligible_observed_to_dispatch_seconds=attempt['created_at'] - eligible_observed_at))

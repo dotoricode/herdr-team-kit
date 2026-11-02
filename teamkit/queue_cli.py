@@ -73,7 +73,15 @@ def handle(args):
             raise ValueError('only the actual current execution terminal may report this attempt')
         runtime = NativeRuntime(load(args.config), args.state)
         if args.action == 'receipt':
+            from .operations import enabled, work_gate
+            config_bytes=Path(args.config).read_bytes()
+            current_config=load(args.config)
+            if not enabled(current_config):
+                raise ValueError('new work is disabled by current operations policy')
             native = runtime.native(executor, require_idle=False)
+            work_gate(current_config,args.state,queue.get(args.ticket))
+            if Path(args.config).read_bytes()!=config_bytes:
+                raise ValueError('configuration changed before actor receipt')
             return queue.receipt(args.ticket, args.attempt, args.owner, executor['terminal'], native)
         if args.action == 'submit':
             runtime.native(executor, require_idle=False)

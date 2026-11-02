@@ -151,6 +151,51 @@ class OperationsTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'outside the existing role policy'):
                 runtime.admit(ticket,executor)
 
+    def test_final_native_observation_cannot_outlive_approval_or_configuration(self):
+        for changed in ('approval','configuration'):
+            with self.subTest(changed=changed):
+                self.enqueue(changed.upper())
+                original=self.runtime.native
+                def native(executor,require_idle=True):
+                    if changed=='approval':
+                        self.approval.write_text('withdrawn grant')
+                    else:
+                        config=json.loads(self.config.read_text());config['operations']['enabled']=False
+                        self.config.write_text(json.dumps(config))
+                    return original(executor,require_idle)
+                self.runtime.native=native
+                tick(self.config,self.state,self.runtime)
+                self.assertEqual([],self.runtime.sent)
+                self.runtime.native=original
+                self.approval.write_text('User-approved isolated queue verification')
+                config=json.loads(self.config.read_text());config['operations']['enabled']=True
+                self.config.write_text(json.dumps(config))
+
+    def test_legacy_invalid_source_isolated_from_other_ticket(self):
+        from unittest.mock import patch
+        from teamkit.tickets import file_digest
+        self.enqueue('BAD',kind='code')
+        self.enqueue('GOOD')
+        store=TicketStore(self.state)
+        try:
+            attempt=store.reserve('BAD',self.runtime.executor,{},self.runtime.observation())
+            artifact=self.root/'historical-report.txt';artifact.write_text('Historical candidate')
+            # Reproduce a pre-validation durable row; the new submit path rejects it.
+            with store.transaction():
+                attempt['submission']=dict(artifact=str(artifact),artifact_digest=file_digest(str(artifact)),
+                                           writer_stopped=True,source='HEAD')
+                store._save_attempt(attempt)
+                ticket=store.get('BAD');ticket['state']='awaiting_verification'
+                store._save(ticket,'historical_fixture')
+        finally:store.close()
+        with patch('teamkit.operations.work_gate',return_value=None):
+            tick(self.config,self.state,self.runtime)
+        store=TicketStore(self.state)
+        try:
+            self.assertIn('typed source',store.get('BAD')['reason'])
+            self.assertEqual('awaiting_verification',store.get('GOOD')['state'])
+        finally:store.close()
+
     def test_review_failure_repair_reverification_and_independent_review(self):
         self.enqueue('ONE', review_required=True)
         original_send = self.runtime.send

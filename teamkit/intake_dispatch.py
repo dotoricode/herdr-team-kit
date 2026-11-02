@@ -109,6 +109,36 @@ def _same_actor(attempt, record):
                 ('profile_binding', 'profile_binding'), ('session', 'context_session_id')))
 
 
+def _send_guard(config_path, config_bytes, config, state, queue, attempt):
+    """Read-only final fence called after CoreRuntime's last native check.
+
+    Files written outside the protocol can still change after this callback;
+    this is a boundary check, not an atomic transaction with the HC server.
+    """
+    record = read_record(state)
+    if (Path(config_path).read_bytes() != config_bytes or record.get('phase') != 'ready'
+            or record.get('account') not in ('team', 'personal')
+            or not _same_actor(attempt, record)
+            or binding(profile(config, 'codex', record['account'], config['coordinator'])) != attempt['profile_binding']):
+        raise ValueError('분류 실제 전송 직전 설정·총괄 연결 변경; 입력하지 않았습니다.')
+    _quota(config, state, record)
+    with queue.transaction():
+        current = _attempt(queue.db, attempt['id'])
+        item = _instruction(queue.db, attempt['instruction'])
+        reservation = queue.db.execute('SELECT body FROM resource_reservations WHERE attempt=?',
+                                       (attempt['id'],)).fetchone()
+        reserved = json.loads(reservation[0]) if reservation else {}
+        if (current['phase'] != 'intent' or current.get('submission_digest')
+                or any(current.get(key) != attempt.get(key) for key in
+                       ('instruction', 'instruction_digest', 'owner', 'terminal', 'pid', 'profile_binding', 'session', 'turn_baseline'))
+                or item.get('state') != 'classifying'
+                or item.get('classification_attempt') != attempt['id']
+                or digest({'text': item['text'], 'source': item['source']}) != attempt['instruction_digest']
+                or not reserved.get('execution_reserved')
+                or reserved.get('session') != {'terminal': attempt['terminal'], 'pid': attempt['pid'], 'owner': attempt['owner']}):
+            raise ValueError('분류 실제 전송 직전 원문·시도·예약 변경; 입력하지 않았습니다.')
+
+
 def tick(config_path, state):
     config_bytes = Path(config_path).read_bytes()
     config = load(config_path)
@@ -187,7 +217,8 @@ def tick(config_path, state):
                         '{"proposals":[ticket specs]} 또는 {"needs_clarification":"구체 사유"}를 제출하세요.\n'
                         + json.dumps({'owner': attempt['owner'], 'terminal': attempt['terminal'],
                                       'original_instruction': item['text']}, ensure_ascii=False))
-                receipt = actor.accept(name, text)
+                receipt = actor.accept(name, text, before_send=lambda: _send_guard(
+                    config_path, config_bytes, config, state, queue, attempt))
                 if (receipt.get('accepted') is not True or receipt.get('terminal') != attempt['terminal']
                         or receipt.get('native_pid') != attempt['pid']
                         or receipt.get('turn_baseline') != attempt['turn_baseline']

@@ -81,7 +81,9 @@ class IntakeDispatchTests(unittest.TestCase):
         self.assertEqual(args, ('read', '--json', 't1'))
         return self.screen
 
-    def send(self, name, text):
+    def send(self, name, text, before_send=None):
+        if before_send:
+            before_send()
         self.assertTrue(text.startswith(dispatch.PREFIX))
         attempts = list(self.queue.db.execute('SELECT body FROM operation_intake_attempts'))
         self.assertEqual(len(attempts), 1)
@@ -196,6 +198,52 @@ class IntakeDispatchTests(unittest.TestCase):
         self.accept.assert_not_called()
         self.assertEqual(self.queue.db.execute('SELECT count(*) FROM operation_intake_attempts').fetchone()[0], 0)
 
+    def late_change(self, change):
+        delivered = []
+        def accept(name, text, before_send=None):
+            change()
+            if before_send:
+                observed = self.native_call.call_count
+                try:
+                    before_send()
+                finally:
+                    self.assertEqual(self.native_call.call_count, observed,
+                                     'final local guard must not start another native observation')
+            delivered.append(text)
+            return self.send(name, text)
+        self.accept.side_effect = accept
+        result = dispatch.tick(self.path, self.state)
+        self.assertEqual(result['phase'], 'uncertain')
+        self.assertEqual(delivered, [])
+
+    def test_late_config_change_at_native_send_boundary_blocks_input(self):
+        self.late_change(lambda: self.path.write_text(json.dumps(dict(self.config, quota_ttl_seconds=100))))
+
+    def test_late_instruction_change_at_native_send_boundary_blocks_input(self):
+        def change():
+            item = self.item()
+            item['text'] = 'Changed original instruction'
+            self.queue.db.execute('UPDATE operation_instructions SET body=? WHERE id=?',
+                                  (json.dumps(item), item['id']))
+        self.late_change(change)
+
+    def test_late_quota_change_at_native_send_boundary_blocks_input(self):
+        self.late_change(lambda: self.quota(stale=True))
+
+    def test_late_owner_record_change_at_native_send_boundary_blocks_input(self):
+        def change():
+            record_path(self.state).write_text(json.dumps(dict(self.record, nonce='new-owner')))
+        self.late_change(change)
+
+    def test_late_attempt_failure_at_native_send_boundary_blocks_input(self):
+        def change():
+            row = self.queue.db.execute('SELECT body FROM operation_intake_attempts').fetchone()
+            attempt = json.loads(row[0])
+            attempt['phase'] = 'uncertain'
+            self.queue.db.execute('UPDATE operation_intake_attempts SET body=? WHERE id=?',
+                                  (json.dumps(attempt), attempt['id']))
+        self.late_change(change)
+
     def test_invalid_later_proposal_rolls_back_earlier_ticket(self):
         result = dispatch.tick(self.path, self.state)
         item = self.submit(result, {'proposals': [self.spec(), dict(self.spec(), role='invalid')]})
@@ -218,7 +266,11 @@ class IntakeDispatchTests(unittest.TestCase):
     def test_two_consumers_only_record_and_accept_one_attempt(self):
         barrier = threading.Barrier(2)
         self.identity.side_effect = lambda *args: barrier.wait(timeout=3)
-        self.accept.side_effect = lambda *args: self.receipt
+        def accept(name, text, before_send=None):
+            if before_send:
+                before_send()
+            return self.receipt
+        self.accept.side_effect = accept
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda _: dispatch.tick(self.path, self.state), range(2)))
         self.assertEqual(self.accept.call_count, 1)

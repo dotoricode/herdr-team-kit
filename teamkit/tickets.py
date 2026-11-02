@@ -390,8 +390,11 @@ class TicketStore:
             attempt.update(phase='accepted' if accepted else 'uncertain', delivery=detail,
                            delivered_at=self.clock())
             self._save_attempt(attempt)
+            reason = 'delivery outcome unknown; inspect original receiver'
+            if not accepted and isinstance(detail, dict) and isinstance(detail.get('reason'), str) and detail['reason'].strip():
+                reason += ': ' + detail['reason']
             item.update(state='received' if accepted else 'uncertain',
-                        reason='' if accepted else 'delivery outcome unknown; inspect original receiver',
+                        reason='' if accepted else reason,
                         next_action='wait actor receipt' if accepted else 'reconcile original attempt; never resend')
             self._save(item, 'delivery_accepted' if accepted else 'delivery_uncertain', {'attempt': ident})
         self.notify()
@@ -406,6 +409,9 @@ class TicketStore:
                     or native.get('pid') != executor['pid'] or native.get('owner') != owner
                     or item['state'] not in ('dispatching', 'received', 'uncertain', 'running')):
                 raise ValueError('receipt actor or attempt mismatch')
+            gate = self.gate(ident)
+            if gate:
+                raise ValueError('actor receipt gate: ' + gate)
             if attempt['phase'] == 'received':
                 return item
             attempt.update(phase='received', actor_receipt={**native, 'at': self.clock()})
@@ -423,7 +429,34 @@ class TicketStore:
             if (item['attempt'] != attempt_id or attempt['executor']['owner'] != owner
                     or item['state'] not in ('running', 'uncertain', 'awaiting_verification')):
                 raise ValueError('stale result or wrong execution owner')
-            proof = dict(result)
+            if not isinstance(result, dict):
+                raise ValueError('result submission must be a JSON object')
+            if (not isinstance(result.get('artifact'), str) or not result['artifact'].strip()
+                    or not Path(result['artifact']).is_absolute()):
+                raise ValueError('result artifact must be a nonempty absolute path string')
+            if result.get('writer_stopped') is not True:
+                raise ValueError('writer_stopped must be the explicit boolean true')
+            if 'usage_tokens' in result and (type(result['usage_tokens']) is not int or result['usage_tokens'] < 0):
+                raise ValueError('usage_tokens must be a nonnegative integer')
+            if 'checks' in result and (not isinstance(result['checks'], dict)
+                    or any(not isinstance(k, str) or not k.strip() or type(v) is not bool
+                           for k, v in result['checks'].items())):
+                raise ValueError('submitted checks must map nonempty names to boolean values')
+            if item['kind'] in ('code', 'integration') or 'source' in result:
+                source = result.get('source')
+                if (not isinstance(source, dict) or not isinstance(source.get('root'), str)
+                        or not source['root'].strip() or not Path(source['root']).is_absolute()
+                        or not isinstance(source.get('head'), str)
+                        or not re.fullmatch(r'[a-fA-F0-9]{40}|[a-fA-F0-9]{64}', source['head'])
+                        or not isinstance(source.get('fingerprint'), str)
+                        or not re.fullmatch(r'[a-fA-F0-9]{64}', source['fingerprint'])):
+                    raise ValueError('source requires an absolute root string, pinned head SHA and SHA-256 fingerprint')
+                if not within(source['root'], item['scope']['paths']):
+                    raise ValueError('source root is outside approved ticket scope')
+            try:
+                proof = json.loads(json.dumps(result, allow_nan=False))
+            except (TypeError, ValueError) as error:
+                raise ValueError('result submission must contain JSON values') from error
             if not within(proof.get('artifact', ''),
                           [*item['scope']['paths'], str(self.path.resolve().parent / 'operation-results' / ident)]):
                 raise ValueError('result artifact is outside approved data/output scope')
@@ -525,15 +558,19 @@ class TicketStore:
             item = self.get(ident)
             attempt = self.attempt(attempt_id)
             executor = attempt['executor']
+            submission = attempt.get('submission')
             if (item['attempt'] != attempt_id or native.get('terminal') != executor['terminal']
                     or native.get('pid') != executor['pid'] or native.get('owner') != executor['owner']
                     or native.get('status') not in ('idle', 'done')
-                    or not attempt.get('submission', {}).get('writer_stopped')):
+                    or not isinstance(submission, dict) or submission.get('writer_stopped') is not True):
                 raise ValueError('writer stop requires fenced native idle and explicit evidence')
+            if attempt.get('stop_observation'):
+                return
             attempt['stop_observation'] = {**native, 'at': self.clock()}
             self._save_attempt(attempt)
-            ledger.release_in_transaction(self.db, attempt_id, execution_stopped=True,
-                                           release_writes=True, writer_stopped=True)
+            reservation = ledger.release_in_transaction(self.db, attempt_id, execution_stopped=True)
+            reservation['resources'] = [{**resource, 'mode':'read'} for resource in reservation['resources']]
+            ResourceLedger._write(self.db, reservation)
             self._save(item, 'writer_stopped', {'attempt': attempt_id})
         self.notify()
 
@@ -544,6 +581,7 @@ class TicketStore:
             attempt = self.attempt(attempt_id)
             submission = attempt.get('submission') or {}
             if (item['attempt'] != attempt_id or item['state'] not in ('awaiting_verification', 'awaiting_review')
+                    or not isinstance(submission, dict) or submission.get('writer_stopped') is not True
                     or not attempt.get('stop_observation') or self.gate(ident)
                     or self.incomplete_children(ident)):
                 raise ValueError('completion gate is not satisfied')
@@ -570,6 +608,9 @@ class TicketStore:
                 budget['tokens_spent'] += usage
                 self._save_budget(item['origin_id'], budget)
             # Missing usage remains reserved, not fabricated as zero cost.
+            from .resources import ResourceLedger
+            ResourceLedger(self.db).release_in_transaction(self.db, attempt_id, execution_stopped=True,
+                                                           release_writes=True, writer_stopped=True)
             attempt.update(phase='completed', verification=verification, completed_at=self.clock())
             self._save_attempt(attempt)
             item.update(state='completed', reason='', next_action='release dependencies',
