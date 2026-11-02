@@ -11,7 +11,7 @@ from .tickets import TicketStore
 def parser(commands):
     item = commands.add_parser('queue')
     item.add_argument('action', choices=('create', 'approve', 'show', 'status', 'submit', 'receipt',
-                                        'wait-children', 'dependencies', 'tick', 'intake', 'classify'))
+                                        'wait-children', 'dependencies', 'tick', 'intake', 'classify', 'approval-template'))
     item.add_argument('ticket', nargs='?')
     item.add_argument('--ticket-file')
     item.add_argument('--key')
@@ -60,6 +60,8 @@ def handle(args):
             raise ValueError('ticket identity required')
         if args.action == 'show':
             return queue.get(args.ticket)
+        if args.action == 'approval-template':
+            return queue.approval_template(args.ticket)
         if args.action == 'approve':
             if not args.user_approved or not args.approval_file:
                 raise ValueError('explicit user-approved action and exact scope approval file required')
