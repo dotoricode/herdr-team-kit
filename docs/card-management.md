@@ -4,13 +4,15 @@
 
 ## 1. 현재 카드 확인
 
-App 전용 config·state·bindings 경로를 현재 세션의 실행 지침에서 확인합니다. 기본 TUI 경로와 섞지 않습니다. 아래 예시는 가상 경로이며 실제 값으로 바꾼 뒤 사용합니다.
+App 전용 실행기에서 Python·설치 루트·config·state·bindings 경로를 확인합니다. 제품 저장소의 cwd나 시스템 Python을 그대로 가정하지 않고 의존성이 설치된 실행 환경을 사용합니다. 기본 TUI 경로와 섞지 않습니다. 아래 예시는 가상 경로이며 실제 값으로 바꾼 뒤 사용합니다.
 
 ```sh
+PYTHON=/srv/example/ui-venv/bin/python
+TEAMKIT=/srv/example/team-kit
 CONFIG=/srv/example/gui/config.json
 STATE=/srv/example/gui/state.sqlite
 BINDINGS=/srv/example/gui/bindings.json
-python3 teamkit_app.py --config "$CONFIG" --state "$STATE" --bindings "$BINDINGS" view
+"$PYTHON" "$TEAMKIT/teamkit_app.py" --config "$CONFIG" --state "$STATE" --bindings "$BINDINGS" view
 ```
 
 기존 카드의 제목·work ID·현재 문서 revision/digest·담당자·연결 task·대기 이유를 대조합니다. 같은 업무의 새 세션이나 재시도는 새 카드로 복제하지 않습니다. 전송 결과가 불명확하면 기존 요청 ID·수신 기록·실행 주체를 확인한 뒤 다음 행동을 정합니다.
@@ -20,11 +22,11 @@ python3 teamkit_app.py --config "$CONFIG" --state "$STATE" --bindings "$BINDINGS
 제품 업무는 `work create`로 등록합니다. 비공개 plan에는 목적·변경 내용·검증·영향·사용자가 결정할 내용을 쓰고, contract에는 허용 경로와 완료 조건을 둡니다. 전문용어는 유지하면서 처음 나올 때 쉬운 뜻을 붙입니다. 원문·계약 형식과 승인·버전 변경 절차는 [설계 승인 지침](approved-workflow.md)을 따릅니다.
 
 ```sh
-python3 teamkit_cli.py --config "$CONFIG" --state "$STATE" work create WORK-1 \
+"$PYTHON" "$TEAMKIT/teamkit_cli.py" --config "$CONFIG" --state "$STATE" work create WORK-1 \
   --team alpha --root /srv/example/team-alpha/repo \
   --plan-file /srv/example/private/plan.md --contract-file /srv/example/private/contract.json
-python3 teamkit_cli.py --config "$CONFIG" --state "$STATE" work submit WORK-1
-python3 teamkit_cli.py --config "$CONFIG" --state "$STATE" work show WORK-1
+"$PYTHON" "$TEAMKIT/teamkit_cli.py" --config "$CONFIG" --state "$STATE" work submit WORK-1
+"$PYTHON" "$TEAMKIT/teamkit_cli.py" --config "$CONFIG" --state "$STATE" work show WORK-1
 ```
 
 사용자 승인은 해당 revision/digest의 명시적 결정으로 기록합니다. 구현 task는 `create TASK-1 ... --work WORK-1`로 연결합니다. 새 설계 버전은 `work revise`로 만들며, 이전 승인·실행을 새 버전에 자동 적용하지 않습니다. `create`는 등록이고 실제 배정·수신·실행과 구분합니다. 현재 CLI의 `--help`가 인자 형식의 기준입니다.
@@ -58,9 +60,9 @@ python3 teamkit_cli.py --config "$CONFIG" --state "$STATE" work show WORK-1
 이 파일은 의견 전달용 질문이며 설계 승인 명령이 아닙니다. 선택지는 1~4개, `option_id`는 중복 없는 소문자·숫자·`-`·`_` 값입니다. `other`는 예약값이며 기타 입력은 도구가 제공합니다.
 
 ```sh
-python3 teamkit_app.py --config "$CONFIG" --state "$STATE" --bindings "$BINDINGS" \
+"$PYTHON" "$TEAMKIT/teamkit_app.py" --config "$CONFIG" --state "$STATE" --bindings "$BINDINGS" \
   card-detail --kind work --work WORK-1
-python3 teamkit_app.py --config "$CONFIG" --state "$STATE" --bindings "$BINDINGS" \
+"$PYTHON" "$TEAMKIT/teamkit_app.py" --config "$CONFIG" --state "$STATE" --bindings "$BINDINGS" \
   card-question-set --kind work --work WORK-1 \
   --task LEADER-1 --owner current-owner --attempt 1 \
   --question-file /srv/example/private/question.json --expected-question-revision 0
@@ -92,7 +94,7 @@ python3 teamkit_app.py --config "$CONFIG" --state "$STATE" --bindings "$BINDINGS
 저장은 `card-board-action`을 사용하고 직전에 읽은 `board.revision`과 고유한 요청 ID를 전달합니다. SQLite나 보드 journal을 직접 수정하지 않습니다. 같은 요청의 재확인은 같은 요청 ID를 쓰며, 충돌이나 결과 불명 때 현재 `card-detail`을 먼저 조회합니다. 새 설계·질문 내용이 생기면 이전 수동 상태를 이어받아 숨기지 않고 다시 표시합니다.
 
 ```sh
-python3 teamkit_app.py --config "$CONFIG" --state "$STATE" --bindings "$BINDINGS" \
+"$PYTHON" "$TEAMKIT/teamkit_app.py" --config "$CONFIG" --state "$STATE" --bindings "$BINDINGS" \
   card-board-action --kind work --work WORK-1 --board-action progress \
   --board-revision REVISION_FROM_CARD_DETAIL --request-id board-example-0001
 ```
