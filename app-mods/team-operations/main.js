@@ -655,7 +655,7 @@ export default class TeamOperations extends View {
         .children(choices.map(([action, status]) => button(`board-status-${key}-${status}`, `${current === status ? "●" : "○"} ${labels[status]}`, cx => cx.spawn(async cx => this.organizeCard(kind, card, action, cx)), disabled)))
         .child(button(`board-status-close-${key}`, "닫기", cx => { this.boardStatusOpen = null; cx.notify(); }));
       return div().on_click((_e, cx) => cx.stop_propagation?.()).child(Popover.new(`board-status-popover-${key}`).open(this.boardStatusOpen === key).anchor("top_left").overlay_closable(true)
-        .on_open_change((open, cx) => { if (!disabled) this.boardStatusOpen = open ? key : null; cx.notify(); })
+        .on_open_change((open, cx) => { if (!open && this.boardStatusOpen === key) this.boardStatusOpen = null; else if (open && !disabled) this.boardStatusOpen = key; cx.notify(); })
         .trigger(div().id(`board-status-trigger-${key}`).px(10).py(6).rounded(6).bg(t.raised).cursor_pointer().text_color(disabled ? t.dim : t.foreground).child(`상태: ${labels[current]} ▾`))
         .content(panel));
     };
