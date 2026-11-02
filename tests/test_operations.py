@@ -121,6 +121,36 @@ class OperationsTest(unittest.TestCase):
         tick(self.config, self.state, self.runtime)
         self.assertEqual(1, len(self.runtime.sent))
 
+    def test_invalid_ticket_planning_does_not_stop_other_work(self):
+        self.enqueue('BAD', kind='code', priority=10)
+        self.enqueue('GOOD')
+        def executors(ticket):
+            if ticket['id']=='BAD':
+                raise ValueError('code/integration ticket requires the existing pinned work approval')
+            return [self.runtime.executor]
+        self.runtime.executors=executors
+        tick(self.config, self.state, self.runtime)
+        store=TicketStore(self.state)
+        try:
+            self.assertIn('pinned work',store.get('BAD')['reason'])
+            self.assertEqual('awaiting_verification',store.get('GOOD')['state'])
+        finally: store.close()
+
+    def test_warm_executor_cannot_ignore_explicit_account_constraint(self):
+        from unittest.mock import patch
+        from teamkit.operations import NativeRuntime
+        self.enqueue('ONE', execution_constraint={'provider':'codex','account':'personal'})
+        store=TicketStore(self.state)
+        try: ticket=store.get('ONE')
+        finally: store.close()
+        config=json.loads(self.config.read_text())
+        config['teams']['example']['roles']['leader']={'provider':'claude','model':'fixture','effort':'medium'}
+        runtime=NativeRuntime(config,self.state)
+        executor=dict(self.runtime.executor,provider='claude',account='team',roles=['investigator'])
+        with patch.object(runtime,'native',return_value={}):
+            with self.assertRaisesRegex(ValueError,'outside the existing role policy'):
+                runtime.admit(ticket,executor)
+
     def test_review_failure_repair_reverification_and_independent_review(self):
         self.enqueue('ONE', review_required=True)
         original_send = self.runtime.send

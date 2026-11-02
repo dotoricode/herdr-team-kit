@@ -38,7 +38,7 @@ def pending(connection):
     if not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='operation_instructions'").fetchone():
         return []
     return [json.loads(row[0]) for row in connection.execute('SELECT body FROM operation_instructions')
-            if json.loads(row[0])['state']=='awaiting_classification']
+            if json.loads(row[0])['state'] not in ('ticketed','dismissed')]
 
 
 def capture(config, state):
@@ -49,6 +49,9 @@ def capture(config, state):
     """
     if config.get('operations',{}).get('intake',{}).get('enabled') is not True:
         return {'enabled':False}
+    journal_format = config['operations']['intake'].get('journal_format','response_item')
+    if journal_format not in ('response_item','event_msg'):
+        raise ValueError('unsupported coordinator journal user-message contract')
     from .app_coordinator import read_record
     from .context_observation import _rollout_path
     from .config import profile
@@ -83,10 +86,15 @@ def capture(config, state):
                     raise ValueError('oversized coordinator event requires inspection')
                 event=json.loads(line)
                 payload=event.get('payload',{})
-                if event.get('type')=='event_msg' and payload.get('type')=='user_message':
+                text = None
+                if journal_format=='response_item' and event.get('type')=='response_item' and payload.get('role')=='user':
+                    text='\n'.join(x.get('text','') for x in payload.get('content',[])
+                                   if isinstance(x,dict) and isinstance(x.get('text'),str))
+                elif journal_format=='event_msg' and event.get('type')=='event_msg' and payload.get('type')=='user_message':
                     text=payload.get('message','')
+                if isinstance(text,str):
                     # Agent notifications and environment envelopes are not user instructions.
-                    if text.strip() and not text.lstrip().startswith(('<hc ', '<environment_context>', '# AGENTS.md instructions')):
+                    if text.strip() and not text.lstrip().startswith(('<hc ', '<herdr-intake-classify ', '<environment_context>', '# AGENTS.md instructions')):
                         captured.append(register(connection,text,dict(key=session+':'+str(start),
                             session=session,terminal=record.get('terminal'),offset=start)))
                 cursor['offset']=stream.tell()

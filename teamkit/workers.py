@@ -26,6 +26,7 @@ from .tickets import TicketStore, digest, within
 
 DEFAULT_ROLES = {'leader': 'leader', 'investigator': 'leader',
                  'implementer': 'implementer', 'reviewer': 'reviewer'}
+POLICY_FIELDS = ('user_decision', 'failures', 'execution_constraint', 'classification')
 PLAN_FIELDS = ('provider', 'account', 'model', 'effort', 'product', 'roles', 'root',
                'actor_root', 'policy_role', 'profile_binding', 'ticket_signature', 'base', 'basis_kind')
 
@@ -33,7 +34,7 @@ PLAN_FIELDS = ('provider', 'account', 'model', 'effort', 'product', 'roles', 'ro
 def _ticket_signature(ticket):
     fields = ('id', 'origin_id', 'parent_id', 'product', 'role', 'kind', 'goal', 'completion',
               'checks', 'scope', 'approval', 'profiles', 'resources', 'workflow_ref',
-              'execution_constraint', 'classification')
+              *POLICY_FIELDS)
     return digest({key: ticket.get(key) for key in fields})
 
 
@@ -67,8 +68,7 @@ def _policy_task(config, ticket):
     if role not in config['teams'][product]['roles']:
         return None
     task = dict(team=product, role=role, classification=ticket.get('classification', {'kind': 'general', 'risks': []}))
-    if ticket.get('execution_constraint') is not None:
-        task['execution_constraint'] = ticket['execution_constraint']
+    task.update({key: ticket[key] for key in POLICY_FIELDS if key in ticket})
     return task
 
 

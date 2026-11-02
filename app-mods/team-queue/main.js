@@ -176,9 +176,10 @@ export default class TeamQueue extends View {
           .child(badge("가용 실행 슬롯 "+String(data.capacity?.available??"미확인"),t.foreground,t))
           .child(badge("프로필 "+String(data.account_profiles)+" · 준비 후보 "+String(data.candidate_slots),t.muted,t)))
         .child(h_flex().flex_wrap().gap(6).children(Object.entries(data.waiting??{}).map(([label,count])=>badge(label+" "+String(count),t.muted,t))))
-        .child(words((data.supervisor?.alive && data.supervisor?.heartbeat_fresh && data.supervisor?.source_matches ? "소비기 정상" : "소비기 확인 필요")+
+        .child(words((data.supervisor?.alive && data.supervisor?.heartbeat_fresh && data.supervisor?.source_matches && data.supervisor?.dispatch_healthy ? "소비기 정상" : "소비기 확인 필요")+
           " · 소스 "+String(data.supervisor?.source_fingerprint??"미확인").slice(0,12)+
           " · 관측 지연 "+String(Math.round(data.supervisor?.heartbeat_age_seconds??0))+"초").text_size(11).text_color(data.supervisor?.alive?t.muted:t.blocked))
+        .when(Boolean(data.supervisor?.dispatch?.last_error),el=>el.child(words("배정 소비기 오류 · "+String(data.supervisor?.dispatch?.last_error?.reason??"관측 필요")).text_size(11).text_color(t.blocked)))
         .child(words("HC 밖 모델 실행은 통제 범위 밖입니다. 슬롯·프로필·준비 후보는 서로 다른 수치입니다.").text_size(11).text_color(t.muted))
         .child(h_flex().flex_wrap().gap(8).children(Object.entries(data.profiles??{}).map(([key,value])=>{
           const [p,a]=key.split("/"); return v_flex().gap(3).px(8).py(5).border_1().border_color(t.border)

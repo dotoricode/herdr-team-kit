@@ -204,7 +204,7 @@ class TicketStore:
                 narrowed = narrowed and (same_verifiers or safe_review)
                 # These fields affect routing/approval, rather than the requested
                 # subtask. Descendants cannot weaken a parent's execution policy.
-                for field in ('execution_constraint', 'classification', 'user_decision', 'workflow_ref'):
+                for field in ('execution_constraint', 'classification', 'user_decision', 'workflow_ref', 'failures'):
                     if spec.get(field) != parent.get(field):
                         narrowed = False
                 for resource in resources:
@@ -457,6 +457,24 @@ class TicketStore:
         self.notify()
         return item
 
+    def _check_child_lease_release(self, ident, attempt_id, release_writes):
+        from .resources import ResourceLedger, _conflict, normalize_resources
+        if type(release_writes) is not bool:
+            raise ValueError('release_writes must be an explicit boolean')
+        if release_writes:
+            return
+        retained = next((row for row in ResourceLedger._rows(self.db)
+                         if row['attempt'] == attempt_id and row['writes_held']), None)
+        if retained is None:
+            return
+        conflicts = [child for child in self.incomplete_children(ident)
+                     if any(_conflict(parent_resource, child_resource)
+                            for parent_resource in retained['resources']
+                            for child_resource in normalize_resources(self.get(child)['resources']))]
+        if conflicts:
+            raise ValueError('부모의 보유 자원이 필수 하위 작업 ' + ', '.join(conflicts)
+                             + '와 충돌합니다. 모든 쓰기 중단을 확인한 뒤 wait-children --release-writes로 다시 요청하세요.')
+
     def wait_children(self, ident, attempt_id, owner, stopped, release_writes=False):
         from .resources import ResourceLedger
         ledger = ResourceLedger(self.db)
@@ -467,6 +485,7 @@ class TicketStore:
                     or item['state'] not in ('running', 'waiting_children_stop', 'awaiting_verification', 'awaiting_review')
                     or not self.incomplete_children(ident)):
                 raise ValueError('parent attempt or required children mismatch')
+            self._check_child_lease_release(ident, attempt_id, release_writes)
             ledger.release_in_transaction(self.db, attempt_id, execution_stopped=stopped,
                                            release_writes=release_writes, writer_stopped=stopped)
             item.update(state='waiting_children', next_action='wait required children; resume as a new attempt')
@@ -480,6 +499,7 @@ class TicketStore:
             if (item['attempt'] != attempt_id or attempt['executor']['owner'] != owner
                     or item['state'] != 'running' or not self.incomplete_children(ident)):
                 raise ValueError('parent attempt or required children mismatch')
+            self._check_child_lease_release(ident, attempt_id, release_writes)
             item.update(state='waiting_children_stop', release_writes_on_stop=release_writes,
                         next_action='finish native turn so host can release execution reservation')
             self._save(item, 'children_wait_requested')

@@ -102,16 +102,20 @@ class NativeRuntime:
         if executor['product'] not in (ticket['product'], '*') or ticket['role'] not in executor['roles']:
             raise ValueError('executor responsibility or role mismatch')
         from .core_runtime import _model_effort
-        from .workers import DEFAULT_ROLES
-        role_key = self.config.get('operations',{}).get('worker_roles',{}).get(ticket['role'], DEFAULT_ROLES.get(ticket['role']))
+        from .workers import _policy_task
         from .departments import execution_config
         effective = execution_config(self.config)
-        role = effective.get('teams', {}).get(ticket['product'], {}).get('roles', {}).get(role_key)
+        task = _policy_task(effective, ticket)
+        if task is None:
+            raise ValueError('no explicit responsibility/role policy for this ticket')
+        from .routing import execution_policy
+        role = execution_policy(effective, task)
+        if role.get('action') != 'dispatch':
+            raise ValueError('role policy requires a user decision')
         if role:
             self.native(executor)
             from .routing import execution_candidates
-            choices = execution_candidates(effective, {'role':role_key,
-                       'classification':{'kind':'general','risks':[]}}, role, time.time())
+            choices = execution_candidates(effective, task, role, time.time())
             expected = next((c for c in choices or [] if c['provider']==executor['provider']
                              and c['account']==executor['account']), None)
             if choices is None and executor['provider']==role['provider']:
@@ -261,7 +265,7 @@ def followup(queue, ticket, attempt, relation, goal, *, reviewer=False):
                 parent_attempt=attempt['id'])
     if ticket.get('workflow_ref'):
         spec['workflow_ref'] = ticket['workflow_ref']
-    for field in ('execution_constraint', 'classification', 'user_decision'):
+    for field in ('execution_constraint', 'classification', 'user_decision', 'failures'):
         if field in ticket:
             spec[field] = ticket[field]
     return queue.enqueue(spec, key)
@@ -269,6 +273,8 @@ def followup(queue, ticket, attempt, relation, goal, *, reviewer=False):
 
 def reconcile(queue, runtime, config=None):
     for ticket in queue.list():
+        if ticket['role']=='ui':
+            continue  # Only the official UI lab result adapter can validate UI work.
         if ticket['state'] == 'waiting_children_stop':
             attempt = queue.attempt(ticket['attempt'])
             try:
@@ -337,20 +343,40 @@ def tick(config_path, state, runtime=None):
             intake = capture(config, state)
         except (ValueError, OSError, json.JSONDecodeError) as error:
             intake = {'enabled': True, 'reason': str(error)}
+        if config.get('operations',{}).get('intake',{}).get('enabled') is True:
+            from . import intake_dispatch
+            try:
+                intake['classification'] = intake_dispatch.tick(config_path, state)
+            except (ValueError, KeyError, OSError, NativeError, subprocess.SubprocessError) as error:
+                intake['classification'] = {'reason':str(error)}
         from .admission import configure
         configure(queue.db, policy(config))
         reconcile(queue, runtime, config)
         queue.resume_parents()
+        ui = None
+        if any(t['role']=='ui' and t['state'] not in ('completed','cancelled','backlog') for t in queue.list()):
+            from . import ui_jobs
+            try:
+                ui = ui_jobs.tick(config_path,state)
+            except (ValueError, KeyError, OSError, NativeError, subprocess.SubprocessError) as error:
+                ui = {'reason':str(error)}
         started = []
         for ticket in queue.ready():
+            if ticket['role']=='ui':
+                continue
             reasons = []
-            for candidate in runtime.executors(ticket):
+            try:
+                candidates = runtime.executors(ticket)
+            except (ValueError, KeyError, OSError, subprocess.SubprocessError, NativeError) as error:
+                queue.block(ticket['id'], str(error))
+                continue
+            for candidate in candidates:
                 try:
                     executor = runtime.admit(ticket, candidate)
                     eligible_observed_at = time.time()
                     observation = runtime.observation()
                     attempt = queue.reserve(ticket['id'], executor, policy(config), observation)
-                except (ValueError, OSError, subprocess.SubprocessError, NativeError) as error:
+                except (ValueError, KeyError, OSError, subprocess.SubprocessError, NativeError) as error:
                     reasons.append(str(error))
                     continue
                 try:
@@ -369,7 +395,7 @@ def tick(config_path, state, runtime=None):
                 break
             else:
                 queue.block(ticket['id'], '; '.join(sorted(set(reasons))) or 'no registered executor supports this ticket')
-        return {'enabled': True, 'started': started, 'intake': intake}
+        return {'enabled': True, 'started': started, 'intake': intake, 'ui':ui}
     finally:
         queue.close()
 
@@ -383,8 +409,10 @@ def view(config_path, state):
         try:
             from .admission import observe
             ledger = ResourceLedger(queue.db, initialize=False)
-            capacity = ledger.snapshot(policy(config), observe(queue.db, observe_native()))
+            native_observation = observe_native()
+            capacity = ledger.snapshot(policy(config), observe(queue.db, native_observation))
         except Exception as error:
+            native_observation = None
             capacity = {'available': None, 'reason': str(error), 'outside_controlled': False}
         legacy = [dict(id=x['id'], origin_id=x.get('work_id') or x['id'],
                        source='legacy', product=x['team'], state=x['phase'],
@@ -410,6 +438,7 @@ def view(config_path, state):
                 'intake_pending': pending(queue.db),
                 'ready_count_boundary':'approval/dependency ready; native/quota/resource admission happens at dispatch',
                 'task_actors':tasks, 'profiles':profiles,
+                'native_observation': native_observation,
                 'capacity': capacity, 'supervisor': status(config_path, state),
                 'terminology': {'user': '사용자'}, 'account_profiles': 4,
                 'candidate_slots': len(__import__('teamkit.session_pool', fromlist=['_read'])._read(state)['slots'])}

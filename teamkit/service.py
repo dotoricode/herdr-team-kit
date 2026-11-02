@@ -27,7 +27,7 @@ def definition(config_path, state, cli=None, python=None):
 
 
 def status(config_path, state):
-    from .context_handoff import directory, read, source_fingerprint
+    from .context_handoff import directory, read, source_fingerprint, dispatch_status
     heartbeat = read(directory(state) / 'supervisor.json') or {}
     alive = False
     native = None
@@ -42,12 +42,20 @@ def status(config_path, state):
         except Exception:
             pass
     age = max(0, time.time() - heartbeat.get('observed_at', 0))
+    from .config import load
+    dispatch = dispatch_status(state)
+    required = load(config_path).get('operations',{}).get('enabled') is True
+    dispatch_healthy = (not required or dispatch.get('pid') == heartbeat.get('pid')
+        and dispatch.get('phase') in ('idle', 'working')
+        and dispatch.get('last_success_at') is not None
+        and dispatch.get('heartbeat_age_seconds', float('inf')) <= 15)
     return {'schema_version': 1, 'label': label(state), 'alive': alive,
             'heartbeat_age_seconds': age, 'heartbeat_fresh': age <= 15,
+            'dispatch': dispatch, 'dispatch_healthy': dispatch_healthy,
             'source_matches': heartbeat.get('source_fingerprint') == source_fingerprint(),
             'source_fingerprint': source_fingerprint(), 'heartbeat': heartbeat,
             'terminal': heartbeat.get('terminal'),
-            'reason': '' if alive and age <= 15 else 'supervisor missing or heartbeat stale'}
+            'reason': '' if alive and age <= 15 and dispatch_healthy else 'supervisor/dispatcher missing, degraded or heartbeat stale'}
 
 
 def install(config_path, state, directory=None):

@@ -6,27 +6,35 @@ import select
 import socket
 
 
-def address(state):
+def address(state, channel='context'):
     import hashlib
+    if channel not in ('context', 'dispatch'):
+        raise ValueError('unknown wake channel')
     # macOS UNIX socket paths have a small fixed length.
-    key = hashlib.sha256(str(Path(state).resolve()).encode()).hexdigest()[:20]
+    identity = str(Path(state).resolve())
+    if channel != 'context':
+        identity += ':' + channel
+    key = hashlib.sha256(identity.encode()).hexdigest()[:20]
     return str(Path('/tmp') / ('teamkit-wake-' + str(os.getuid()) + '-' + key + '.sock'))
 
 
 def notify(state):
+    delivered = False
     with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
         sock.setblocking(False)
-        try:
-            sock.sendto(b'changed', address(state))
-            return True
-        except OSError:
-            return False
+        for channel in ('context', 'dispatch'):
+            try:
+                sock.sendto(b'changed', address(state, channel))
+                delivered = True
+            except OSError:
+                pass
+    return delivered
 
 
 @contextmanager
-def listener(state):
+def listener(state, channel='context'):
     """Call only while holding the supervisor's exclusive lifetime lock."""
-    path = address(state)
+    path = address(state, channel)
     if os.path.lexists(path):
         info = os.lstat(path)
         import stat

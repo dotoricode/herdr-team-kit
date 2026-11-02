@@ -28,16 +28,20 @@ class IntakeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp); state=root/'state.sqlite'; journal=root/'journal.jsonl'
             TicketStore(state).close()
-            journal.write_text(json.dumps(dict(type='event_msg',payload=dict(type='user_message',message='old history')))+'\n')
+            def user(text):
+                return dict(type='response_item',payload=dict(role='user',content=[dict(type='input_text',text=text)]))
+            journal.write_text(json.dumps(user('old history'))+'\n')
             config=dict(coordinator={'provider':'codex'},profiles={'codex':{'personal':{'home':temp}}},operations={'intake':{'enabled':True}})
             record=dict(context_session_id='fixture-session',account='personal',terminal='t1')
             with patch('teamkit.app_coordinator.read_record',return_value=record), patch('teamkit.context_observation._rollout_path',return_value=journal):
                 self.assertEqual([],intake.capture(config,state)['captured'])
-                message=json.dumps(dict(type='event_msg',payload=dict(type='user_message',message='new instruction')))
+                message=json.dumps(user('new instruction'))
                 with journal.open('a') as output: output.write(message)
                 self.assertEqual([],intake.capture(config,state)['captured'])
                 with journal.open('a') as output:
-                    output.write('\n'+json.dumps(dict(type='event_msg',payload=dict(type='user_message',message='<hc from="worker">reply</hc>')))+'\n')
+                    output.write('\n'+json.dumps(user('<hc from="worker">reply</hc>'))+'\n')
+                    output.write(json.dumps(user('<herdr-intake-classify instruction="one">automatic classification</herdr-intake-classify>'))+'\n')
+                    output.write(json.dumps(dict(type='event_msg',payload=dict(type='user_message',message='duplicate alternate format')))+'\n')
                 self.assertEqual(1,len(intake.capture(config,state)['captured']))
                 self.assertEqual([],intake.capture(config,state)['captured'])
             queue=TicketStore(state)

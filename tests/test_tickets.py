@@ -122,13 +122,14 @@ class TicketsTest(unittest.TestCase):
     def test_parent_returns_execution_and_same_actor_can_continue_own_write_lease(self):
         from teamkit.resources import ResourceLedger
         root = self.spec(scope=dict(paths=[str(self.root)], actions=['read', 'write'], data=['fixture']),
-                         resources=[dict(kind='path', name=str(self.root), mode='write')])
+                         resources=[dict(kind='path', name=str(self.root / 'source'), mode='write')])
         self.queue.enqueue(root, 'one', user_approved=True)
         executor = self.executor()
         first = self.queue.reserve('T1', executor, {}, self.observation())
         native = dict(executor, status='idle')
         self.queue.receipt('T1', first['id'], executor['owner'], executor['terminal'], native)
-        self.queue.enqueue(self.spec('T2', parent_id='T1'), 'two')
+        self.queue.enqueue(self.spec('T2', parent_id='T1',
+            resources=[dict(kind='path', name=str(self.root / 'other'), mode='read')]), 'two')
         self.queue.wait_children('T1', first['id'], executor['owner'], True, False)
         row = ResourceLedger._rows(self.queue.db)[0]
         self.assertFalse(row['execution_reserved'])

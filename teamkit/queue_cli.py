@@ -11,7 +11,7 @@ from .tickets import TicketStore
 def parser(commands):
     item = commands.add_parser('queue')
     item.add_argument('action', choices=('create', 'approve', 'show', 'status', 'submit', 'receipt',
-                                        'wait-children', 'dependencies', 'tick', 'intake'))
+                                        'wait-children', 'dependencies', 'tick', 'intake', 'classify'))
     item.add_argument('ticket', nargs='?')
     item.add_argument('--ticket-file')
     item.add_argument('--key')
@@ -33,6 +33,12 @@ def handle(args):
         return view(args.config, args.state)
     if args.action == 'tick':
         return tick(args.config, args.state)
+    if args.action == 'classify':
+        from .intake_dispatch import submit
+        if not args.ticket or not args.result_file or Path(args.result_file).stat().st_size > 256*1024:
+            raise ValueError('instruction identity and bounded classification JSON file required')
+        return submit(load(args.config),args.state,args.ticket,args.attempt,args.owner,
+                      os.environ.get('HC_TERMINAL_ID'),json.loads(Path(args.result_file).read_text()))
     queue = TicketStore(args.state)
     try:
         if args.action == 'intake':

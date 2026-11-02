@@ -46,6 +46,41 @@ def read_record(state):
     return value
 
 
+def destination(record, linked):
+    """Reuse a verified App destination; only unbound first creation gets IDs."""
+    bound = linked.get('coordinator', {})
+    if not isinstance(bound, dict):
+        raise ValueError('총괄 연결 구조 확인 후 복구 대기입니다.')
+    anchors = [source[key] for source in (record, bound)
+               for key in ('space', 'tab', 'terminal') if key in source]
+    if not anchors:
+        return 'sp'+uuid.uuid4().hex, 'tb'+uuid.uuid4().hex, True
+    if any(not isinstance(value, str) or not value for value in anchors):
+        raise ValueError('총괄 연결 식별자 확인 후 복구 대기입니다.')
+    try:
+        result = subprocess.run(['herdr-app', 'ls'], capture_output=True, text=True, timeout=5, check=True)
+        layout = json.loads(result.stdout)
+        pairs = [(space, tab) for space in layout['spaces'] for tab in space['tabs']]
+        for source in (record, bound):
+            for field in ('space', 'tab'):
+                if source.get(field):
+                    pairs = [(sp, tb) for sp, tb in pairs
+                             if (sp if field == 'space' else tb)['id'] == source[field]]
+        if not any(source.get('tab') for source in (record, bound)):
+            terminal = record.get('terminal') or bound.get('terminal')
+            pairs = [(sp, tb) for sp, tb in pairs
+                     if any(t.get('terminal') == terminal for t in tb['terminals'])]
+        if len(pairs) != 1:
+            raise ValueError('existing destination missing or ambiguous')
+        space, tab = pairs[0]
+        old_terminals = {source.get('terminal') for source in (record, bound)} - {None}
+        if any(t.get('terminal') not in old_terminals for t in tab['terminals']):
+            raise ValueError('destination contains another terminal')
+        return space['id'], tab['id'], False
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        raise ValueError('기존 총괄 스페이스·탭 연결을 확인하지 못해 복구 대기입니다. 새 공간을 만들지 않습니다.') from error
+
+
 def status(state, linked, terminals=None, unavailable=False):
     try:
         if unavailable:raise ValueError('core unavailable')
@@ -109,6 +144,9 @@ def start(config_path, state, binding_path, confirmed, context_job=None):
                 'reason':'GUI 체크포인트에서 새 총괄을 준비하고 있습니다. 제품 업무는 자동 재개하지 않습니다.'}
         if previous.get('context_checkpoint'):
             record['context_checkpoint']=previous['context_checkpoint']
+        for key in ('space', 'tab', 'terminal'):
+            if key in previous:
+                record[key] = previous[key]
         save(record_path(state),record)
         try:
             child=_call('run','--json','--bg','--no-parent','--no-notify','--name','gui-recover-'+nonce[:12],
@@ -158,10 +196,12 @@ def run_job(request):
         spec['env'].update(TEAMKIT_CONFIG=packet['config'],TEAMKIT_STATE=str(state),TEAMKIT_GUI_COORDINATOR=packet['nonce'])
         spec['args']+=['--add-dir',str(state.parent)]
         name='gui-coordinator-'+scope(state)
-        sp='sp'+uuid.uuid4().hex;tab='tb'+uuid.uuid4().hex
+        linked=json.loads(Path(packet['bindings']).read_text())
+        previous_path=Path(request).with_name('previous.json')
+        previous=json.loads(previous_path.read_text()) if previous_path.exists() else {}
+        sp,tab,new_destination=destination({**previous,**record},linked)
         checkpoints=root/'coordinator-checkpoints';checkpoints.mkdir(mode=0o700,exist_ok=True)
         checkpoint=checkpoints/(packet['nonce']+'.md')
-        linked=json.loads(Path(packet['bindings']).read_text())
         inventory=Path(linked['inventory'])
         content=('# GUI 총괄 복구 체크포인트\n\nGUI 작업 기록: '+str(state)+
             '\n고정 작업 정본: '+str(inventory)+'\n실행 코드: '+str(Path(__file__).resolve().parent.parent)+
@@ -207,8 +247,9 @@ def run_job(request):
                                                             owner=packet['nonce']))
         record['native_pid']=pid
         save(record_path(state),record)
-        for command,values in [('space.rename',{'id':sp,'name':'GUI 총괄'}),('tab.rename',{'id':tab,'name':'총괄'})]:
-            subprocess.run(['herdr-app','do',command,json.dumps(values)],capture_output=True,text=True,timeout=5)
+        if new_destination:
+            for command,values in [('space.rename',{'id':sp,'name':'GUI 총괄'}),('tab.rename',{'id':tab,'name':'총괄'})]:
+                subprocess.run(['herdr-app','do',command,json.dumps(values)],capture_output=True,text=True,timeout=5)
         # Read the checkpoint; this is initialization, never a product resume.
         prompt=('GUI 독립 운영 총괄의 복구 확인입니다. '+str(checkpoint)+'와 '+str(inventory)+
                 '의 현재 상태, '+str(policy.get('instructions',''))+'의 GUI 지침만 확인하세요. '+

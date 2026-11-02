@@ -12,7 +12,8 @@ LABELS = {'pending':'배정 대기', 'dispatching':'배정 시작', 'received':'
           'waiting_children':'하위 작업 대기', 'waiting_children_stop':'슬롯 반환 확인',
           'backlog':'추가 제안', 'completed':'검증 완료', 'cancelled':'정리됨', 'deferred':'보류',
           'done':'수신 기록 · 완료 미확인', 'uncertain':'결과 불명', 'waiting_handoff':'인계 확인',
-          'awaiting_classification':'지시 분류 대기'}
+          'awaiting_classification':'지시 분류 대기', 'classifying':'지시 분류 중',
+          'classification_uncertain':'분류 수신 불명', 'needs_clarification':'지시 확인 필요'}
 
 
 def board(config_path, state):
@@ -21,7 +22,7 @@ def board(config_path, state):
     labels = config.get('operations', {}).get('product_labels', {})
     jobs = []
     instructions = [dict(id=x['id'], origin_id=x['id'], product='operations',
-                         state='awaiting_classification', goal=x['text'], reason=x['reason'],
+                         state=x['state'], goal=x['text'], reason=x['reason'],
                          next_action=x['next_action'], created_at=x['created_at'])
                     for x in payload.get('intake_pending', [])]
     for item in [*payload['tickets'], *instructions]:
@@ -30,6 +31,17 @@ def board(config_path, state):
         attention = phase in ('uncertain','waiting_handoff') or bool(item.get('reason'))
         category = 'history' if history else 'deferred' if phase in ('deferred','backlog') else 'attention' if attention else 'progress' if phase in ('running','received','dispatching','awaiting_review','awaiting_verification') else 'waiting'
         executor = item.get('executor') or {}
+        native = next((x for x in (payload.get('native_observation') or {}).get('terminals', [])
+                       if x.get('terminal') == executor.get('terminal')), {})
+        actor = next((x for x in payload.get('task_actors', []) if x.get('id') == executor.get('task')), {})
+        runtime = actor.get('runtime') or {}
+        receiver_matches = bool(executor and actor
+            and actor.get('owner') == executor.get('owner')
+            and runtime.get('terminal') == executor.get('terminal')
+            and runtime.get('native_pid') == executor.get('pid')
+            and native.get('pid') == executor.get('pid')
+            and native.get('owner') == executor.get('owner')
+            and native.get('provider') == executor.get('provider'))
         team = item['product']
         jobs.append(dict(id=item['id'], team=team, team_label=labels.get(team,team),
                          title=item.get('goal', item.get('title',item['id'])), request=item.get('goal',''),
@@ -38,7 +50,7 @@ def board(config_path, state):
                          created_at=item.get('created_at'), updated_at=item.get('updated_at'),
                          provider=executor.get('provider'), account=executor.get('account'),
                          current_terminal=executor.get('terminal'), receiver_terminal=executor.get('terminal'),
-                         receiver_matches_current=bool(executor), source_file='영속 업무 기록 · '+item['id'],
+                         receiver_matches_current=receiver_matches, source_file='영속 업무 기록 · '+item['id'],
                          task_id=item['id'], task_state=phase, origin_id=item.get('origin_id'),
                          parent_id=item.get('parent_id'), role=item.get('role'),
                          work_completion_confirmed=phase=='completed', requires_user_decision=phase=='waiting_approval',
@@ -57,6 +69,12 @@ def board(config_path, state):
     # Observation time alone never triggers rebuilding the whole view.
     semantic = dict(value)
     semantic['supervisor'] = {k:v for k,v in value['supervisor'].items() if k not in ('heartbeat_age_seconds','heartbeat')}
+    dispatch = semantic['supervisor'].get('dispatch')
+    if isinstance(dispatch,dict):
+        dispatch={k:v for k,v in dispatch.items() if k not in ('observed_at','heartbeat_age_seconds','last_success_at','consecutive_errors')}
+        if isinstance(dispatch.get('last_error'),dict):
+            dispatch['last_error']={k:v for k,v in dispatch['last_error'].items() if k!='at'}
+        semantic['supervisor']['dispatch']=dispatch
     semantic['capacity'] = {k:v for k,v in value['capacity'].items() if k not in ('observed_at','observation_age')}
     value['fingerprint'] = hashlib.sha256(json.dumps(semantic,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
     return value

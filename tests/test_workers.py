@@ -14,6 +14,16 @@ from teamkit.tickets import TicketStore
 
 class WorkerTests(unittest.TestCase):
     def setUp(self):
+        for target in ('subprocess.Popen', 'subprocess.run', 'subprocess.call',
+                       'subprocess.check_call', 'subprocess.check_output',
+                       'teamkit.core_runtime._call', 'teamkit.workers._call',
+                       'teamkit.workers.providers.identity',
+                       'teamkit.workers.CoreRuntime.launch',
+                       'teamkit.workers.CoreRuntime.accept',
+                       'teamkit.workers.CoreRuntime._native'):
+            guard = patch(target, side_effect=AssertionError('unmocked external boundary: ' + target))
+            guard.start()
+            self.addCleanup(guard.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -51,13 +61,13 @@ class WorkerTests(unittest.TestCase):
         self.approval = self.root / 'approval.txt'
         self.approval.write_text('User authorizes this fixture investigation.')
 
-    def ticket(self, role='investigator', kind='investigation', product='alpha'):
+    def ticket(self, role='investigator', kind='investigation', product='alpha', **policy):
         return self.queue.enqueue({'id': 'T-' + role + '-' + product, 'product': product, 'role': role, 'kind': kind,
             'goal': 'Inspect fixture files', 'completion': ['A report exists'], 'checks': ['report'],
             'scope': {'paths': [str(self.root)], 'actions': ['read', 'write'], 'data': ['fixture']},
             'profiles': ['codex/team', 'codex/personal', 'claude/team', 'claude/personal'],
             'resources': [{'kind': 'path', 'name': str(self.root), 'mode': 'read'}],
-            'approval': {'state': 'approved', 'reference': str(self.approval)}}, 'ticket-' + role + '-' + product, user_approved=True)
+            'approval': {'state': 'approved', 'reference': str(self.approval)}, **policy}, 'ticket-' + role + '-' + product, user_approved=True)
 
     def reserve(self, ticket):
         with patch.object(workers.providers, 'identity'):
@@ -94,6 +104,56 @@ class WorkerTests(unittest.TestCase):
             self.assertTrue(plans[0]['new'])
             self.assertIsNone(plans[0]['pid'])
             self.assertIsNone(plans[0]['terminal'])
+
+    def test_user_fixed_model_survives_flexible_provider_preference(self):
+        self.config['execution_preference'] = {'provider_order': ['claude', 'codex'],
+                                                'weekend_account_first': True}
+        decision = {'provider': 'codex', 'model': 'user-fixed-model', 'effort': 'high', 'failure_count': 0}
+        ticket = self.ticket(user_decision=decision)
+        with patch.object(workers.providers, 'identity'):
+            plans = workers.plans(self.config, self.state, ticket)
+        self.assertTrue(plans)
+        self.assertEqual({(p['provider'], p['model'], p['effort']) for p in plans},
+                         {('codex', 'user-fixed-model', 'high')})
+
+    def test_failure_evidence_blocks_automatic_new_worker_after_high_effort(self):
+        ticket = self.ticket(failures=[{'kind': 'reasoning', 'cause': 'same-root-cause', 'effort': 'high'}])
+        with patch.object(workers.providers, 'identity') as identity:
+            self.assertEqual(workers.plans(self.config, self.state, ticket), [])
+        identity.assert_not_called()
+
+    def test_request_constraint_cannot_replace_user_approved_provider(self):
+        ticket = self.ticket(user_decision={'provider': 'codex', 'model': 'user-fixed-model',
+                                           'effort': 'high', 'failure_count': 0},
+                             execution_constraint={'provider': 'claude', 'account': 'personal'})
+        with patch.object(workers.providers, 'identity') as identity:
+            self.assertEqual(workers.plans(self.config, self.state, ticket), [])
+        identity.assert_not_called()
+
+    def test_new_user_decision_only_resets_failure_evidence_already_reviewed(self):
+        ticket = self.ticket(user_decision={'provider': 'codex', 'model': 'user-fixed-model',
+                                           'effort': 'high', 'failure_count': 1},
+                             failures=[{'kind': 'reasoning', 'cause': 'reviewed-cause', 'effort': 'high'}])
+        with patch.object(workers.providers, 'identity'):
+            plans = workers.plans(self.config, self.state, ticket)
+        self.assertTrue(plans)
+        self.assertEqual({(p['provider'], p['model'], p['effort']) for p in plans},
+                         {('codex', 'user-fixed-model', 'high')})
+
+    def test_policy_fields_are_forwarded_and_fenced_against_stale_caller(self):
+        policy = {'user_decision': {'provider': 'codex', 'model': 'user-fixed-model',
+                                   'effort': 'high', 'failure_count': 0},
+                  'failures': [], 'execution_constraint': {'provider': 'codex', 'account': 'personal'},
+                  'classification': {'kind': 'general', 'risks': ['security']}}
+        ticket = self.ticket(**policy)
+        task = workers._policy_task(self.config, ticket)
+        for field, value in policy.items():
+            self.assertEqual(task.get(field), value)
+            changed = {**ticket, field: None}
+            with self.subTest(field=field), patch.object(workers.providers, 'identity') as identity:
+                with self.assertRaisesRegex(ValueError, 'contract changed'):
+                    workers.plans(self.config, self.state, changed)
+                identity.assert_not_called()
 
     def test_expired_quota_or_missing_mcp_configuration_cannot_plan_a_worker(self):
         ticket = self.ticket()
