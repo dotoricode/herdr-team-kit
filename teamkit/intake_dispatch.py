@@ -217,6 +217,8 @@ def tick(config_path, state):
                         '{"proposals":[ticket specs]} 또는 {"needs_clarification":"구체 사유"}를 제출하세요.\n'
                         + json.dumps({'owner': attempt['owner'], 'terminal': attempt['terminal'],
                                       'original_instruction': item['text']}, ensure_ascii=False))
+                from .protocol import tool_permission_hint
+                text = text.replace('다음 파일에 분류 JSON', tool_permission_hint('codex')+'다음 파일에 분류 JSON', 1)
                 receipt = actor.accept(name, text, before_send=lambda: _send_guard(
                     config_path, config_bytes, config, state, queue, attempt))
                 if (receipt.get('accepted') is not True or receipt.get('terminal') != attempt['terminal']

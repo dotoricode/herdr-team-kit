@@ -323,7 +323,8 @@ def tick(config_path, state):
                 import shlex
                 receipt = shlex.join(cli(config_path, state, 'queue', 'receipt', ticket['id'],
                                         '--attempt', attempt['id'], '--owner', executor['owner']))
-                request['steps'] = ['Before any screen/browser/UI action, run this exact official ticket receipt: '
+                from .protocol import tool_permission_hint
+                request['steps'] = [tool_permission_hint('codex')+'Before any screen/browser/UI action, run this exact official ticket receipt: '
                                     + receipt + '. If receipt fails or approval is unavailable, stop; do not perform any UI steps.',
                                     *request['steps']]
                 _remember(queue, ticket['id'], attempt['id'], ui_delivery=dict(phase='intent', request=request,
