@@ -57,7 +57,7 @@ class DispatchIntegrationTests(unittest.TestCase):
                         self.f.value['profiles']['codex']['personal']['home']=str(self.f.root/'replacement-personal')
                         self.f.config.write_text(json.dumps(self.f.value))
                     return native
-                with patch('teamkit.core_runtime.require_managed',return_value='tcontroller'),                     patch('teamkit.core_runtime.CoreRuntime._native',side_effect=native_read),                     patch('teamkit.core_runtime.CoreRuntime.prompt') as prompt,                     patch('teamkit.providers.identity'):
+                with patch('teamkit.core_runtime.require_managed',return_value='tcontroller'),                     patch('teamkit.core_runtime.CoreRuntime._native',side_effect=native_read),                     patch('teamkit.context_handoff.clean_prompt',return_value=True),                     patch('teamkit.core_runtime.CoreRuntime.prompt') as prompt,                     patch('teamkit.providers.identity'):
                     message=self.f.root/'event.txt';message.write_text('Observe this event.')
                     with self.assertRaises(ValueError):
                         self.f.call('tell','D1','--message-file',str(message))
