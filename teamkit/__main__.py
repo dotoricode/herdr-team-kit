@@ -524,7 +524,11 @@ def run(args):
                               'message_sha256':message_digest,'terminal':task['runtime']['terminal'],
                               'native_pid':task['runtime']['native_pid'],'phase':'sending','at':time.time()}
                     store.note(args.task,task['owner'],{'last_delivery':delivery})
-                    accepted=runtime.accept(task['runtime']['name'],text)
+                    if task.get('workspace_registered'):
+                        from .workspace_sessions import verify_task
+                        accepted=runtime.accept(task['runtime']['name'],text,before_send=lambda:verify_task(config,args.state,task))
+                    else:
+                        accepted=runtime.accept(task['runtime']['name'],text)
                     delivery.update(accepted,phase='accepted',accepted_at=time.time())
                     with store.transaction():
                         current=store.get(args.task)

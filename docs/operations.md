@@ -238,3 +238,7 @@ GUI core 배정은 실제 응답에 연결된 statusline 자료와 검증된 공
 기존 요청이 `preparation_failed`이고 실패 단계가 pending/waiting_handoff이며 receiver·delivery ID·receipt·submission이 모두 없는 경우에만 운영자가 `pool resume-preparation --request REQUEST --operator-approved`로 같은 요청을 다시 pending으로 돌릴 수 있습니다. 기존 내용과 실패 이력은 보존됩니다. 이 명령은 제품 요청을 직접 보내지 않으며 다음 공식 소비기가 현재 상태를 확인합니다. 그 외 uncertain 요청은 기존 전달 결과를 대조해야 합니다.
 
 `queue pull --team <팀>`은 지정 팀의 준비된 업무를 가져옵니다. `queue pull <업무 ID> --team <팀>`으로 뒤에 등록된 준비 업무를 명시적으로 고를 수 있습니다. 다른 팀 업무는 거부하며, 앞 업무가 배정 불가여도 뒤의 준비 업무를 계속 시도합니다. 우선순위 정렬은 탐색 순서이며 FIFO 실행 의무가 아닙니다. 선행 작업·승인·중복 실행·자원 충돌 검사는 그대로 적용됩니다.
+
+등록 intent는 기존 legacy 소비기의 model-start lock과 같은 경계를 쓰며, 활성 legacy 수신 요청이 있는 터미널은 등록하지 않습니다. DB 자원 예약도 등록 중인 세션이나 다른 owner로 재등록된 세션을 사용할 수 없습니다. 준비 중 전달 전 nonce가 만료되면 expired_before_delivery로 남기고 새 명시 승인 등록에서만 새 owner/nonce를 생성합니다. 원 등록 이력은 보존됩니다. 전달 결과가 불명이면 재등록하지 않습니다.
+
+usage 배정 모드의 legacy pool 계획도 현재 팀의 ready workspace actor를 확인합니다. 기존 request ID와 canonical task 필드는 보존하고 실제 수신 actor task를 receiver.task에 기록하여 공식 tell·제출·검증이 같은 owner/attempt를 따르게 합니다. 이 연결은 기존 canonical owner의 업무나 완료를 새 actor에게 승계하지 않습니다. 전달 직전에도 workspace 소속·프로필 환경·모델·cwd·최신 quota·빈 입력을 다시 확인합니다.

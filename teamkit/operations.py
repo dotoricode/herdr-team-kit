@@ -204,6 +204,9 @@ class NativeRuntime:
                     runtime=executor['runtime'])
         native = CoreRuntime(task)._native(executor['runtime']['name'], ready=require_idle)
         foreground = native['foreground']
+        if executor.get('workspace_registered'):
+            from .workspace_sessions import verify_actor
+            verify_actor(self.config, executor, native)
         if foreground['pid'] != executor['pid']:
             raise ValueError('registered executor PID changed')
         if executor.get('execution_root'):
@@ -867,7 +870,8 @@ def view(config_path, state):
         tasks = [json.loads(row[0]) for row in queue.db.execute('SELECT body FROM tasks')]
         from .workspace_sessions import executors as workspace_executors
         tasks.extend(dict(id=a['task'], owner=a['owner'], provider=a['provider'],
-                          account=a['account'], runtime=a['runtime']) for a in workspace_executors(state))
+                          account=a['account'], runtime=a['runtime']) for a in workspace_executors(state)
+                     if a['task'] not in {t['id'] for t in tasks})
         quota_fields = ('source','observed_at','unavailable','five_hour','weekly','not_applicable')
         profiles = {key:{**{k:value.get(k) for k in quota_fields if k in (value or {})},
                          'eligible':eligible(value,time.time(),config['quota_ttl_seconds'])} for key,value in quotas.items()}

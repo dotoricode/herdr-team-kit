@@ -1,5 +1,6 @@
 """Explicit registration of existing workspace sessions; no inherited ownership."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import shlex
@@ -116,29 +117,49 @@ def discover(config, state, team):
 
 def register(config_path, state, team, terminal, approved=False):
     require_managed()
+    from .context_handoff import locked, directory
+    # Legacy dispatch saves its receiver under this same lock before transport.
+    with locked(directory(state)/'model-start'):
+        return _register(config_path, state, team, terminal, approved)
+
+
+def _register(config_path, state, team, terminal, approved=False):
+    require_managed()
     if approved is not True:
         raise ValueError('explicit operator approval required for workspace registration')
     config = load(config_path)
     proof = observe(config, state, team, terminal)
+    from .pool_control import requests
+    if any((job.get('receiver') or {}).get('terminal') == terminal
+           and job['phase'] not in ('pending', 'completed', 'deferred', 'cancelled') for job in requests(state)):
+        raise ValueError('workspace session has a live or unconfirmed legacy delivery')
     queue = TicketStore(state)
     try:
         with queue.transaction():
             previous = next((r for r in rows(queue.db) if r['terminal'] == terminal), None)
-            if previous:
+            if previous and previous['phase'] != 'expired_before_delivery':
                 raise ValueError('workspace registration already exists; inspect original receipt, never resend')
+            held = ResourceLedger._rows(queue.db) if queue.db.execute("SELECT 1 FROM sqlite_master WHERE name='resource_reservations'").fetchone() else []
+            if any(r['execution_reserved'] and (r.get('session') or {}).get('terminal') == terminal for r in held):
+                raise ValueError('workspace registration conflicts with an active reservation')
             owner, nonce = uuid.uuid4().hex, uuid.uuid4().hex
             task = 'WORKSPACE-' + owner
             actor = {k:proof[k] for k in ('terminal', 'pid', 'provider', 'account', 'model', 'effort', 'profile_binding', 'root', 'product')}
-            actor.update(owner=owner, task=task, roles=['leader', 'investigator', 'implementer', 'reviewer'],
+            actor.update(owner=owner, task=task, workspace_registered=True, roles=['leader', 'investigator', 'implementer', 'reviewer'],
                          runtime=dict(backend='core', name=task, native_name=proof['native_name'], terminal=terminal,
                                       native_pid=proof['pid'], session_cwd=proof['root']))
             record = dict(terminal=terminal, actor=actor, phase='registering', nonce=nonce,
-                          created_at=time.time(), expires_at=time.time()+TTL, proof=proof)
+                          created_at=time.time(), expires_at=time.time()+TTL, proof=proof,
+                          history=(previous.get('history', [])+[{k:v for k,v in previous.items() if k!='history'}]) if previous else [])
             save(queue.db, record)
         # Durable intent precedes label/transport changes. No retry after partial failure.
         latest = observe(config, state, team, terminal)
         if latest != proof:
             raise ValueError('workspace changed before registration')
+        if time.time() > record['expires_at']:
+            with queue.transaction():
+                record['phase']='expired_before_delivery';save(queue.db,record)
+            raise ValueError('workspace registration expired before delivery')
         _call('label', terminal, 'teamkit.owner='+owner, 'teamkit.task='+task, 'teamkit.name='+task)
         receipt = [sys.executable, str(Path(__file__).resolve().parent.parent/'teamkit_cli.py'),
                    '--config', str(config_path), '--state', str(state), 'pool', 'workspace-receipt',
@@ -148,6 +169,10 @@ def register(config_path, state, team, terminal, approved=False):
                 'Previous task ownership is not inherited.\n'+shlex.join(receipt))
         runtime = CoreRuntime(dict(id=task, owner=owner, provider=proof['provider'], runtime=actor['runtime']))
         def guard():
+            if time.time() > record['expires_at']:
+                with queue.transaction():
+                    record['phase']='expired_before_delivery';save(queue.db,record)
+                raise ValueError('workspace registration expired before delivery')
             current = runtime._native(task, ready=True)
             screen = _call('read', '--json', terminal)
             if (current.get('turn') != proof['turn'] or screen.get('complete') is not True
@@ -187,6 +212,18 @@ def receipt(config_path, state, terminal, owner, nonce):
                     or (native.get('labels') or {}).get('herdr.space') != space(config, actor['product'])
                     or native.get('turn', -1) <= record['proof']['turn']):
                 raise ValueError('workspace receipt profile/model/workspace/turn changed')
+            store=object.__new__(Store);store.db=queue.db;store.path=Path(state)
+            if queue.db.execute('SELECT 1 FROM tasks WHERE id=?',(actor['task'],)).fetchone():
+                raise ValueError('workspace actor task already exists')
+            runtime=dict(actor['runtime'],identity_checked=True,profile_binding=actor['profile_binding'])
+            actor['runtime']=runtime
+            value=dict(id=actor['task'],team=actor['product'],role='leader',root=actor['root'],
+                base=hashlib.sha256(('workspace-registration:'+actor['root']).encode()).hexdigest(),
+                basis_kind='instructions',goal='Receive approved workspace assignments under this fresh registration.',
+                state='ready',owner=owner,attempt_count=1,provider=actor['provider'],account=actor['account'],
+                model=actor['model'],effort=actor['effort'],runtime=runtime,
+                workspace_registered=True,workspace_product=actor['product'])
+            store._save(value,'workspace_receipted',{'terminal':terminal,'pid':actor['pid']})
             record.update(phase='ready', received_at=time.time())
             save(queue.db, record)
             return dict(terminal=terminal, phase='ready', owner=owner)
@@ -200,3 +237,69 @@ def executors(state):
         return [r['actor'] for r in rows(queue.db) if r['phase'] == 'ready']
     finally:
         queue.close()
+
+
+def verify_actor(config, actor, native):
+    """Recheck mutable workspace/process namespace at every admission and send fence."""
+    if (native.get('labels') or {}).get('herdr.space') != space(config, actor['product']):
+        raise ValueError('registered workspace membership changed')
+    foreground = native.get('foreground') or {}
+    cwd = foreground.get('cwd') or native.get('cwd')
+    if not cwd or Path(cwd).resolve() != Path(actor['root']).resolve():
+        raise ValueError('registered workspace root changed')
+    pr = profile(config, actor['provider'], actor['account'])
+    env = _process_environment(actor['pid'])
+    if (binding(pr) != actor['profile_binding'] or not _namespace_matches(actor['provider'], pr, env)
+            or any(env.get(k) for k in AUTH_ENV)
+            or _model_effort(actor['provider'], foreground.get('argv')) != (actor['model'], actor['effort'])):
+        raise ValueError('registered workspace profile/model changed')
+
+
+def registration_fence(db, terminal, owner):
+    record = next((r for r in rows(db) if r['terminal'] == terminal), None)
+    if record and (record['phase'] != 'ready' or record['actor']['owner'] != owner):
+        raise ValueError('workspace registration owns the session; previous owner cannot dispatch')
+
+
+def plan(config, state, team):
+    """Use a receipted current workspace actor without inheriting the canonical owner."""
+    if config.get('operations',{}).get('allocation_policy') != 'usage':return None
+    store=Store(state,read_only=True)
+    try:
+        for actor in executors(state):
+            if actor['product']!=team:continue
+            task=store.get(actor['task'])
+            if task['state']!='ready' or task.get('owner')!=actor['owner']:continue
+            try:
+                proof=observe(config,state,team,actor['terminal'])
+                native=CoreRuntime(dict(id=actor['task'],owner=actor['owner'],provider=actor['provider'],runtime=actor['runtime']))._native(actor['task'],ready=True)
+                verify_actor(config,actor,native)
+                if proof['pid']!=actor['pid']:continue
+            except (ValueError,RuntimeError,NativeError,OSError):continue
+            selected={k:actor[k] for k in ('provider','account','model','effort')};selected['action']='dispatch'
+            return dict(team=team,task=actor['task'],selection=selected,state='ready',owner=actor['owner'],
+                        attempt=task['attempt_count'],terminal=actor['terminal'],action='tell',workspace=True)
+    finally:store.close()
+    return None
+
+
+def verify_task(config,state,task):
+    queue=TicketStore(state,read_only=True)
+    try:
+        record=next((r for r in rows(queue.db) if r['actor']['task']==task['id'] and r['phase']=='ready'),None)
+    finally:queue.close()
+    if not record or record['actor']['owner']!=task['owner']:
+        raise ValueError('workspace registration or owner changed')
+    actor=record['actor']
+    native=CoreRuntime(task)._native(actor['task'],ready=True)
+    verify_actor(config,actor,native)
+    from .providers import identity
+    identity(actor['provider'],profile(config,actor['provider'],actor['account']))
+    store=Store(state,read_only=True)
+    try:
+        if not eligible(cached_quota(config,store,actor['provider'],actor['account']),time.time(),config['quota_ttl_seconds']):
+            raise ValueError('workspace quota changed before delivery')
+    finally:store.close()
+    screen=_call('read','--json',actor['terminal'])
+    if screen.get('complete') is not True or not empty_input(screen.get('text','')):
+        raise ValueError('workspace input changed before delivery')

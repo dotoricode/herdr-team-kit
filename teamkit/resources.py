@@ -207,6 +207,8 @@ class ResourceLedger:
     def _session_available(self, connection, attempt, session):
         if session is None:
             return
+        from .workspace_sessions import registration_fence
+        registration_fence(connection, session['terminal'], session['owner'])
         if any(row['attempt'] != attempt and row['execution_reserved'] and row.get('session')
                and row['session']['terminal'] == session['terminal'] for row in self._rows(connection)):
             raise ResourceUnavailable('session_conflict', 'native terminal already belongs to another live attempt')

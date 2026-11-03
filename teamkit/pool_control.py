@@ -93,6 +93,9 @@ def constraint(config, provider=None, account=None):
 def plan(config_path,state,team,provider=None,account=None):
     if not Path(state).is_file():raise ValueError('existing pool task store required')
     config=load(config_path)
+    from .workspace_sessions import plan as workspace_plan
+    current=workspace_plan(config,state,team)
+    if current is not None:return current
     from .__main__ import select_execution
     store=Store(state)
     try:
@@ -188,7 +191,15 @@ def idle_native(task,config,state):
     """Identity failures propagate; a verified busy/dirty terminal only waits."""
     from .core_runtime import CoreRuntime
     from . import context_handoff as context
+    from .workspace_sessions import registration_fence
+    store=Store(state,read_only=True)
+    try:registration_fence(store.db,task['runtime']['terminal'],task['owner'])
+    finally:store.close()
     runtime=CoreRuntime(task)
+    if task.get('workspace_registered'):
+        from .workspace_sessions import verify_task
+        verify_task(config,state,task)
+        return runtime._native(task['runtime']['name'],ready=True)
     value=runtime._native(task['runtime']['name'])
     if (value.get('status') or {}).get('state') not in ('idle','done'):return None
     value=runtime._native(task['runtime']['name'],ready=True)
@@ -285,7 +296,7 @@ def _advance(config_path,state,ident):
                     save('dispatching','준비된 세션에 공식 배정합니다.')
                 else:
                     store=Store(state)
-                    try:task=store.get(job['task'])
+                    try:task=store.get(route.get('task',job['task']))
                     finally:store.close()
                     if idle_native(task,config,state) is None:
                         return save('pending','현재 작업·입력 초안을 보존하고 기다립니다.')
@@ -313,14 +324,14 @@ def _advance(config_path,state,ident):
                     message.write_text(text+leader_guidance('leader')+'\n'+job['message'])
                     message.chmod(0o600)
                     job['delivery_message_sha256']=hashlib.sha256(message.read_bytes()).hexdigest()
-                    job['receiver']={'terminal':task['runtime']['terminal'],'owner':route['owner'],
+                    job['receiver']={'task':task['id'],'terminal':task['runtime']['terminal'],'owner':route['owner'],
                                      'attempt':route['attempt'],'native_pid':task['runtime']['native_pid']}
                     save('sending','선택된 팀장에게 요청을 전달합니다.')
             if route['action']=='dispatch':
                 result=official(config_path,state,'dispatch',job['task'],'--expected-attempt',str(route['attempt']))
                 if result.get('state')!='ready':return save('uncertain','새 담당의 수신·대기를 확인해야 합니다.')
                 return save('pending','새 담당 준비가 끝났습니다. 다음 경계에서 요청을 전달합니다.')
-            result=official(config_path,state,'tell',job['task'],'--message-file',str(message),
+            result=official(config_path,state,'tell',route.get('task',job['task']),'--message-file',str(message),
                 '--expected-owner',route['owner'],'--expected-attempt',str(route['attempt']),
                 '--accept-only','--delivery-id',job['delivery_id'])
             receiver=job['receiver']
@@ -422,7 +433,7 @@ def submit(config_path,state,ident,evidence_file,owner,attempt,delivery_id):
         receiver=job.get('receiver') or {}
         if require_managed()!=receiver.get('terminal'):raise ValueError('only the received execution terminal may submit its result')
         store=Store(state)
-        try:task=store.get(job['task'])
+        try:task=store.get((job.get('receiver') or {}).get('task') or job['task'])
         finally:store.close()
         receipt=task.get('runtime',{}).get('last_delivery') or {}
         if (task.get('owner')!=owner or task.get('attempt_count')!=attempt
@@ -474,7 +485,7 @@ def resolve(config_path,state,ident,outcome,evidence_file,owner,attempt):
             if proof is None:raise ValueError('linked workflow has not passed its official completion gate')
             evidence={**evidence,'workflow_completion':proof}
         store=Store(state)
-        try:task=store.get(job['task'])
+        try:task=store.get((job.get('receiver') or {}).get('task') or job['task'])
         finally:store.close()
         if (task['state']!='ready' or task.get('owner')!=owner or task.get('attempt_count')!=attempt
                 or task.get('runtime',{}).get('terminal')!=receiver.get('terminal')
@@ -529,8 +540,8 @@ def rebind_receiver(config_path,state,ident,evidence_file,owner,attempt,operator
         config=load(config_path)
         store=Store(state)
         try:
-            task=store.get(job['task'])
-            events=store.events(job['task'])
+            task=store.get((job.get('receiver') or {}).get('task') or job['task'])
+            events=store.events((job.get('receiver') or {}).get('task') or job['task'])
         finally:store.close()
         runtime=task.get('runtime') or {}
         if (config.get('runtime_backend')!='core' or task.get('state')!='ready'
@@ -609,7 +620,7 @@ def _recover_delivery(config_path,state,ident):
         if job.get('phase') not in ('sending','uncertain'):return
         receiver=job.get('receiver') or {}
         store=Store(state)
-        try:task=store.get(job['task'])
+        try:task=store.get((job.get('receiver') or {}).get('task') or job['task'])
         finally:store.close()
         runtime=task.get('runtime') or {};receipt=runtime.get('last_delivery') or {}
         if (receipt.get('phase')!='accepted' or receipt.get('accepted') is not True

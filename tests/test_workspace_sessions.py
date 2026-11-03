@@ -13,7 +13,8 @@ class WorkspaceTests(Fixture):
     def setUp(self):
         super().setUp()
         self.value['runtime_backend']='core'
-        self.value['session_pool']={'enabled':True,'bindings':str(self.root/'bindings.json'),'tasks':{'alpha':'L1'}}
+        self.value['profiles']['claude']={a:{'home':str(self.root/('claude-'+a)),'identity':{'email':a+'@example.invalid'},'model':'fixture','effort':'medium'} for a in ('team','personal')}
+        self.value['session_pool']={'enabled':True,'bindings':str(self.root/'bindings.json'),'tasks':{team:'L'+str(i+1) for i,team in enumerate(self.value['teams'])}}
         (self.root/'bindings.json').write_text(json.dumps({'teams':{'alpha':{'space':'space-a'}}}))
         self.config.write_text(json.dumps(self.value))
         self.c=load(self.config)
@@ -115,3 +116,74 @@ class WorkspaceTests(Fixture):
             with patch('teamkit.core_runtime.require_managed'):
                 with self.assertRaisesRegex(ValueError,'pre-delivery'):pool_control.resume_preparation(self.config,self.state,ident,True)
             self.assertEqual(read(path)[field],'existing')
+
+    def test_registered_actor_workspace_and_cwd_are_rechecked_before_native_use(self):
+        from teamkit.operations import NativeRuntime
+        with patch.object(ws.CoreRuntime,'accept',return_value={'accepted':True}):ws.register(self.config,self.state,'alpha','t1',True)
+        q=TicketStore(self.state);row=ws.rows(q.db)[0];q.close()
+        self.native['turn']=5
+        with patch.dict(os.environ,{'HC_TERMINAL_ID':'t1'}):ws.receipt(self.config,self.state,'t1',row['actor']['owner'],row['nonce'])
+        actor=ws.executors(self.state)[0]
+        runtime=NativeRuntime(self.c,self.state)
+        self.native['labels']['herdr.space']='another'
+        with self.assertRaisesRegex(ValueError,'workspace'):runtime.native(actor)
+        self.native['labels']['herdr.space']='space-a';self.native['foreground']['cwd']=str(self.root)
+        with self.assertRaisesRegex(ValueError,'root'):runtime.native(actor)
+
+    def test_registration_fences_previous_owner_reservations(self):
+        with patch.object(ws.CoreRuntime,'accept',return_value={'accepted':True}):ws.register(self.config,self.state,'alpha','t1',True)
+        q=TicketStore(self.state);ledger=ws.ResourceLedger(q.db)
+        with self.assertRaisesRegex(ValueError,'registration'):
+            ledger._session_available(q.db,'another',{'terminal':'t1','pid':123,'owner':'old'})
+        q.close()
+
+    def test_expired_before_delivery_does_not_send_and_can_be_explicitly_registered_again(self):
+        now=[100.0];original=ws._call
+        def call(*args,**kwargs):
+            result=original(*args,**kwargs)
+            if args[0]=='label':now[0]=500.0
+            return result
+        with patch.object(ws.time,'time',side_effect=lambda:now[0]),patch.object(ws,'_call',side_effect=call),patch.object(ws.CoreRuntime,'accept') as accept:
+            with self.assertRaisesRegex(ValueError,'expired'):ws.register(self.config,self.state,'alpha','t1',True)
+            accept.assert_not_called()
+        q=TicketStore(self.state);row=ws.rows(q.db)[0];q.close()
+        self.assertEqual(row['phase'],'expired_before_delivery')
+        with patch.object(ws.CoreRuntime,'accept',return_value={'accepted':True}):ws.register(self.config,self.state,'alpha','t1',True)
+        q=TicketStore(self.state);new=ws.rows(q.db)[0];q.close()
+        self.assertNotEqual(new['actor']['owner'],row['actor']['owner'])
+        self.assertEqual(new['history'][0]['actor']['owner'],row['actor']['owner'])
+
+    def test_legacy_plan_uses_fresh_receipted_workspace_actor(self):
+        with patch.object(ws.CoreRuntime,'accept',return_value={'accepted':True}):ws.register(self.config,self.state,'alpha','t1',True)
+        q=TicketStore(self.state);row=ws.rows(q.db)[0];q.close();self.native['turn']=5
+        with patch.dict(os.environ,{'HC_TERMINAL_ID':'t1'}):ws.receipt(self.config,self.state,'t1',row['actor']['owner'],row['nonce'])
+        self.c['operations']={'allocation_policy':'usage'}
+        result=ws.plan(self.c,self.state,'alpha')
+        self.assertEqual(result['task'],row['actor']['task'])
+        self.assertEqual(result['owner'],row['actor']['owner'])
+        self.assertTrue(result['workspace'])
+        self.native['labels']['herdr.space']='another'
+        self.assertIsNone(ws.plan(self.c,self.state,'alpha'))
+
+    def test_existing_legacy_request_is_sent_to_receipted_actor_without_replacing_id(self):
+        from teamkit import context_handoff as context
+        self.value['operations']={'allocation_policy':'usage'}
+        self.config.write_text(json.dumps(self.value))
+        self.call('create','L1','--team','alpha','--role','leader','--root',str(self.repo),'--goal-file',str(self.root/'goal.txt'))
+        with patch.object(ws.CoreRuntime,'accept',return_value={'accepted':True}):ws.register(self.config,self.state,'alpha','t1',True)
+        q=TicketStore(self.state);record=ws.rows(q.db)[0];q.close();self.native['turn']=5
+        with patch.dict(os.environ,{'HC_TERMINAL_ID':'t1'}):ws.receipt(self.config,self.state,'t1',record['actor']['owner'],record['nonce'])
+        message=self.root/'request.txt';message.write_text('Read the approved fixture only.')
+        with patch.object(pool_control,'notify'):
+            job=pool_control.enqueue(self.config,self.state,'alpha',message)
+        def official(config,state,*args):
+            self.assertEqual(args[0],'tell');self.assertEqual(args[1],record['actor']['task'])
+            store=ws.Store(state);actor=store.get(args[1]);store.close()
+            return actor
+        with patch.object(context,'capacity_available',return_value=True),patch.object(pool_control,'refresh_choice'),patch.object(pool_control,'official',side_effect=official):
+            pool_control.advance(self.config,self.state,job['id'])
+        result=pool_control.requests(self.state)
+        self.assertEqual(len(result),1);self.assertEqual(result[0]['id'],job['id'])
+        self.assertEqual(result[0]['task'],'L1');self.assertEqual(result[0]['phase'],'received',result[0])
+        self.assertEqual(result[0]['receiver']['task'],record['actor']['task'])
+        self.assertEqual(result[0]['receiver']['owner'],record['actor']['owner'])
