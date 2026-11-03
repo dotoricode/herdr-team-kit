@@ -112,6 +112,8 @@ Receipt waiters record SIGINT/SIGTERM cancellation before exiting. SIGKILL or ho
 
 지정 계정은 우선순위: 업무의 `profiles`(계정 목록)와 `execution_constraint`(CLI `--provider/--account`)는 배정 가능 여부 게이트가 아니다. 후보 목록·자동 배정 모두 지정 계정을 먼저 두고, 그 뒤에 기존 순서(요일·사용량)를 따른다. 후보 응답의 `preferred: true`는 지정 계정 일치 표시일 뿐 사유·게이트가 아니며, 앱 상세 창은 해당 직원에 "지정 계정"을 작게 붙인다. 지정되지 않은 계정의 직원도 역할·모델·한도·독립성 등 나머지 게이트를 통과하면 배정 가능하다. 팀 확인 담당(`team_dispatch`)의 개인 Codex 고정과 UI 검증실 고정, 사용자 결정·전문 역할의 모델 고정은 계정 지정과 다른 정책이라 그대로 유지한다.
 
+새로 시작하는 Claude 직원은 `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`로 시작해 입력란의 회색 "다음 입력 제안"이 뜨지 않게 합니다(공식 환경변수, `promptSuggestionEnabled` 설정보다 우선). `hc read` 출력에는 색·스타일 정보가 없어 화면 글자만으로 제안과 초안을 구분할 수 없으므로, 입력란에 글자가 보이면 계속 초안으로 보수적으로 판정합니다. 이미 떠 있는 세션은 재시작하지 않으며 다음 시작부터 적용됩니다.
+
 우회하지 않는 것: 업무 승인·고정 승인 기록, UI 업무, 리뷰 독립성(`exclude_owners`), 직원의 작업 폴더가 업무 경로를 덮는지, 계정 연결(profile binding) 변경, provider 신원 확인, 개인 문서 담당 경계(`docsstaff`: 후보 판정·예약·전송 직전 모두), 전송 시점의 소유자·프로세스 확인과 입력 초안·확인 창 검사, 터미널 foreground 프로세스를 읽을 수 없는 상태(`native`), `pending`이 아닌 업무의 재전송 금지, 이전 선택이 queued·running·uncertain일 때의 재선택 금지, 새로 만들 직원(계획 항목)의 용량 우회, 다른 attempt와의 터미널 세션·쓰기 자원 충돌, 실행 횟수·토큰 예산. 이 중 하나라도 실패하면 `override_allowed`는 false이고, override 요청이 와도 blocked로 끝나며 전송·예약을 하지 않습니다. 소유자·프로세스·초안 검사는 전송 직전에 다시 읽어 입력 중인 내용이 있으면 전송하지 않고 blocked로 보고합니다.
 
 전송 후보는 업무 제품의 팀 스페이스 직원을 기본으로 하고 이름은 사이드바와 같은 터미널 `ui.display-name` 라벨을 씁니다. 다른 팀·임시(background) 직원은 `other_team`/`hidden_by_default`로 표시해 "다른 팀·임시 직원 보기"에서만 보이고, 종료된 터미널은 `excluded`에 사유와 함께 기록합니다. 팀 스페이스에 있어도 직원으로 등록되지 않은 터미널은 전송할 수 없는 후보로만 표시합니다. 세션 풀의 `uncertain` slot은 읽기 전용 증명(같은 터미널·PID·작업 폴더·시작 인자, 재기동 시 붙는 `resume <세션>` 한 쌍만 허용)이 모두 맞을 때만 후보 판정을 이어가며, 하나라도 다르면 "이전 시작 결과 불명"으로 배정 불가+강제 전송 가능입니다. 판정은 slot 파일을 바꾸지 않으며 공식 복구는 `pool recheck`입니다.
