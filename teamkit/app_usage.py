@@ -428,7 +428,7 @@ def refresh_native_usage(config,state,account):
                     raise UsageUnavailable('native_not_ready')
                 remaining=startup_deadline-time.monotonic()
                 if remaining<=0:raise UsageUnavailable('native_not_ready')
-                baseline=_hc(['read','--lines','100',address],timeout=remaining,plain=True)
+                baseline=_hc(['read','--lines','0',address],timeout=remaining,plain=True)
                 dialog=_dialog(baseline)
                 if dialog:raise UsageUnavailable(dialog)
                 if 'Current week (all models)' in baseline:raise UsageUnavailable('native_outcome_unknown')

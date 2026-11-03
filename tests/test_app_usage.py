@@ -165,6 +165,8 @@ class NativeUsageTests(UsageFixture):
         self.assertEqual(value['weekly'],32)
         self.assertEqual(sum(a[1]=='run' for a in native.calls),1)
         self.assertEqual(sum(a[1]=='keys' for a in native.calls),1)
+        first_key=next(i for i,a in enumerate(native.calls) if a[1]=='keys')
+        self.assertTrue(all(a[2:4]==['--lines','0'] for a in native.calls[:first_key] if a[1]=='read'))
         self.assertFalse(any(a[1]=='send' for a in native.calls))
         attempt=json.loads(Path(str(self.state)+'.native-usage-personal.json').read_text())
         self.assertTrue(attempt['zero_token_usage']);self.assertTrue(native.missing)
