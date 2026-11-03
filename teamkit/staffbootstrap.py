@@ -13,7 +13,7 @@ import uuid
 
 from . import admission, docsstaff, providers
 from .config import binding, cached_quota, load, profile
-from .core_runtime import CoreRuntime, _call, _model_effort, _process_matches, _detector_matches, claude_gui_settings, require_managed
+from .core_runtime import ADDRESS, CoreRuntime, _call, _model_effort, _process_matches, _detector_matches, claude_gui_settings, require_managed
 from .policy import eligible
 from .resources import ResourceLedger, observe_native
 from .runtime import AUTH_ENV, home_key, home_value, launch_spec, profile_home_matches
@@ -235,9 +235,15 @@ def _exclude_live_session(observed, provider, pr, session):
         raise ValueError('native session metadata changed during duplicate inspection')
 
 
+def _require_local_terminal(address):
+    if not isinstance(address, str) or not ADDRESS.fullmatch(address):
+        raise ValueError('staff profile and session proofs require a local HC terminal')
+
+
 def checkpoint(config_path, state, department, provider, terminal, pid, session, journal):
     """Capture an idle, empty original native before a separately authorized normal stop."""
     require_managed()
+    _require_local_terminal(terminal)
     config = load(config_path)
     _, _, root, _, pr, checks = _preflight(config, state, department, provider)
     from .prompt_state import empty_input
@@ -285,8 +291,12 @@ def _assert_session_absent(pr, provider, session):
     if not isinstance(listing.get('terminals'), list):
         raise ValueError('live session inventory is unavailable or ambiguous')
     for terminal in listing['terminals']:
-        if (not isinstance(terminal, dict) or not isinstance(terminal.get('state'), str)
-                or not isinstance(terminal.get('address'), str)):
+        if not isinstance(terminal, dict) or not isinstance(terminal.get('address'), str):
+            raise ValueError('live session inventory is unavailable or ambiguous')
+        # A local profile journal and OS PID cannot identify a process on another host.
+        if not ADDRESS.fullmatch(terminal['address']):
+            continue
+        if not isinstance(terminal.get('state'), str):
             raise ValueError('live session inventory is unavailable or ambiguous')
         if terminal['state'] == 'live':
             observed = _call('get', terminal['address'])
@@ -304,6 +314,7 @@ def _resume(db, seat, session, pr, provider, root):
     if not row:
         raise ValueError('resume requires an official original-native checkpoint')
     proof = json.loads(row[0])
+    _require_local_terminal(proof.get('terminal'))
     if proof['session'] != session or proof['profile_binding'] != binding(pr):
         raise ValueError('resume SID or personal profile differs from checkpoint')
     _pid_stopped(proof['pid'])
@@ -403,6 +414,7 @@ def seal_checkpoint(config_path, state, department, provider, session, original_
         if not row:
             raise ValueError('shutdown seal requires an existing official checkpoint')
         proof = json.loads(row[0])
+        _require_local_terminal(proof.get('terminal'))
         if proof['session'] != session or proof['profile_binding'] != binding(pr):
             raise ValueError('shutdown seal session or profile differs from the checkpoint')
         _pid_stopped(proof['pid'])
@@ -466,6 +478,8 @@ def prepare(config_path, state, department, provider, resume=None):
         _schema(store.db)
         previous = _get(store.db, seat)
         if previous:
+            if previous['actor'].get('terminal') is not None:
+                _require_local_terminal(previous['actor']['terminal'])
             if resume is not None and previous.get('session') != resume:
                 raise ValueError('existing staff seat belongs to a different session; preserve it')
             return {**previous, 'next_action': 'inspect existing actor; never relaunch or resend preparation'}
@@ -510,6 +524,7 @@ def prepare(config_path, state, department, provider, resume=None):
         intent = True
 
         def created(detail):
+            _require_local_terminal(detail.get('terminal'))
             with store.transaction():
                 current = _get(store.db, seat)
                 if current['actor']['owner'] != owner or current['phase'] != 'launching':

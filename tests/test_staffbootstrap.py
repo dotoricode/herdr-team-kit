@@ -441,6 +441,49 @@ class StaffBootstrapTests(unittest.TestCase):
         self.assertIn(codex, candidates)
         self.assertNotIn('claude', {p['provider'] for p in candidates})
 
+    def test_remote_inventory_is_not_read_or_inspected_with_local_profile(self):
+        self.configure(); self.fake_boundaries()
+        pr = self.config['profiles']['claude']['personal']
+        with patch.object(staff, '_call', side_effect=lambda *args: {'terminals': [
+                {'address': 'remote-host/t1', 'state': 'live'}]} if args[0] == 'ls' else
+                (_ for _ in ()).throw(AssertionError('remote get must not run'))) as call, \
+                patch.object(staff, '_process_environment', side_effect=AssertionError('remote ps must not run')):
+            staff._assert_session_absent(pr, 'claude', 'fixture-session')
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(call.call_args.args, ('ls', '--json'))
+
+    def test_local_unknown_claude_process_still_fails_closed(self):
+        self.configure(); self.fake_boundaries()
+        pr = self.config['profiles']['claude']['personal']
+        def call(*args):
+            if args[0] == 'ls':
+                return {'terminals': [{'address': 't200', 'state': 'live'}]}
+            return dict(address='t200', state='live', foreground={'pid': 555, 'name': 'unknown-version'},
+                        status={'app': 'claude-code', 'state': 'idle'})
+        with patch.object(staff, '_call', side_effect=call):
+            with self.assertRaisesRegex(ValueError, 'identity is ambiguous'):
+                staff._assert_session_absent(pr, 'claude', 'fixture-session')
+
+    def test_remote_checkpoint_target_is_rejected_before_target_get_or_ps(self):
+        self.configure(); self.fake_boundaries()
+        with patch.object(staff, '_call', side_effect=AssertionError('remote get must not run')), \
+                patch.object(staff, '_process_environment', side_effect=AssertionError('remote ps must not run')):
+            with self.assertRaisesRegex(ValueError, 'local'):
+                staff.checkpoint(self.config_path, self.state, 'docs', 'claude', 'remote-host/t1', 555,
+                                 'fixture-session', str(self.root / 'fixture-session.jsonl'))
+
+    def test_remote_resume_proof_is_rejected_before_local_pid_inspection(self):
+        pr, proof = self.resume_fixture()
+        proof['terminal'] = 'remote-host/t1'
+        self.store.db.execute('UPDATE staff_resume_proofs SET body=? WHERE seat=?', (json.dumps(proof), proof['seat']))
+        with patch.object(staff, '_pid_stopped', side_effect=AssertionError('remote PID must not be inspected locally')), \
+                patch.object(staff, '_call', side_effect=AssertionError('remote get must not run')):
+            with self.assertRaisesRegex(ValueError, 'local'):
+                staff._resume(self.store.db, proof['seat'], proof['session'], pr, 'claude', str(self.root))
+            with self.assertRaisesRegex(ValueError, 'local'):
+                self.prepare(resume=proof['session'])
+        self.assertEqual(self.launched, [])
+
     def test_resume_without_official_proof_never_launches(self):
         self.configure(); self.fake_boundaries()
         with self.assertRaisesRegex(ValueError, 'official original-native checkpoint'):
