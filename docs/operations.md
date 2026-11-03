@@ -244,3 +244,5 @@ GUI core 배정은 실제 응답에 연결된 statusline 자료와 검증된 공
 usage 배정 모드의 legacy pool 계획도 현재 팀의 ready workspace actor를 확인합니다. 기존 request ID와 canonical task 필드는 보존하고 실제 수신 actor task를 receiver.task에 기록하여 공식 tell·제출·검증이 같은 owner/attempt를 따르게 합니다. 이 연결은 기존 canonical owner의 업무나 완료를 새 actor에게 승계하지 않습니다. 전달 직전에도 workspace 소속·프로필 환경·모델·cwd·최신 quota·빈 입력을 다시 확인합니다.
 
 사용량 기준 팀 pull 모드에서는 `queue send`와 `--override-eligibility`로 담당자를 지정할 수 없습니다. 후보 조회는 가능하지만 `send_allowed`와 각 후보의 `override_allowed`는 false이며, `pull_allowed`가 현재 팀 pull 가능 여부를 나타냅니다. 사용량 검사는 이 모드에서 우회 불가이고 전송 직전에도 재확인합니다. 전환 전에 접수됐으나 실행되지 않은 수동 선택은 소비 단계에서 거절하고, 실행·수신 결과가 불명인 시도는 그대로 보존합니다. 이 정책 때문에 거절한 새 수동 요청은 팀 pull을 막는 선택 잠금을 만들지 않습니다.
+
+기존 수신 업무의 완료·보류 인계 확인은 새 배정의 quota 적격성과 구분합니다. workspace actor의 identity·owner·PID·profile·workspace·cwd·정지된 입력과 writer-stopped 근거는 계속 확인하지만, 수행 후 사용량이 한도에 도달했다는 이유로 결과 정합화를 막지 않습니다. 신규 tell·자동 배정·전송 직전에는 최신 quota 검사를 유지합니다.

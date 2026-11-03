@@ -236,3 +236,32 @@ class WorkspaceTests(Fixture):
             with self.assertRaisesRegex(ValueError,'changed'):
                 runtime.prompt(task['runtime']['name'],'Approved fixture',before_send=lambda:(_ for _ in ()).throw(ValueError('changed')))
         self.assertNotIn('send',calls)
+
+    def test_resolve_workspace_result_does_not_require_new_work_quota(self):
+        from teamkit.context_handoff import write
+        with patch.object(ws.CoreRuntime,'accept',return_value={'accepted':True}):ws.register(self.config,self.state,'alpha','t1',True)
+        q=TicketStore(self.state);row=ws.rows(q.db)[0];q.close();self.native['turn']=5
+        with patch.dict(os.environ,{'HC_TERMINAL_ID':'t1'}):ws.receipt(self.config,self.state,'t1',row['actor']['owner'],row['nonce'])
+        actor=row['actor'];ident='d'*32;path=pool_control.folder(self.state)/(ident+'.json')
+        original=dict(id=ident,team='alpha',task='L1',phase='received',work_id='approved-fixture',
+                      receiver=dict(task=actor['task'],terminal='t1',owner=actor['owner'],attempt=1,native_pid=123))
+        evidence=self.root/'resolution.json'
+        import time
+        from teamkit.policy import eligible as actual_eligible
+        store=ws.Store(self.state)
+        now=time.time()
+        store.quota('codex/team',dict(binding=ws.binding(self.c['profiles']['codex']['team']),
+            source='codex-native-quota',observed_at=now,five_hour=dict(used=95,resets_at=now+3600),
+            weekly=dict(used=10,resets_at=now+86400)))
+        store.close()
+        for outcome in ('completed','deferred'):
+            write(path,original)
+            evidence.write_text(json.dumps(dict(work_id='approved-fixture',owner=actor['owner'],attempt=1,
+                writer_stopped=True,verification=['Verified bounded fixture result.'],next='Resume remaining approved fixture.')))
+            with patch.object(ws,'eligible',new=actual_eligible),patch('teamkit.core_runtime.require_managed'),patch.object(pool_control,'notify'):
+                result=self.call('pool','resolve','--request',ident,'--outcome',outcome,'--evidence-file',str(evidence),
+                                 '--expected-owner',actor['owner'],'--expected-attempt','1')
+            self.assertEqual(result['phase'],outcome)
+        store=ws.Store(self.state);task=store.get(actor['task']);store.close()
+        with patch.object(ws,'eligible',new=actual_eligible):
+            with self.assertRaisesRegex(ValueError,'quota'):pool_control.idle_native(task,self.c,self.state)

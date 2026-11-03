@@ -187,7 +187,7 @@ def requests(state):
                   key=lambda j:(j.get('sequence',0),j.get('at',0),j['id']))
 
 
-def idle_native(task,config,state):
+def idle_native(task,config,state,*,for_delivery=True):
     """Identity failures propagate; a verified busy/dirty terminal only waits."""
     from .core_runtime import CoreRuntime
     from . import context_handoff as context
@@ -198,7 +198,7 @@ def idle_native(task,config,state):
     runtime=CoreRuntime(task)
     if task.get('workspace_registered'):
         from .workspace_sessions import verify_task
-        verify_task(config,state,task)
+        verify_task(config,state,task,for_delivery=for_delivery)
         return runtime._native(task['runtime']['name'],ready=True)
     value=runtime._native(task['runtime']['name'])
     if (value.get('status') or {}).get('state') not in ('idle','done'):return None
@@ -492,7 +492,7 @@ def resolve(config_path,state,ident,outcome,evidence_file,owner,attempt):
                 or (job.get('delivery_id') or job.get('receiver_lineage'))
                    and task.get('runtime',{}).get('native_pid')!=receiver.get('native_pid')):
             raise ValueError('current ready owner must match the received work')
-        if idle_native(task,config,state) is None:raise ValueError('current work is still active or has unsubmitted input')
+        if idle_native(task,config,state,for_delivery=False) is None:raise ValueError('current work is still active or has unsubmitted input')
         job.update(phase=outcome,work_resolution=evidence,updated_at=time.time(),
                    reason='업무 완료 증거를 확인했습니다.' if outcome=='completed' else '보류 인계 증거를 확인했습니다.')
         write_request(path,job)
@@ -571,7 +571,7 @@ def rebind_receiver(config_path,state,ident,evidence_file,owner,attempt,operator
         if (old.get('state')!='finished' or old.get('foreground') is not None
                 or old_labels.get('teamkit.owner')!=owner or old_labels.get('teamkit.task')!=job['task']):
             raise ValueError('the original owned terminal must be proven finished before receiver rebind')
-        native=idle_native(task,config,state)
+        native=idle_native(task,config,state,for_delivery=False)
         if native is None:raise ValueError('resumed native is working or has an unknown input draft')
         argv=(native.get('foreground')or{}).get('argv') or []
         if task['provider']=='claude':sessions=_values(argv,'--resume')

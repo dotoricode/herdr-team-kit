@@ -303,7 +303,9 @@ def plan(config, state, team):
     return None
 
 
-def verify_task(config,state,task):
+def verify_task(config,state,task,*,for_delivery=True):
+    """Always verify ownership and stopped input; quota gates only a new delivery."""
+    if type(for_delivery) is not bool:raise ValueError('delivery verification mode must be explicit boolean')
     queue=TicketStore(state,read_only=True)
     try:
         record=next((r for r in rows(queue.db) if r['actor']['task']==task['id'] and r['phase']=='ready'),None)
@@ -315,11 +317,12 @@ def verify_task(config,state,task):
     verify_actor(config,actor,native)
     from .providers import identity
     identity(actor['provider'],profile(config,actor['provider'],actor['account']))
-    store=Store(state,read_only=True)
-    try:
-        if not eligible(cached_quota(config,store,actor['provider'],actor['account']),time.time(),config['quota_ttl_seconds']):
-            raise ValueError('workspace quota changed before delivery')
-    finally:store.close()
+    if for_delivery:
+        store=Store(state,read_only=True)
+        try:
+            if not eligible(cached_quota(config,store,actor['provider'],actor['account']),time.time(),config['quota_ttl_seconds']):
+                raise ValueError('workspace quota changed before delivery')
+        finally:store.close()
     screen=_call('read','--json',actor['terminal'])
     if screen.get('complete') is not True or not empty_input(screen.get('text','')):
         raise ValueError('workspace input changed before delivery')
