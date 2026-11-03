@@ -6,6 +6,7 @@ import unittest
 import test_operations as operation_fixtures
 from teamkit import queue_actions as actions
 from teamkit.operations import NativeRuntime
+from teamkit.runtime import RuntimeError as NativeError
 from teamkit.tickets import TicketStore
 
 
@@ -324,6 +325,29 @@ class RealAdmitOverrideTest(unittest.TestCase):
             enabled=True, departments=departments, worker_roles={'documenter': 'implementer'},
             document_staff={'department': 'docs', 'profiles': ['codex/personal', 'claude/personal']}))
         self.assert_blocked_by(runtime, 'executor is outside personal document staff', 'docs_staff')
+
+    def test_provider_identity_is_probed_once_per_account_in_a_burst_and_failures_are_not_cached(self):
+        from unittest.mock import patch
+        self.enqueue('ONE')
+        runtime = self.runtime_for()
+        ticket = TicketStore(self.state)
+        try:
+            item = ticket.get('ONE')
+        finally:
+            ticket.close()
+        executor = runtime.executors()[0]
+        with patch('teamkit.core_runtime._call', side_effect=self.native_call), \
+             patch('teamkit.providers.identity', return_value=None) as probe:
+            runtime.admit_report(item, executor)
+            runtime.admit_report(item, dict(executor, terminal='t2', pid=43))
+        self.assertEqual(1, probe.call_count)
+        broken = self.runtime_for()
+        with patch('teamkit.core_runtime._call', side_effect=self.native_call), \
+             patch('teamkit.providers.identity', side_effect=NativeError('login expired')) as probe:
+            first = broken.admit_report(item, executor)
+            second = broken.admit_report(item, executor)
+        self.assertEqual(2, probe.call_count)
+        self.assertIn('identity', [x['code'] for x in first + second])
 
     def test_role_mismatch_and_capacity_are_both_recorded_as_bypassed(self):
         self.enqueue('ONE')

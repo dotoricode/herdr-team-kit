@@ -18,6 +18,7 @@ from .tickets import TicketStore, digest, file_digest, within
 
 
 SCHEMA_VERSION = 1
+IDENTITY_REUSE_SECONDS = 30
 
 
 def enabled(config):
@@ -82,6 +83,7 @@ def gate_issues(runtime, ticket, executor):
 class NativeRuntime:
     def __init__(self, config, state):
         self.config, self.state = config, Path(state)
+        self._identity_seen = {}
 
     def observation(self):
         return observe_native()
@@ -305,7 +307,15 @@ class NativeRuntime:
         native_ok = gate('native', False, lambda: self.native(executor))
         if profiles:
             from .providers import identity
-            gate('identity', False, lambda: identity(executor['provider'], profiles[0]))
+
+            def who():
+                # One provider probe per account is enough for a burst of candidates; failures are never cached.
+                key = (executor['provider'], executor['account'], binding(profiles[0]))
+                if time.monotonic() - self._identity_seen.get(key, -IDENTITY_REUSE_SECONDS) < IDENTITY_REUSE_SECONDS:
+                    return
+                identity(executor['provider'], profiles[0])
+                self._identity_seen[key] = time.monotonic()
+            gate('identity', False, who)
 
             def usage():
                 store = Store(self.state)
