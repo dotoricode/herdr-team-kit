@@ -183,11 +183,10 @@ class NativeRuntime:
         display=display_name(executor['provider'], executor['account'], product=ticket['product'],
                              role=ticket['role'], owner=executor['owner'],
                              aliases=self.config.get('operations', {}).get('staff_aliases'))
-        labels = ['operations.ticket='+ticket['id'], 'ui.display-name='+display,
-                  'operations.product='+ticket['product']]
+        labels = ['operations.ticket='+ticket['id'], 'ui.display-name='+display]
         if executor.get('operation_actor'):
             # Temporary workers remain sub-agents; herdr.space opts into a pane.
-            labels.append('operations.presentation=background')
+            labels += ['operations.product='+ticket['product'], 'operations.presentation=background']
             if destination in spaces:
                 labels.append('operations.space='+spaces[destination])
         elif destination in spaces:
