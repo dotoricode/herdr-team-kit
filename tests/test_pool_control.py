@@ -750,6 +750,7 @@ class PoolControlTests(Fixture):
 
     def test_usage_mode_explicit_later_request_is_not_blocked_by_pending_head(self):
         self.dispatched()
+        verified_route=control.plan(self.config,self.state,'alpha')
         self.value['operations']={'allocation_policy':'usage'}
         self.config.write_text(json.dumps(self.value))
         message=self.root/'pull-later.txt';message.write_text('Read approved fixture only.')
@@ -762,9 +763,29 @@ class PoolControlTests(Fixture):
             store=Store(state)
             try:return store.get(args[1])
             finally:store.close()
-        with patch.object(context,'capacity_available',return_value=True),patch.object(control,'refresh_choice'),patch.object(control,'official',side_effect=official) as sent:
+        with patch.object(context,'capacity_available',return_value=True),patch.object(control,'refresh_choice'),patch.object(control,'plan',return_value=verified_route),patch.object(control,'official',side_effect=official) as sent:
             control.advance(self.config,self.state,later['id'])
         by_id={job['id']:job for job in control.requests(self.state)}
         self.assertEqual('pending',by_id[first['id']]['phase'])
         self.assertEqual('received',by_id[later['id']]['phase'])
         self.assertEqual(1,sent.call_count)
+
+    def test_usage_without_verified_workspace_never_falls_back_to_role_routing(self):
+        self.dispatched()
+        self.value['operations']={'allocation_policy':'usage'}
+        self.config.write_text(json.dumps(self.value))
+        from teamkit.__main__ import select_execution
+        with patch('teamkit.__main__.select_execution',wraps=select_execution) as old_route:
+            result=control.plan(self.config,self.state,'alpha')
+        self.assertEqual('wait',result['action'])
+        self.assertIn('workspace',result['reason'])
+        old_route.assert_not_called()
+        message=self.root/'workspace-registration-required.txt';message.write_text('Read fixture only.')
+        with patch.object(control,'notify'):
+            job=control.enqueue(self.config,self.state,'alpha',message)
+        with patch.object(control,'refresh_choice'),patch.object(control,'official') as official:
+            control.advance(self.config,self.state,job['id'])
+        official.assert_not_called()
+        current=next(j for j in control.requests(self.state) if j['id']==job['id'])
+        self.assertEqual('pending',current['phase'])
+        self.assertIn('workspace',current['reason'])

@@ -96,6 +96,17 @@ def plan(config_path,state,team,provider=None,account=None):
     from .workspace_sessions import plan as workspace_plan
     current=workspace_plan(config,state,team)
     if current is not None:return current
+    from .allocation import usage_only
+    if usage_only(config):
+        store=Store(state,read_only=True)
+        try:
+            task=store.get(pool.task_id(config,team))
+        finally:store.close()
+        reason='workspace verification and registration required: 검증·수신 확인된 팀 워크스페이스 담당자가 없습니다. 현재 사용량·세션을 확인하고 등록한 뒤 팀 pull로 이어갑니다'
+        return dict(team=team,task=task['id'],action='wait',selection={'action':'wait','reason':reason},
+                    state=task['state'],owner=task.get('owner'),attempt=task.get('attempt_count',0),
+                    terminal=task.get('runtime',{}).get('terminal'),workspace=False,
+                    registration_required=True,reason=reason)
     from .__main__ import select_execution
     store=Store(state)
     try:
