@@ -462,7 +462,15 @@ class TicketStore:
             if executor.get('new') is not True and (not executor.get('root') or
                     not within(existing['worktree'], [executor['root']])):
                 raise ValueError('executor working boundary does not cover the split worktree')
-            if not preview and self.materialize_split_intent(ident) != existing:
+            if preview:
+                from .split_worktree import inspect
+                row = self.db.execute('SELECT contract,body,phase FROM operation_worktree_intents WHERE ticket=?',
+                                      (ident,)).fetchone()
+                if (not row or row[0] != self._split_contract(self.get(ident)) or row[2] != 'ready'
+                        or json.loads(row[1]) != existing):
+                    raise ValueError('persisted split intent is not ready for this ticket')
+                inspect(existing)
+            elif self.materialize_split_intent(ident) != existing:
                 raise ValueError('persisted split differs from ticket')
             return self._reserve(ident, executor, policy, observation, expected_revision, manual_action,
                                  before_reserve=before_reserve, override=override, split=existing,
@@ -478,11 +486,19 @@ class TicketStore:
                     item['kind'] in ('review', 'document') or item['role'] in ('reviewer', 'documenter')):
                 raise
             if preview:
-                from .split_worktree import plan
+                from .split_worktree import inspect, plan
                 if not self._split_conflict(item):
                     raise
-                intent = plan(ident, item['resources'], self.path.resolve().parent / 'operation-worktrees',
-                              ref=item.get('git_base'))
+                table = self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='operation_worktree_intents'").fetchone()
+                row = self.db.execute('SELECT contract,body FROM operation_worktree_intents WHERE ticket=?',
+                                      (ident,)).fetchone() if table else None
+                if row:
+                    if row[0] != self._split_contract(item):
+                        raise ValueError('split intent contract changed')
+                    intent = inspect(json.loads(row[1]))
+                else:
+                    intent = plan(ident, item['resources'], self.path.resolve().parent / 'operation-worktrees',
+                                  ref=item.get('git_base'))
             else:
                 intent = self.record_split_intent(ident)
             if executor.get('new') is not True and (not executor.get('root') or

@@ -39,8 +39,12 @@ def writes_overlap(first, second):
 
 
 class Store:
-    def __init__(self, path, timeout=10):
+    def __init__(self, path, timeout=10, *, read_only=False):
         self.path = Path(path).expanduser()
+        if read_only:
+            self.db = sqlite3.connect(self.path.resolve().as_uri() + '?mode=ro', uri=True,
+                                      timeout=timeout, isolation_level=None)
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         # Create privately before SQLite opens the file; never chmod existing parent dirs.
         try:

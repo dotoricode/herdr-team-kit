@@ -358,7 +358,7 @@ class NativeRuntime:
             gate('identity', False, who)
 
             def usage():
-                store = Store(self.state)
+                store = Store(self.state, read_only=True)
                 try:
                     observed = cached_quota(self.config, store, executor['provider'], executor['account'])
                 finally:

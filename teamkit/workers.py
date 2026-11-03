@@ -123,8 +123,8 @@ def plans(config, state, ticket, *, reserved_owner=None):
     work_gate(config, state, ticket)
     from .departments import execution_config
     config = execution_config(config)
-    queue = TicketStore(state)
-    store = Store(state)
+    queue = TicketStore(state, read_only=True)
+    store = Store(state, read_only=True)
     try:
         if _ticket_signature(queue.get(ticket['id'])) != _ticket_signature(ticket):
             raise ValueError('ticket contract changed before worker planning')

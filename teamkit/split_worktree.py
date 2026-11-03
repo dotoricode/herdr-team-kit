@@ -99,9 +99,8 @@ def _check_existing(intent):
     _git(target, 'merge-base', '--is-ancestor', intent['base'], 'HEAD')
 
 
-def create(intent):
-    """Create or verify the intended worktree; never reset or delete existing data."""
-    # Reconstruct and compare all derived fields before filesystem or Git changes.
+def inspect(intent):
+    """Validate a persisted proposal without creating or changing a worktree."""
     source = Path(intent['source_root']).resolve()
     paths = []
     target = Path(intent['worktree']).resolve()
@@ -115,9 +114,17 @@ def create(intent):
         paths.append(value)
     expected = plan(intent['ticket'], paths, target.parent, base=intent['base'])
     if expected != intent:
-        raise ValueError('worktree intent no longer matches source HEAD or derived paths')
+        raise ValueError('worktree intent no longer matches its pinned base or derived paths')
     if target.exists() or target.is_symlink():
         _check_existing(intent)
+    return intent
+
+
+def create(intent):
+    """Create or verify the intended worktree; never reset or delete existing data."""
+    inspect(intent)
+    source, target = Path(intent['source_root']), Path(intent['worktree'])
+    if target.exists() or target.is_symlink():
         return intent
     target.parent.mkdir(parents=True, exist_ok=True)
     try:

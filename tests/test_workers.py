@@ -106,6 +106,24 @@ class WorkerTests(unittest.TestCase):
             self.assertIsNone(plans[0]['pid'])
             self.assertIsNone(plans[0]['terminal'])
 
+    def test_native_candidates_does_not_migrate_or_chmod_legacy_db(self):
+        from teamkit.operations import NativeRuntime
+        from teamkit.queue_actions import candidates
+        ticket = self.ticket('reviewer', 'review')
+        self.queue.db.execute('DROP TABLE operation_worktree_intents')
+        self.state.chmod(0o640)
+        before = self.queue.db.execute('PRAGMA schema_version').fetchone()[0]
+        runtime = NativeRuntime(self.config, self.state)
+        with patch('teamkit.session_pool._read', return_value={'slots':{}}), \
+             patch('teamkit.staffbootstrap.executors', return_value=[]), \
+             patch('teamkit.queue_actions.gate_issues', return_value=[]), \
+             patch.object(workers.providers, 'identity'):
+            result = candidates(self.config_path, self.state, ticket['id'], runtime)
+        self.assertTrue(result['candidates'])
+        self.assertEqual(before, self.queue.db.execute('PRAGMA schema_version').fetchone()[0])
+        self.assertIsNone(self.queue.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='operation_worktree_intents'").fetchone())
+        self.assertEqual(0o640, self.state.stat().st_mode & 0o777)
+
     def test_user_fixed_model_survives_flexible_provider_preference(self):
         self.config['execution_preference'] = {'provider_order': ['claude', 'codex'],
                                                 'weekend_account_first': True}
