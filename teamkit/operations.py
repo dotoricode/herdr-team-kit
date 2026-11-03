@@ -386,7 +386,7 @@ class NativeRuntime:
                     store.close()
                 if not eligible(observed, time.time(), self.config['quota_ttl_seconds']):
                     raise ValueError('profile quota unavailable, expired or limited')
-            gate('quota', True, usage)
+            gate('quota', not usage_only(self.config), usage)
         if native_ok and not issues:
             # Identity/quota calls can race a human input or process replacement.
             gate('native', False, lambda: self.native(executor))
@@ -688,6 +688,9 @@ def tick(config_path, state, runtime=None, *, selection=None, team=None, ticket_
         raise ValueError('configuration changed while loading; dispatch deferred')
     if not enabled(config):
         return {'enabled': False}
+    from .allocation import usage_only
+    if usage_only(config) and selection is not None:
+        raise ValueError('usage allocation requires team pull; manual executor selection is disabled')
     if team is not None:
         from .departments import definitions
         if team not in definitions(config):
@@ -814,7 +817,7 @@ def tick(config_path, state, runtime=None, *, selection=None, team=None, ticket_
                         try:
                             quota=cached_quota(config,store,executor['provider'],executor['account'])
                         finally:store.close()
-                        if (not override and isinstance(runtime,NativeRuntime)
+                        if ((usage_only(config) or not override) and isinstance(runtime,NativeRuntime)
                                 and not eligible(quota,time.time(),config['quota_ttl_seconds'])):
                             raise ValueError('profile quota changed before delivery; no input sent')
                         if Path(config_path).read_bytes() != config_bytes or queue.gate(current['id']):

@@ -31,14 +31,14 @@ def executor_identity(executor):
 def selection_hold(db, ticket):
     if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='queue_action_holds'").fetchone():
         row = db.execute('SELECT action,candidate FROM queue_action_holds WHERE ticket=?', (ticket,)).fetchone()
-        if row:
+        if row and not _read(db, row[0]).get('selection_rejected'):
             return dict(action=row[0], candidate=row[1])
     # Earlier durable send records also express a manual selection. Upgrading
     # must not turn an existing blocked/queued action back into automatic work.
     if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='queue_actions'").fetchone():
         for row in db.execute('SELECT body FROM queue_actions ORDER BY rowid DESC'):
             action = json.loads(row[0])
-            if action['kind'] == 'send' and action['request']['ticket'] == ticket:
+            if action['kind'] == 'send' and action['request']['ticket'] == ticket and not action.get('selection_rejected'):
                 return dict(action=action['id'], candidate=action['request']['candidate_id'])
     return None
 
@@ -70,6 +70,12 @@ def _send_reason(queue, ticket, config):
     if ticket['role'] == 'ui':
         return 'UI work requires the existing UI lab'
     return queue.gate(ticket['id'])
+
+
+def _manual_send_reason(config):
+    from .allocation import usage_only
+    return ('사용량 기준 팀 pull 모드에서는 담당자를 지정해 전송할 수 없습니다. '
+            'queue pull <업무 ID> --team <팀>을 사용하세요') if usage_only(config) else None
 
 
 # Known gate messages -> short Korean phrases. Unknown text keeps its original wording.
@@ -241,7 +247,7 @@ def candidates(config_path, state, ident, runtime=None):
                 reason_ko=' / '.join(x['reason_ko'] for x in issues), reasons=issues,
                 # Manual priority never creates a worker beyond capacity; only an existing terminal can be forced,
                 # and never past a gate that is not bypassable.
-                override_allowed=bool(issues) and executor.get('new') is not True
+                override_allowed=not usage_only(config) and bool(issues) and executor.get('new') is not True
                     and all(x['bypassable'] for x in issues),
                 planned=executor.get('new') is True))
         for item in view.get('unregistered', []):
@@ -254,8 +260,9 @@ def candidates(config_path, state, ident, runtime=None):
                               reason_ko=reason_ko('unregistered terminal in team space'))],
                 planned=False, unregistered=True))
         return dict(ticket=ident, expected_ticket=digest(ticket), candidates=rows, excluded=excluded,
-                    send_allowed=any(row['eligible'] for row in rows),
-                    reason='' if any(row['eligible'] for row in rows) else 'no eligible registered executor or approved worker plan')
+                    send_allowed=not usage_only(config) and any(row['eligible'] for row in rows),
+                    pull_allowed=usage_only(config) and any(row['eligible'] for row in rows),
+                    reason=_manual_send_reason(config) or ('' if any(row['eligible'] for row in rows) else 'no eligible registered executor or approved worker plan'))
     finally:
         queue.close()
 
@@ -327,7 +334,7 @@ def enqueue(config_path, state, kind, client_request_id, *, ticket=None, candida
         if known is not None:
             return known
         # Preview the gates now so the durable record keeps why this was not assignable.
-        chosen = next((row for row in candidates(config_path, state, ticket, runtime=runtime)['candidates']
+        chosen = None if _manual_send_reason(load(config_path)) else next((row for row in candidates(config_path, state, ticket, runtime=runtime)['candidates']
                        if row['id'] == candidate_id), None)
         if chosen is not None and chosen.get('planned'):
             raise ValueError('planned worker cannot be sent by manual priority')
@@ -346,15 +353,17 @@ def enqueue(config_path, state, kind, client_request_id, *, ticket=None, candida
                           reason='durable request recorded; waiting for dispatch consumer', created_at=time.time(), result=None)
             if kind == 'send':
                 current = queue.get(ticket)
+                if _manual_send_reason(load(config_path)):
+                    result['selection_rejected'] = True
                 previous = _previous_selection_reason(queue.db, ticket)
-                problem = (_send_reason(queue, current, load(config_path)) or previous)
+                problem = (_manual_send_reason(load(config_path)) or _send_reason(queue, current, load(config_path)) or previous)
                 if digest(current) != expected_ticket:
                     problem = 'ticket changed before manual selection; refresh candidates'
                 if current.get('attempt'):
                     problem = 'existing execution attempt requires original outcome inspection; never resend'
                 # Even a stale preview expresses a manual selection. Preserve
                 # that intent on pending work, but never replace a live action.
-                if current['state']=='pending' and not current.get('attempt') and not previous:
+                if current['state']=='pending' and not current.get('attempt') and not previous and not _manual_send_reason(load(config_path)):
                     queue.db.execute('INSERT OR REPLACE INTO queue_action_holds VALUES (?,?,?)',
                                      (ticket, client_request_id, candidate_id))
                 if problem:
@@ -388,7 +397,10 @@ def consume(config_path, state, runtime=None):
                 request = action['request']
                 if action['kind'] == 'send':
                     ticket = queue.get(request['ticket'])
-                    problem = _send_reason(queue, ticket, load(config_path))
+                    manual_problem = _manual_send_reason(load(config_path))
+                    if manual_problem and ticket['state'] == 'pending' and not ticket.get('attempt'):
+                        action['selection_rejected'] = True
+                    problem = manual_problem or _send_reason(queue, ticket, load(config_path))
                     if digest(ticket) != request['expected_ticket']:
                         problem = 'ticket changed since candidate preview; refresh candidates'
                     if problem:
