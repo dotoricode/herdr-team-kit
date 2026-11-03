@@ -100,6 +100,7 @@ def board(config_path, state):
         team = item['product']
         jobs.append(dict(id=item['id'], team=team, team_label=labels.get(team,team),
                          title=summary_title(item.get('goal', item.get('title',item['id']))), request=item.get('goal',''),
+                         short_title=short_title(item.get('goal', item.get('title',item['id'])), labels.get(team,team)),
                          phase=phase, state_label='진행 중' if verified_working else LABELS.get(phase,'상태 확인 필요'), category=category,
                          reason=_reason(item.get('reason') or ''),
                          next_action='실행자의 작업 결과와 공식 제출 기록을 기다립니다.' if verified_working else ACTIONS.get(phase,'원 상태·실행자·결과 근거를 확인합니다. 확인 전 재전송하지 마세요.'),
@@ -153,6 +154,66 @@ def summary_title(text):
     text = re.sub(r'<image\b[^>]*>', '', text)
     text = re.sub(r'\[Image #\d+\]', '', text)
     return ' '.join(text.split()) or '첨부된 요청'
+
+
+SECRET = re.compile(r'(?i)((?:authorization\s*:\s*bearer|(?:access[_-]?token|refresh[_-]?token|api[_-]?key|password)\s*[=:])\s*)[^\s,;]+')
+SHORT_LIMIT = 40
+_ID_LINE = re.compile(r'#{1,6}\s+[A-Z][A-Z0-9_-]{8,}')
+_PR = re.compile(r'https?://\S+?/pulls?/(\d+)')
+_RECIPIENTS = (
+    re.compile(r'^(?:사용자가\s+)?\S+\s*팀장(?:에게|께)\s+(?:직접\s+)?(?:요청한\s+)?'),
+    re.compile(r'^\S+\s*(?:개발팀|팀|실)(?:의)?\s+(?:\S+\s+){0,4}?담당(?:에게|께|의)\s+'),
+    re.compile(r'^\S+\s*(?:개발팀|팀|실)에서\s+'),
+    re.compile(r'^\S+\s*(?:개발팀|팀|실)의\s+(?:\S+\s+){0,4}?\S+로\s+'),
+)
+_ENDINGS = (re.compile(r'\s*(?:을|를)?\s*(?:요청|수행)(?:한다|합니다|해\s*주세요)$'),
+            re.compile(r'\s*(?:(?:해|하여)\s*주세요|하세요|합니다|입니다|한다)$'))
+_GENERIC = re.compile(r'(?:새\s*)?((?:읽기\s*전용\s*)?(?:검토|리뷰))')
+
+
+def _team_name(label):
+    name = re.sub(r'^\d+\s*·\s*', '', label or '').strip()
+    return re.sub(r'\s*개발팀$', '', name) or label or ''
+
+
+def _clip(text, limit=SHORT_LIMIT):
+    text = ' '.join(text.split())
+    return text if len(text) <= limit else text[:limit-1].rstrip()+'…'
+
+
+def short_title(text, team_label=''):
+    """One short card line for narrow strips; `title` keeps the full summary."""
+    raw = text if isinstance(text, str) else ''
+    clean = SECRET.sub(r'\1<REDACTED>', raw)
+    clean = re.sub(r'<image\b[^>]*>.*?</image>|<image\b[^>]*>|\[Image #\d+\]', '', clean, flags=re.S)
+    rows = [row.strip() for row in clean.splitlines() if row.strip()]
+    rows = [re.sub(r'^#{1,6}\s+', '', row) for row in rows if not _ID_LINE.fullmatch(row)]
+    if not rows:
+        return _clip(summary_title(clean))
+    team = _team_name(team_label)
+    first = rows[0].strip('[] ')
+    lead = re.match(r'^((?:사용자|[^\s:：]+\s*팀장)[^:：]{0,24})[:：]\s*', first)
+    if lead and re.search('요청|승인|확인', lead.group(1)):
+        first = first[lead.end():]
+    for pattern in _RECIPIENTS:
+        first = pattern.sub('', first, count=1)
+    pr = _PR.search(first)
+    if pr and '리뷰' in first:
+        return _clip(' '.join(filter(None, (team, f'PR #{pr.group(1)} 리뷰 정리'))))
+    sentence = re.split(r'(?<=[.!?。])(?:\s|$)', first)[0].rstrip('.。 ')
+    head = sentence
+    for pattern in _ENDINGS:
+        head = pattern.sub('', head)
+    generic = _GENERIC.fullmatch(head)
+    if generic or re.search(r'아래\s*(?:사용자\s*)?요청', sentence) or not head:
+        target = next((row.split(':', 1)[1].strip() for row in rows[1:] if re.match(r'대상\s*[:：]', row)), '')
+        kind = generic.group(1) if generic else '리뷰' if any('리뷰' in row for row in rows[:3]) else '검토'
+        pr = _PR.search(target)
+        if pr:
+            return _clip(' '.join(filter(None, (team, f'PR #{pr.group(1)} {kind}'))))
+        if target:
+            return _clip(kind+' · '+target.split(' 및 ')[0].split()[0].rstrip('/').split('/')[-1])
+    return _clip(head or summary_title(clean))
 
 
 def organization_card(job):
