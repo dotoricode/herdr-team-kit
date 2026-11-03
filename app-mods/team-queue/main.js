@@ -1,6 +1,6 @@
 import { View, div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { appHome, readTextFile, exec, theme, terminals, run, props as modProps, openOverlay, closeOverlay } from "herdr";
+import { appHome, readTextFile, exec, theme, terminals, run, props as modProps, openOverlay, closeOverlay, watchFolder } from "herdr";
 
 const MOD = "team-queue";
 const GROUPS = [["active", "현재"], ["records", "이전·보류"], ["archived", "보관함"], ["all", "전체"]];
@@ -30,10 +30,24 @@ const verifiedWorking = (item, list) => item.phase==="running" && item.verified_
 const itemState = (item, list) => item.category==="archived" ? "보관됨" : manualState(item) ?? (item.work_completion_confirmed ? "업무 완료" : verifiedWorking(item, list) ? "진행 중" : item.phase==="running" ? "결과 제출 대기" : item.phase==="received" ? "전달됨 · 수신 대기" : item.state_label);
 const itemColor = (item, list, t) => item.requires_user_decision ? t.blocked : verifiedWorking(item, list) ? t.working : item.phase==="received" ? t.muted : categoryColor(item.category,t);
 const isActive = item => !["history","deferred","archived"].includes(item.category);
-const STRIP_RANK = { attention: 1, progress: 2, waiting: 3 };
-const STRIP_LABEL = { attention: ["◆","확인 필요"], progress: ["◐","진행 중"], waiting: ["○","대기"] };
-const since = item => item.updated_at ?? item.created_at ?? null;
-const stripRank = item => item.requires_user_decision ? 0 : STRIP_RANK[item.category] ?? 4;
+// --- lane (pure): which jobs wait in the FIFO strip, which are already taken ---
+// BUSY_PHASES mirrors teamkit/queue_policy.py:14. A job in one of these phases was taken from the queue.
+const BUSY_PHASES = new Set(["active","claimed","working","running","sending","dispatching","waiting_handoff","received","done","uncertain"]);
+const ENDED_PHASES = new Set(["completed","cancelled","closed"]);
+const isOpenJob = item => !["history","deferred","archived"].includes(item.category);
+const isTaken = item => isOpenJob(item) && BUSY_PHASES.has(item.phase);
+const isQueued = item => isOpenJob(item) && !BUSY_PHASES.has(item.phase) && !ENDED_PHASES.has(item.phase);
+const arrival = item => item.created_at ?? item.updated_at ?? null;
+const fifo = (a, b) => {
+  const x = arrival(a) ?? Infinity, y = arrival(b) ?? Infinity;
+  return x === y ? String(a.id).localeCompare(String(b.id)) : x < y ? -1 : 1;
+};
+const needsAttention = item => item.requires_user_decision === true || item.category === "attention";
+const splitLane = jobs => ({
+  queued: jobs.filter(isQueued).sort(fifo),
+  taken: jobs.filter(isTaken),
+});
+// --- /lane ---
 const shortTeam = label => String(label ?? "").replace(/^\s*\d+\s*·\s*/, "").replace(/\s*(개발팀|팀장|팀)$/, "") || "팀 미확인";
 const elapsed = seconds => seconds < 3600 ? Math.max(1, Math.floor(seconds/60))+"m" : seconds < 172800 ? Math.floor(seconds/3600)+"h" : Math.floor(seconds/86400)+"d";
 const badge = (label, color, t) => div().flex_none().whitespace_nowrap().rounded(0).border_1().border_color(color).px(6).py(2).bg(t.raised).text_color(color).text_size(11).font_semibold().child(label);
@@ -50,18 +64,21 @@ export default class TeamQueue extends View {
     this.candidates=null; this.candidateFlight=false; this.candidateFailure=null;
     this.filter = "active"; this.selected = this.options.item ?? null;
     this.revealed = this.role !== "detail";
+    this.entering = new Set(); this.leaving = new Map(); this.minute = 0; this.again = false;
     cx.spawn(async cx => {
       try {
         const local = this.options.local ?? appHome() + "/mods/" + MOD + "/local.json";
         this.config = JSON.parse(await readTextFile(local) ?? "{}");
         await this.refresh(cx);
-      } catch(error) { this.failure = String(error); cx.notify(); }
+      } catch(error) { this.failure = String(error); cx.notify(); return; }
+      if(this.role === "strip") this.watchRequests(cx);
     });
     cx.timer.every(5000,cx => { if(this.config) cx.spawn(async cx => { await this.refresh(cx); if(this.pendingExecution) await this.pollAction(cx); }); });
     if(this.role === "detail") cx.timer.after(32,cx => { this.revealed = true; cx.notify(); });
   }
   async refresh(cx) {
-    if(this.inFlight || !this.config) return;
+    if(!this.config) return;
+    if(this.inFlight) { this.again = true; return; }
     this.inFlight = true;
     try {
       const c=this.config;
@@ -70,12 +87,35 @@ export default class TeamQueue extends View {
       const incoming=JSON.parse(result.stdout);
       if(incoming.schema_version !== 1 || !Array.isArray(incoming.jobs) || !incoming.counts || !incoming.fingerprint) throw new Error("요청 큐 자료 형식을 확인해 주세요");
       const changed=this.failure || this.data?.fingerprint !== incoming.fingerprint;
+      if(this.role === "strip" && changed) this.trackLane(cx, this.data, incoming);
       this.failure=null; this.data=incoming;
+      const minute=Math.floor(Date.now()/60000);
+      if(this.role === "strip" && minute !== this.minute) { this.minute=minute; cx.notify(); }
       if(changed) { if(this.role === "detail") this.selected=incoming.jobs.find(x => x.id === this.options.item?.id) ?? this.selected; cx.notify(); }
     } catch(error) {
       const message=String(error);
       if(this.failure !== message) { this.failure=message; cx.notify(); }
-    } finally { this.inFlight=false; }
+    } finally {
+      this.inFlight=false;
+      if(this.again) { this.again=false; await this.refresh(cx); }
+    }
+  }
+  // Request files changing means a job came in or was taken: refresh now instead of waiting for the 5s poll.
+  async watchRequests(cx) {
+    const dir=String(this.config.state ?? "").replace(/\/[^/]*$/, "") + "/pool-requests";
+    try { for(;;) { await watchFolder(dir); await this.refresh(cx); } }
+    catch(_error) { /* no watch: the 5s poll keeps the strip current */ }
+  }
+  // New lane cards fade in; cards that left (taken) fade out before they are dropped.
+  trackLane(cx, before, after) {
+    if(!before) return;
+    const was=splitLane(before.jobs).queued, now=splitLane(after.jobs).queued;
+    const nowIds=new Set(now.map(x=>x.id)), wasIds=new Set(was.map(x=>x.id));
+    const fresh=now.filter(x=>!wasIds.has(x.id)), gone=was.filter(x=>!nowIds.has(x.id));
+    for(const x of fresh) { this.entering.add(x.id); this.leaving.delete(x.id); }
+    for(const x of gone) this.leaving.set(x.id, x);
+    if(fresh.length) cx.timer.after(32, cx => { this.entering.clear(); cx.notify(); });
+    if(gone.length) cx.timer.after(280, cx => { for(const x of gone) this.leaving.delete(x.id); cx.notify(); });
   }
   async organize(cx, action) {
     if(this.actionFlight || this.executionFlight || this.pendingExecution || !this.config || !this.selected?.board_state) return;
@@ -171,38 +211,48 @@ export default class TeamQueue extends View {
   }
   renderStrip(cx,t,base,nativeTerminals) {
     const now=Date.now()/1000;
-    const jobs=(this.data?.jobs??[]).filter(isActive).sort((a,b)=>stripRank(a)-stripRank(b) || (since(a)??Infinity)-(since(b)??Infinity));
-    const count=key=>jobs.filter(x=>x.category===key).length;
+    const {queued,taken}=splitLane(this.data?.jobs??[]);
+    const attention=taken.filter(needsAttention).length;
+    const queuedIds=new Set(queued.map(x=>x.id));
+    const lane=[...queued,...[...this.leaving.values()].filter(x=>!queuedIds.has(x.id))].sort(fifo);
     const status=this.stripStatus();
+    const openList=()=>openOverlay({ mod:MOD, props:{ role:"list", local:this.options.local }, kind:"dialog", modal:false, frame:"none", width:0.72, height:0.82 });
     const linkBtn=(id,label,cb)=>div().id(id).flex_none().whitespace_nowrap().px(8).h(20).flex().items_center().border_1().border_color(t.dim).text_size(12).text_color(t.foreground).cursor_pointer()
       .hover(el=>el.bg(t.raised)).on_click((_e,c)=>{c.stop_propagation();cb(c);}).child(label);
-    const row=item=>{
-      const [mark,label]=STRIP_LABEL[item.category]??["○",itemState(item,nativeTerminals)];
-      const color=itemColor(item,nativeTerminals,t);
-      const ts=since(item);
-      const age=ts==null?"":elapsed(Math.max(0,now-ts))+(item.category==="progress"?" 진행":" 대기");
-      return h_flex().id("queue-strip-"+item.id).flex_none().min_w(0).h(21).items_center().gap(10).px(12).cursor_pointer()
-        .hover(el=>el.bg(t.raised)).on_click(()=>this.detail(item)).tooltip(item.title)
-        .accessibility_label(item.team_label+" · "+item.title+" · "+itemState(item,nativeTerminals))
-        .child(div().flex_none().w(82).whitespace_nowrap().text_color(color).child(mark+" "+label))
-        .child(div().flex_none().w(96).truncate().text_color(t.muted).child(shortTeam(item.team_label)))
-        .child(div().flex_none().w(360).truncate().child(item.short_title ?? item.title))
-        .child(div().flex_none().w(64).whitespace_nowrap().text_color(t.muted).child(age))
-        .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(String(item.reason ?? "")));
+    const card=(item,head)=>{
+      const leaving=!queuedIds.has(item.id), entering=this.entering.has(item.id);
+      const alert=needsAttention(item), ts=arrival(item);
+      const age=ts==null?"":elapsed(Math.max(0,now-ts))+" 대기";
+      return h_flex().id("queue-lane-"+item.id).flex_none().items_center().gap(4)
+        .opacity(leaving||entering?0:1).transition("opacity",{duration:200,easing:"ease-out"})
+        .child(v_flex().flex_none().w(196).h(50).px(8).py(5).gap(3).border_1().border_color(alert?t.blocked:head?t.accent:t.border).bg(t.surface)
+          .cursor_pointer().hover(el=>el.bg(t.raised)).on_click(()=>this.detail(item)).tooltip(item.title+(item.reason?" · "+item.reason:""))
+          .accessibility_label((head?"다음 배정 · ":"")+item.team_label+" · "+item.title+" · "+age)
+          .child(h_flex().min_w(0).items_center().gap(6).text_size(11)
+            .when(head,el=>el.child(div().flex_none().whitespace_nowrap().px(4).bg(t.accent).text_color(t.accent_foreground).font_semibold().child("다음")))
+            .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(shortTeam(item.team_label)))
+            .child(div().flex_none().whitespace_nowrap().text_color(alert?t.blocked:t.muted).child(age)))
+          .child(div().min_w(0).truncate().child(item.short_title ?? item.title)))
+        .child(div().flex_none().text_color(t.dim).child("›"));
     };
+    const end=(id,label)=>div().id(id).flex_none().whitespace_nowrap().text_size(11).text_color(t.muted).child(label);
+    const live=lane.filter(x=>queuedIds.has(x.id));
+    const body=!this.data ? words(this.failure ? "최신 조회 확인 필요 · "+this.failure : "업무를 읽고 있습니다").text_size(12).text_color(this.failure?t.blocked:t.muted)
+      : !lane.length ? div().text_size(12).text_color(t.muted).child("대기 중인 업무 없음 · 들어오면 자동 배정됩니다")
+      : h_flex().id("queue-lane-track").flex_1().min_w(0).items_center().overflow_x_scrollbar().children(lane.map(x=>card(x,x.id===live[0]?.id)));
     return base().text_size(13)
       .child(h_flex().flex_none().min_w(0).h(28).items_center().gap(10).px(12)
-        .child(div().flex_none().font_semibold().child("업무 큐 · "+jobs.length+"건"))
-        .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(status))
-        .child(div().flex_none().whitespace_nowrap().text_size(12).text_color(t.muted).child("확인 필요 "+count("attention")+" · 진행 "+count("progress")+" · 대기 "+count("waiting")))
+        .child(div().flex_none().font_semibold().child("업무 큐 · 대기 "+queued.length))
+        .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(this.executionFailure?t.blocked:t.muted).child(status))
+        .child(div().id("queue-strip-taken").flex_none().whitespace_nowrap().text_size(12).text_color(attention?t.blocked:t.muted).cursor_pointer()
+          .on_click(()=>openList()).child("처리 중 "+taken.length+(attention?" · 확인 필요 "+attention:"")))
         .when(Boolean(this.options.overlay),el=>el.child(linkBtn("queue-strip-close","닫기",()=>closeOverlay(this.options.overlay))))
         .child(linkBtn("queue-strip-sync",this.executionFlight?"확인 중…":"동기화",cx=>cx.spawn(async cx=>this.executeAction(cx,"sync"))))
-        .child(linkBtn("queue-strip-all","전체 ›",()=>openOverlay({ mod:MOD, props:{ role:"list", local:this.options.local }, kind:"dialog", modal:false, frame:"none", width:0.72, height:0.82 }))))
-      .child(v_flex().id("queue-strip-rows").flex_1().min_h(0).min_w(0).overflow_y_scrollbar()
-        .when(Boolean(this.failure),el=>el.child(words("최신 조회 확인 필요 · "+this.failure).text_size(12).text_color(t.blocked).px(12)))
-        .when(!this.data&&!this.failure,el=>el.child(words("업무를 읽고 있습니다").text_color(t.muted).px(12)))
-        .when(Boolean(this.data)&&!jobs.length,el=>el.child(words("쌓인 업무 없음").text_color(t.muted).px(12)))
-        .children(jobs.map(row)));
+        .child(linkBtn("queue-strip-all","전체 ›",()=>openList())))
+      .child(h_flex().flex_1().min_h(0).min_w(0).items_center().gap(8).px(12)
+        .child(end("queue-lane-exit","◀ 배정"))
+        .child(body)
+        .child(end("queue-lane-entry","입구")));
   }
   render(cx) {
     const t=theme();
