@@ -23,6 +23,19 @@ const pixelCorners=(outside)=>[
   div().absolute().left(-2).bottom(-2).w(10).h(4).bg(outside),div().absolute().left(-2).bottom(-2).w(4).h(10).bg(outside),
   div().absolute().right(-2).bottom(-2).w(10).h(4).bg(outside),div().absolute().right(-2).bottom(-2).w(4).h(10).bg(outside)
 ];
+// Shared by the list cards and the strip rows: native terminal state confirms "working".
+const nativeStatus = (item, list) => { const x=list.find(x=>x.address===item.receiver_terminal); return x?.status?.state ?? x?.status; };
+const verifiedWorking = (item, list) => item.phase==="running" && item.verified_working===true && !item.completion_intent && !item.work_completion_confirmed && item.receiver_matches_current===true &&
+  nativeStatus(item, list)==="working";
+const itemState = (item, list) => item.category==="archived" ? "보관됨" : manualState(item) ?? (item.work_completion_confirmed ? "업무 완료" : verifiedWorking(item, list) ? "진행 중" : item.phase==="running" ? "결과 제출 대기" : item.phase==="received" ? "전달됨 · 수신 대기" : item.state_label);
+const itemColor = (item, list, t) => item.requires_user_decision ? t.blocked : verifiedWorking(item, list) ? t.working : item.phase==="received" ? t.muted : categoryColor(item.category,t);
+const isActive = item => !["history","deferred","archived"].includes(item.category);
+const STRIP_RANK = { attention: 1, progress: 2, waiting: 3 };
+const STRIP_LABEL = { attention: ["◆","확인 필요"], progress: ["◐","진행 중"], waiting: ["○","대기"] };
+const since = item => item.updated_at ?? item.created_at ?? null;
+const stripRank = item => item.requires_user_decision ? 0 : STRIP_RANK[item.category] ?? 4;
+const shortTeam = label => String(label ?? "").replace(/^\s*\d+\s*·\s*/, "").replace(/\s*(개발팀|팀장|팀)$/, "") || "팀 미확인";
+const elapsed = seconds => seconds < 3600 ? Math.max(1, Math.floor(seconds/60))+"m" : seconds < 172800 ? Math.floor(seconds/3600)+"h" : Math.floor(seconds/86400)+"d";
 const badge = (label, color, t) => div().flex_none().whitespace_nowrap().rounded(0).border_1().border_color(color).px(6).py(2).bg(t.raised).text_color(color).text_size(11).font_semibold().child(label);
 const button = (id, label, callback, t) => div().id(id).relative().flex_none().px(12).py(7).rounded(0).border_2().border_color(t.dim).bg(t.raised).children(pixelCorners(t.background)).text_color(t.foreground).text_size(13).cursor_pointer()
   .hover(el => el.bg(t.surface)).on_click((_event,cx) => { cx.stop_propagation(); callback(cx); }).child(label);
@@ -149,6 +162,48 @@ export default class TeamQueue extends View {
   operations() {
     openOverlay({ mod:MOD, props:{ role:"operations", local:this.options.local }, kind:"dialog", modal:false, frame:"none", width:0.66, height:0.76 });
   }
+  stripStatus() {
+    const r=this.executionResult;
+    const label=({queued:"처리 접수",running:"처리 중",completed:"처리 확인",blocked:"처리 불가",uncertain:"결과 불명",failed:"처리 실패"})[r?.status];
+    if(this.executionFailure) return String(this.executionFailure);
+    if(this.pendingExecution&&!r) return "요청 결과 확인 중";
+    return label ? label+(r.reason?" · "+r.reason:"") : "";
+  }
+  renderStrip(cx,t,base,nativeTerminals) {
+    const now=Date.now()/1000;
+    const jobs=(this.data?.jobs??[]).filter(isActive).sort((a,b)=>stripRank(a)-stripRank(b) || (since(a)??Infinity)-(since(b)??Infinity));
+    const count=key=>jobs.filter(x=>x.category===key).length;
+    const status=this.stripStatus();
+    const linkBtn=(id,label,cb)=>div().id(id).flex_none().whitespace_nowrap().px(8).h(20).flex().items_center().border_1().border_color(t.dim).text_size(12).text_color(t.foreground).cursor_pointer()
+      .hover(el=>el.bg(t.raised)).on_click((_e,c)=>{c.stop_propagation();cb(c);}).child(label);
+    const row=item=>{
+      const [mark,label]=STRIP_LABEL[item.category]??["○",itemState(item,nativeTerminals)];
+      const color=itemColor(item,nativeTerminals,t);
+      const ts=since(item);
+      const age=ts==null?"":elapsed(Math.max(0,now-ts))+(item.category==="progress"?" 진행":" 대기");
+      return h_flex().id("queue-strip-"+item.id).flex_none().min_w(0).h(21).items_center().gap(10).px(12).cursor_pointer()
+        .hover(el=>el.bg(t.raised)).on_click(()=>this.detail(item)).tooltip(item.title)
+        .accessibility_label(item.team_label+" · "+item.title+" · "+itemState(item,nativeTerminals))
+        .child(div().flex_none().w(82).whitespace_nowrap().text_color(color).child(mark+" "+label))
+        .child(div().flex_none().w(96).truncate().text_color(t.muted).child(shortTeam(item.team_label)))
+        .child(div().flex_none().w(360).truncate().child(item.short_title ?? item.title))
+        .child(div().flex_none().w(64).whitespace_nowrap().text_color(t.muted).child(age))
+        .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(String(item.reason ?? "")));
+    };
+    return base().text_size(13)
+      .child(h_flex().flex_none().min_w(0).h(28).items_center().gap(10).px(12)
+        .child(div().flex_none().font_semibold().child("업무 큐 · "+jobs.length+"건"))
+        .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(status))
+        .child(div().flex_none().whitespace_nowrap().text_size(12).text_color(t.muted).child("확인 필요 "+count("attention")+" · 진행 "+count("progress")+" · 대기 "+count("waiting")))
+        .when(Boolean(this.options.overlay),el=>el.child(linkBtn("queue-strip-close","닫기",()=>closeOverlay(this.options.overlay))))
+        .child(linkBtn("queue-strip-sync",this.executionFlight?"확인 중…":"동기화",cx=>cx.spawn(async cx=>this.executeAction(cx,"sync"))))
+        .child(linkBtn("queue-strip-all","전체 ›",()=>openOverlay({ mod:MOD, props:{ role:"list", local:this.options.local }, kind:"dialog", modal:false, frame:"none", width:0.72, height:0.82 }))))
+      .child(v_flex().id("queue-strip-rows").flex_1().min_h(0).min_w(0).overflow_y_scrollbar()
+        .when(Boolean(this.failure),el=>el.child(words("최신 조회 확인 필요 · "+this.failure).text_size(12).text_color(t.blocked).px(12)))
+        .when(!this.data&&!this.failure,el=>el.child(words("업무를 읽고 있습니다").text_color(t.muted).px(12)))
+        .when(Boolean(this.data)&&!jobs.length,el=>el.child(words("쌓인 업무 없음").text_color(t.muted).px(12)))
+        .children(jobs.map(row)));
+  }
   render(cx) {
     const t=theme();
     const base = () => v_flex().size_full().min_w(0).min_h(0).bg(t.background).text_color(t.foreground).font_family("D2Coding").text_size(13);
@@ -248,26 +303,24 @@ export default class TeamQueue extends View {
             .child(pair("원 요청 기록",item.source_file)).child(pair("요청 ID",item.id)))));
     }
     const data=this.data;
-    const jobs=(data?.jobs??[]).filter(item=>this.filter==="all" ||
-      (this.filter==="archived" ? item.category==="archived" : this.filter==="records" ? ["history","deferred"].includes(item.category) : !["history","deferred","archived"].includes(item.category)));
     const nativeTerminals=terminals();
-    const verifiedWorking=item=>item.phase==="running" && item.verified_working===true && !item.completion_intent && !item.work_completion_confirmed && item.receiver_matches_current===true &&
-      (nativeTerminals.find(x=>x.address===item.receiver_terminal)?.status?.state??nativeTerminals.find(x=>x.address===item.receiver_terminal)?.status)==="working";
-    const itemState=item=>item.category==="archived" ? "보관됨" : manualState(item) ?? (item.work_completion_confirmed ? "업무 완료" : verifiedWorking(item) ? "진행 중" : item.phase==="running" ? "결과 제출 대기" : item.phase==="received" ? "전달됨 · 수신 대기" : item.state_label);
-    const itemColor=item=>item.requires_user_decision ? t.blocked : verifiedWorking(item) ? t.working : item.phase==="received" ? t.muted : categoryColor(item.category,t);
+    if(this.role === "strip") return this.renderStrip(cx,t,base,nativeTerminals);
+    const jobs=(data?.jobs??[]).filter(item=>this.filter==="all" ||
+      (this.filter==="archived" ? item.category==="archived" : this.filter==="records" ? ["history","deferred"].includes(item.category) : isActive(item)));
     const card=item=>v_flex().id("queue-card-"+item.id).min_w(0).flex_none().p(12).gap(8)
-      .border_1().border_color(verifiedWorking(item)?t.working:t.border).bg(t.surface)
+      .border_1().border_color(verifiedWorking(item,nativeTerminals)?t.working:t.border).bg(t.surface)
       .cursor_pointer().hover(el=>el.bg(t.raised)).on_click(()=>this.detail(item))
-      .accessibility_label(item.team_label+" · "+item.title+" · "+itemState(item)).tooltip(item.title)
+      .accessibility_label(item.team_label+" · "+item.title+" · "+itemState(item,nativeTerminals)).tooltip(item.title)
       .child(h_flex().min_w(0).items_center().justify_between().gap(10)
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.muted).child(item.team_label))
-        .child(badge(itemState(item),itemColor(item),t)))
+        .child(badge(itemState(item,nativeTerminals),itemColor(item,nativeTerminals,t),t)))
       .child(div().min_w(0).truncate().text_size(15).font_semibold().child(item.title));
     const healthy=data?.supervisor?.alive && data?.supervisor?.heartbeat_fresh && data?.supervisor?.source_matches && data?.supervisor?.dispatch_healthy;
     return base()
       .child(h_flex().flex_none().flex_wrap().items_center().justify_between().p(14).gap(10)
         .child(div().text_size(18).font_semibold().child("업무 큐"))
         .child(h_flex().flex_wrap().items_center().gap(6)
+          .when(Boolean(this.options.overlay),el=>el.child(button("queue-list-close","닫기",()=>closeOverlay(this.options.overlay),t)))
           .children(GROUPS.map(([id,label])=>div().id("queue-filter-"+id).px(10).py(6)
             .bg(this.filter===id?t.raised:t.background).text_color(this.filter===id?t.foreground:t.muted)
             .cursor_pointer().on_click((_event,cx)=>{this.filter=id;cx.notify();}).child(label)))
