@@ -117,5 +117,26 @@ class WorkerPlanPriorityTest(unittest.TestCase):
         self.assertIn(('claude', 'team'), chosen)
 
 
+class PromptSuggestionTest(unittest.TestCase):
+    """Claude staff start with prompt suggestions off, so grey next-input text never looks like a draft."""
+    PROFILE = {'home': '/srv/example/claude-team', 'model': 'm', 'identity': {'email': 'a@example.invalid'}}
+
+    def test_claude_launch_turns_prompt_suggestions_off(self):
+        from teamkit.runtime import launch_spec
+        for session in (None, 'resume-id'):
+            self.assertEqual('false', launch_spec('claude', self.PROFILE, session)['env']
+                             .get('CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION'))
+
+    def test_codex_launch_is_unchanged(self):
+        from teamkit.runtime import launch_spec
+        self.assertNotIn('CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION',
+                         launch_spec('codex', self.PROFILE, None)['env'])
+
+    def test_a_visible_input_text_is_still_a_draft_without_style_evidence(self):
+        from teamkit.prompt_state import empty_input
+        screen = '─' * 20 + '\n❯ 짧게 요약해줘.\n' + '─' * 20 + '\n  Context 13%\n'
+        self.assertFalse(empty_input(screen))
+
+
 if __name__ == '__main__':
     unittest.main()
