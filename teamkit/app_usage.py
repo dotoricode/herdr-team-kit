@@ -17,6 +17,7 @@ from .policy import CLAUDE_QUOTA_SOURCE, CLAUDE_NATIVE_QUOTA_SOURCE, normalize_q
 from .statusline import peek_quota
 from .runtime import AUTH_ENV, home_value
 from .store import Store
+from .prompt_state import empty_input
 
 REASONS={'provider_windows_read':'구독 조회가 반환한 사용량입니다.',
          'native_usage_needed':'로그인은 확인했지만 GUI에 연결된 최신 사용량 자료가 없습니다.',
@@ -428,15 +429,15 @@ def refresh_native_usage(config,state,account):
                     raise UsageUnavailable('native_not_ready')
                 remaining=startup_deadline-time.monotonic()
                 if remaining<=0:raise UsageUnavailable('native_not_ready')
-                baseline=_hc(['read','--lines','0',address],timeout=remaining,plain=True)
+                screen=_hc(['read','--json','--lines','0',address],timeout=remaining)
+                baseline=screen.get('text')
+                if not isinstance(baseline,str):raise UsageUnavailable('native_outcome_unknown')
                 dialog=_dialog(baseline)
                 if dialog:raise UsageUnavailable(dialog)
                 if 'Current week (all models)' in baseline:raise UsageUnavailable('native_outcome_unknown')
                 plain=re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]','',baseline)
-                prompts=re.findall(r'(?m)^[^\S\n]*❯([^\n]*)$',plain)
-                empty_prompt=bool(prompts) and not prompts[-1].strip()
                 if (status.get('state')=='idle' and status.get('app') in ('claude','claude-code')
-                        and foreground and empty_prompt):
+                        and foreground and screen.get('complete') is True and empty_input(plain)):
                     break
                 if time.monotonic()>=startup_deadline:raise UsageUnavailable('native_not_ready')
                 time.sleep(0.1)

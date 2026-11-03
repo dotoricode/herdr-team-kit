@@ -111,8 +111,13 @@ class UsageTests(UsageFixture):
 class NativeHc:
     def __init__(self):
         self.calls=[];self.labels={};self.state='live';self.missing=False
+        self.initial_screen='❯ ';self.screen_complete=True
         self.screen='Session\nUsage: 0 input, 0 output, 0 cache read, 0 cache write\nCurrent session\n0% used\nCurrent week (all models)\n32% used'
         self.ready=True;self.timeout_run=False;self.queried=False;self.foreground_name='claude';self.status_app='claude';self.foreground_missing_once=False;self.gets=0;self.wrap_sends=False;self.received_text=None
+    def read_result(self,argv,text):
+        output=json.dumps({'text':text,'complete':self.screen_complete}) if '--json' in argv else text
+        return subprocess.CompletedProcess(argv,0,output,'')
+
     def __call__(self,argv,**opts):
         import subprocess
         self.calls.append(argv);args=argv[1:];op=args[0]
@@ -132,7 +137,7 @@ class NativeHc:
         elif op=='keys':
             self.received_text=''.join(args[3:-1]) if args[1]=='--json' else ''.join(args[2:-1])
             self.queried=self.received_text=='/usage';value={'status':'idle','turn':0}
-        elif op=='read':return subprocess.CompletedProcess(argv,0,self.screen if self.queried or not self.ready else '❯ ','')
+        elif op=='read':return self.read_result(argv,self.screen if self.queried or not self.ready else self.initial_screen)
         elif op=='ls':value={'terminals':[{'address':'t9','state':self.state}]} if self.labels and not self.missing else {'terminals':[]}
         elif op=='kill':self.state='finished';value={'ok':True}
         elif op=='rm':self.missing=True;value={'ok':True}
@@ -166,7 +171,7 @@ class NativeUsageTests(UsageFixture):
         self.assertEqual(sum(a[1]=='run' for a in native.calls),1)
         self.assertEqual(sum(a[1]=='keys' for a in native.calls),1)
         first_key=next(i for i,a in enumerate(native.calls) if a[1]=='keys')
-        self.assertTrue(all(a[2:4]==['--lines','0'] for a in native.calls[:first_key] if a[1]=='read'))
+        self.assertTrue(all(a[2:5]==['--json','--lines','0'] for a in native.calls[:first_key] if a[1]=='read'))
         self.assertFalse(any(a[1]=='send' for a in native.calls))
         attempt=json.loads(Path(str(self.state)+'.native-usage-personal.json').read_text())
         self.assertTrue(attempt['zero_token_usage']);self.assertTrue(native.missing)
@@ -195,7 +200,7 @@ class NativeUsageTests(UsageFixture):
         def starting(argv, **opts):
             result=native(argv, **opts)
             if argv[1]=='read' and not native.queried:
-                return subprocess.CompletedProcess(argv,0,'❯ unfinished draft','')
+                return native.read_result(argv,'❯ unfinished draft')
             return result
         with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=starting),patch('teamkit.app_usage.time.sleep'),patch('teamkit.app_usage.time.monotonic',side_effect=lambda:next(ticks)):
             with self.assertRaisesRegex(UsageUnavailable,'native_not_ready'):
@@ -210,7 +215,7 @@ class NativeUsageTests(UsageFixture):
             result=native(argv, **opts)
             if argv[1]=='read' and not native.queried:
                 reads.append(True)
-                if len(reads)<=3:return subprocess.CompletedProcess(argv,0,'Initializing CLI','')
+                if len(reads)<=3:return native.read_result(argv,'Initializing CLI')
             return result
         with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=starting),patch('teamkit.app_usage.time.sleep'):
             refresh_native_usage(self.value,self.state,'personal')
@@ -235,6 +240,42 @@ class NativeUsageTests(UsageFixture):
                 sleeping.assert_not_called()
                 self.assertFalse(any(a[1] in ('send','keys') for a in native.calls))
                 self.assertTrue(native.missing)
+
+    def test_single_multiline_and_history_drafts_never_receive_builtin_input(self):
+        from teamkit.app_usage import refresh_native_usage,UsageUnavailable
+        for screen in ('❯ preserve this draft', '❯ \n  preserve this multiline draft\n',
+                       '❯ earlier prompt\nold answer\n❯ \n  preserve this hidden draft\n'):
+            with self.subTest(screen=screen):
+                native=NativeHc();native.initial_screen=screen;ticks=iter(range(100))
+                with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=native),patch('teamkit.app_usage.time.sleep'),patch('teamkit.app_usage.time.monotonic',side_effect=lambda:next(ticks)):
+                    with self.assertRaisesRegex(UsageUnavailable,'native_not_ready'):
+                        refresh_native_usage(self.value,self.state,'team')
+                self.assertFalse(any(a[1] in ('send','keys') for a in native.calls))
+                self.assertTrue(native.missing)
+
+    def test_incomplete_startup_screen_never_receives_input(self):
+        from teamkit.app_usage import refresh_native_usage,UsageUnavailable
+        native=NativeHc();native.screen_complete=False;ticks=iter(range(100))
+        with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=native),patch('teamkit.app_usage.time.sleep'),patch('teamkit.app_usage.time.monotonic',side_effect=lambda:next(ticks)):
+            with self.assertRaisesRegex(UsageUnavailable,'native_not_ready'):
+                refresh_native_usage(self.value,self.state,'team')
+        self.assertGreaterEqual(next(ticks),15)
+        self.assertFalse(any(a[1] in ('send','keys') for a in native.calls))
+        self.assertTrue(native.missing)
+
+    def test_incomplete_screen_waits_until_the_same_owned_screen_is_complete(self):
+        from teamkit.app_usage import refresh_native_usage
+        native=NativeHc();reads=[]
+        def reading(argv,**opts):
+            if argv[1]=='read' and not native.queried:
+                reads.append(True);native.screen_complete=len(reads)>2
+            return native(argv,**opts)
+        with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=reading),patch('teamkit.app_usage.time.sleep'):
+            refresh_native_usage(self.value,self.state,'team')
+        self.assertEqual(len(reads),3)
+        self.assertEqual(sum(a[1]=='run' for a in native.calls),1)
+        self.assertEqual(sum(a[1]=='keys' for a in native.calls),1)
+        self.assertTrue(native.missing)
 
     def test_os_process_name_is_distinct_from_reported_claude_program_id(self):
         from teamkit.app_usage import refresh_native_usage
