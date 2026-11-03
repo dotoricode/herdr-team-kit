@@ -131,6 +131,12 @@ class NativeRuntime:
                 queue.close()
             from .workers import plans
             result.extend(plans(self.config, self.state, ticket))
+        from .allocation import usage_only, profile_candidates
+        if usage_only(self.config):
+            pairs = [(x['provider'], x['account']) for x in profile_candidates(self.config)]
+            by_order = sorted(result, key=lambda e: pairs.index((e['provider'], e['account']))
+                              if (e['provider'], e['account']) in pairs else len(pairs))
+            return by_order
         from .routing import execution_candidates
         first = next(iter(self.config['profiles']))
         role = {'provider': first, 'model': self.config['profiles'][first]['team']['model'], 'effort': 'medium'}

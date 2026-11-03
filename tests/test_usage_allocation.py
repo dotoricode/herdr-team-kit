@@ -47,6 +47,18 @@ class UsageWorkerTests(unittest.TestCase):
         self.assertTrue(all(p['model']=='profile-model' for p in plans))
 
 
+    def test_real_executor_discovery_does_not_invoke_missing_role_routing(self):
+        from teamkit.operations import NativeRuntime
+        self.config['operations']['allocation_policy'] = 'usage'
+        ticket = self.ticket(classification={'kind':'design','risks':[]})
+        runtime = NativeRuntime(self.config, self.state)
+        with patch('teamkit.session_pool._read', return_value={'slots':{}}), \
+             patch('teamkit.staffbootstrap.executors', return_value=[]), \
+             patch.object(workers.providers, 'identity'):
+            candidates = runtime.executors(ticket)
+        self.assertEqual(4, len(candidates))
+
+
 class UsageRefreshTests(unittest.TestCase):
     setUp = worker_fixtures.WorkerTests.setUp
 
