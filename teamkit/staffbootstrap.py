@@ -1,6 +1,7 @@
 """Explicit staff startup and receipt, separate from product tickets and UI work."""
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -278,6 +279,22 @@ def checkpoint(config_path, state, department, provider, terminal, pid, session,
         store.close()
 
 
+def _assert_session_absent(pr, provider, session):
+    # A separately started resume is not permission to start another copy.
+    listing = _call('ls', '--json')
+    if not isinstance(listing.get('terminals'), list):
+        raise ValueError('live session inventory is unavailable or ambiguous')
+    for terminal in listing['terminals']:
+        if (not isinstance(terminal, dict) or not isinstance(terminal.get('state'), str)
+                or not isinstance(terminal.get('address'), str)):
+            raise ValueError('live session inventory is unavailable or ambiguous')
+        if terminal['state'] == 'live':
+            observed = _call('get', terminal['address'])
+            if observed.get('address') != terminal['address'] or observed.get('state') != 'live':
+                raise ValueError('live session inventory changed during duplicate inspection')
+            _exclude_live_session(observed, provider, pr, session)
+
+
 def _resume(db, seat, session, pr, provider, root):
     row = db.execute('SELECT body FROM staff_resume_proofs WHERE seat=?', (seat,)).fetchone()
     if session is None:
@@ -295,20 +312,143 @@ def _resume(db, seat, session, pr, provider, root):
         raise ValueError('original native is still attached; do not duplicate the session')
     if _journal(pr, provider, session, root, proof['journal']['path']) != proof['journal']:
         raise ValueError('original journal changed since empty-input checkpoint; inspect before resume')
-    # A separately started resume is not permission to start another copy.
-    listing = _call('ls', '--json')
-    if not isinstance(listing.get('terminals'), list):
-        raise ValueError('live session inventory is unavailable or ambiguous')
-    for terminal in listing['terminals']:
-        if (not isinstance(terminal, dict) or not isinstance(terminal.get('state'), str)
-                or not isinstance(terminal.get('address'), str)):
-            raise ValueError('live session inventory is unavailable or ambiguous')
-        if terminal['state'] == 'live':
-            observed = _call('get', terminal['address'])
-            if observed.get('address') != terminal['address'] or observed.get('state') != 'live':
-                raise ValueError('live session inventory changed during duplicate inspection')
-            _exclude_live_session(observed, provider, pr, session)
+    _assert_session_absent(pr, provider, session)
     return proof
+
+
+def _shutdown_rows(prefix, tail, session, root):
+    """Accept only the observed normal-stop metadata, anchored to frozen history."""
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError('shutdown metadata contains duplicate keys')
+            result[key] = value
+        return result
+    if not prefix.endswith(b'\n') or not tail.endswith(b'\n') or not 0 < len(tail) <= 65536:
+        raise ValueError('shutdown metadata must be a bounded complete JSONL tail')
+    try:
+        rows = [json.loads(line, object_pairs_hook=pairs) for line in tail.splitlines()]
+        history = [json.loads(line) for line in prefix.splitlines()]
+    except (ValueError, UnicodeError) as error:
+        raise ValueError('shutdown metadata is not strict JSONL') from error
+    if [row.get('type') if isinstance(row, dict) else None for row in rows] != ['cost-state', 'last-prompt', 'cost-state']:
+        raise ValueError('shutdown metadata must contain only the known three stop records')
+    if any(row.get('sessionId') != session for row in rows):
+        raise ValueError('shutdown metadata session differs from the checkpoint')
+    counts = {'totalAPIDuration', 'totalAPIDurationWithoutRetries', 'totalToolDuration',
+              'totalLinesAdded', 'totalLinesRemoved', 'totalDuration', 'startTime'}
+    tokens = {'inputTokens', 'outputTokens', 'thinkingTokens', 'cacheReadInputTokens',
+              'cacheCreationInputTokens', 'cacheCreationEphemeral5mInputTokens',
+              'cacheCreationEphemeral1hInputTokens', 'webSearchRequests'}
+    def cost(value):
+        return type(value) in (int, float) and math.isfinite(value) and value >= 0
+    for row in (rows[0], rows[2]):
+        if (set(row) != {'type', 'sessionId', 'totalCostUSD', 'modelUsage', 'hasUnknownModelCost', *counts}
+                or any(type(row[k]) is not int or row[k] < 0 for k in counts)
+                or not cost(row['totalCostUSD']) or type(row['hasUnknownModelCost']) is not bool
+                or not isinstance(row['modelUsage'], dict) or len(row['modelUsage']) > 64):
+            raise ValueError('shutdown cost metadata has an unknown schema')
+        for model, usage in row['modelUsage'].items():
+            if (not isinstance(model, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}', model)
+                    or not isinstance(usage, dict) or set(usage) != {*tokens, 'costUSD'}
+                    or any(type(usage[k]) is not int or usage[k] < 0 for k in tokens)
+                    or not cost(usage['costUSD'])):
+                raise ValueError('shutdown model usage metadata has an unknown schema')
+    if (any(rows[0][k] != rows[2][k] for k in rows[0] if k != 'totalDuration')
+            or rows[2]['totalDuration'] < rows[0]['totalDuration']):
+        raise ValueError('shutdown metadata includes new model or tool activity')
+    prompt = rows[1]
+    if (set(prompt) != {'type', 'sessionId', 'lastPrompt', 'leafUuid'}
+            or not isinstance(prompt['lastPrompt'], str) or not prompt['lastPrompt']
+            or not isinstance(prompt['leafUuid'], str) or not prompt['leafUuid']):
+        raise ValueError('shutdown last-prompt metadata has an unknown schema')
+    prompts, leaves = set(), set()
+    for row in history:
+        if (not isinstance(row, dict) or row.get('sessionId') != session or row.get('isSidechain') is True
+                or row.get('cwd', root) != root):
+            continue
+        if isinstance(row.get('uuid'), str):
+            leaves.add(row['uuid'])
+        if row.get('type') == 'last-prompt':
+            text = row.get('lastPrompt')
+        elif row.get('type') == 'user' and isinstance(row.get('message'), dict):
+            text = row['message'].get('content')
+            if isinstance(text, list):
+                text = ''.join(item.get('text', '') for item in text
+                               if isinstance(item, dict) and item.get('type') == 'text' and isinstance(item.get('text'), str))
+        else:
+            continue
+        if isinstance(text, str) and text:
+            prompts.add(text)
+    if prompt['lastPrompt'] not in prompts or prompt['leafUuid'] not in leaves:
+        raise ValueError('shutdown last-prompt is not anchored to the original prefix history')
+    return [row['type'] for row in rows]
+
+
+def seal_checkpoint(config_path, state, department, provider, session, original_journal, reason):
+    """Seal verified shutdown metadata without editing the native journal or resuming it."""
+    require_managed()
+    if (provider != 'claude' or not isinstance(original_journal, (str, Path))
+            or not isinstance(reason, str) or not reason.strip() or len(reason) > 1000):
+        raise ValueError('shutdown seal requires the original Claude session and an explicit audit reason')
+    config_bytes = Path(config_path).read_bytes()
+    config = load(config_path)
+    _, _, root, _, pr, _ = _preflight(config, state, department, provider)
+    store = Store(state)
+    try:
+        _schema(store.db)
+        seat = department + '/' + provider
+        row = store.db.execute('SELECT body FROM staff_resume_proofs WHERE seat=?', (seat,)).fetchone()
+        if not row:
+            raise ValueError('shutdown seal requires an existing official checkpoint')
+        proof = json.loads(row[0])
+        if proof['session'] != session or proof['profile_binding'] != binding(pr):
+            raise ValueError('shutdown seal session or profile differs from the checkpoint')
+        _pid_stopped(proof['pid'])
+        native = _call('get', proof['terminal'])
+        if (native.get('foreground') or {}).get('pid') == proof['pid']:
+            raise ValueError('original native is still attached; shutdown metadata cannot be sealed')
+        _assert_session_absent(pr, provider, session)
+        current = _journal(pr, provider, session, root, proof['journal']['path'])
+        snapshot = Path(original_journal)
+        if not snapshot.is_absolute() or snapshot.is_symlink() or not snapshot.is_file():
+            raise ValueError('original prefix requires an absolute preserved journal snapshot')
+        original = proof.get('shutdown_seal', {}).get('original_checkpoint', proof)
+        if file_digest(snapshot) != original['journal']['digest']:
+            raise ValueError('original prefix snapshot does not match the checkpoint digest')
+        if proof.get('shutdown_seal'):
+            if current != proof['journal']:
+                raise ValueError('shutdown checkpoint was already sealed and its journal changed again')
+            return proof
+        prefix = snapshot.read_bytes()
+        journal = Path(current['path'])
+        data = journal.read_bytes()
+        if hashlib.sha256(data).hexdigest() != current['digest']:
+            raise ValueError('shutdown journal changed during prefix verification')
+        if not data.startswith(prefix):
+            raise ValueError('original journal prefix changed during native shutdown')
+        tail = data[len(prefix):]
+        types = _shutdown_rows(prefix, tail, session, root)
+        sealed = {**proof, 'journal': current, 'shutdown_seal': dict(
+            original_checkpoint=proof, original_snapshot=str(snapshot), prefix_bytes=len(prefix),
+            prefix_digest=original['journal']['digest'], tail_bytes=len(tail),
+            tail_digest=hashlib.sha256(tail).hexdigest(), record_types=types,
+            stopped_pid=proof['pid'], sealed_at=time.time(), reason=reason.strip(),
+            config_digest=hashlib.sha256(config_bytes).hexdigest())}
+        with store.transaction():
+            latest = store.db.execute('SELECT body FROM staff_resume_proofs WHERE seat=?', (seat,)).fetchone()
+            if (not latest or json.loads(latest[0]) != proof or _get(store.db, seat)
+                    or any(r.get('session') == session for r in records(store.db))):
+                raise ValueError('shutdown checkpoint or staff owner changed during verification')
+            _pid_stopped(proof['pid'])
+            if (Path(config_path).read_bytes() != config_bytes or file_digest(journal) != current['digest']
+                    or file_digest(snapshot) != original['journal']['digest']):
+                raise ValueError('shutdown metadata or original prefix changed before sealing')
+            store.db.execute('UPDATE staff_resume_proofs SET body=? WHERE seat=?', (json.dumps(sealed), seat))
+        return sealed
+    finally:
+        store.close()
 
 
 def prepare(config_path, state, department, provider, resume=None):
@@ -512,7 +652,7 @@ def executors(state):
 
 def parser(commands):
     item = commands.add_parser('staff')
-    item.add_argument('action', choices=('prepare', 'checkpoint', 'receipt', 'finalize', 'status'))
+    item.add_argument('action', choices=('prepare', 'checkpoint', 'seal-checkpoint', 'receipt', 'finalize', 'status'))
     item.add_argument('--department', required=True)
     item.add_argument('--provider', choices=('codex', 'claude'), required=True)
     item.add_argument('--resume')
@@ -522,9 +662,14 @@ def parser(commands):
     item.add_argument('--pid', type=int)
     item.add_argument('--session')
     item.add_argument('--journal')
+    item.add_argument('--original-journal')
+    item.add_argument('--reason')
 
 
 def handle(args):
+    if args.action == 'seal-checkpoint':
+        return seal_checkpoint(args.config, args.state, args.department, args.provider,
+                               args.session, args.original_journal, args.reason)
     if args.action == 'prepare':
         return prepare(args.config, args.state, args.department, args.provider, args.resume)
     if args.action == 'checkpoint':

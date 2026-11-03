@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import test_workers
-from teamkit import admission, docsstaff, staffbootstrap as staff, workers
+from teamkit import admission, docsstaff, staffbootstrap as staff, workers, operations
 from teamkit.config import binding
 
 
@@ -329,6 +329,117 @@ class StaffBootstrapTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'namespace'):
                 staff.checkpoint(self.config_path, self.state, 'docs', 'claude', 't99', 999, 'fixture-session', str(journal))
         self.assertEqual(self.launched, [])
+
+    def shutdown_fixture(self):
+        pr, proof = self.resume_fixture()
+        prompt = 'Keep the original approved conversation.'
+        prefix = [dict(type='user', uuid='user-1', sessionId=proof['session'], cwd=str(self.root),
+                       message={'content': prompt}),
+                  dict(type='assistant', uuid='leaf-1', sessionId=proof['session'], cwd=str(self.root),
+                       message={'content': []})]
+        data = b''.join((json.dumps(row) + '\n').encode() for row in prefix)
+        journal = Path(proof['journal']['path'])
+        journal.write_bytes(data)
+        proof['journal'] = staff._journal(pr, 'claude', proof['session'], str(self.root), journal)
+        self.store.db.execute('UPDATE staff_resume_proofs SET body=? WHERE seat=?', (json.dumps(proof), proof['seat']))
+        snapshot = self.root / 'original-journal.jsonl'
+        snapshot.write_bytes(data)
+        cost = dict(type='cost-state', sessionId=proof['session'], totalCostUSD=1.5,
+            totalAPIDuration=10, totalAPIDurationWithoutRetries=10, totalToolDuration=1,
+            totalLinesAdded=0, totalLinesRemoved=0, totalDuration=100, startTime=1000,
+            modelUsage={'fixture-model': dict(inputTokens=1, outputTokens=1, thinkingTokens=0,
+                cacheReadInputTokens=0, cacheCreationInputTokens=0, cacheCreationEphemeral5mInputTokens=0,
+                cacheCreationEphemeral1hInputTokens=0, webSearchRequests=0, costUSD=1.5)}, hasUnknownModelCost=False)
+        rows = [cost, dict(type='last-prompt', sessionId=proof['session'], lastPrompt=prompt, leafUuid='leaf-1'),
+                {**cost, 'totalDuration': 101}]
+        journal.write_bytes(data + b''.join((json.dumps(row) + '\n').encode() for row in rows))
+        return pr, proof, snapshot, data, rows
+
+    def seal_action(self, proof, snapshot):
+        return staff.handle(SimpleNamespace(action='seal-checkpoint', config=self.config_path, state=self.state,
+            department='docs', provider='claude', session=proof['session'], original_journal=str(snapshot),
+            reason='Normal native termination appended verified shutdown metadata.'))
+
+    def stopped_inventory(self, *args):
+        return {'terminals': []} if args[0] == 'ls' else {'foreground': None}
+
+    def test_normal_shutdown_metadata_is_sealed_with_original_proof_and_audit(self):
+        pr, proof, snapshot, prefix, rows = self.shutdown_fixture()
+        journal = Path(proof['journal']['path'])
+        before = journal.read_bytes()
+        with patch.object(staff.os, 'kill', side_effect=ProcessLookupError), \
+                patch.object(staff, '_call', side_effect=self.stopped_inventory):
+            with self.assertRaisesRegex(ValueError, 'journal changed'):
+                staff._resume(self.store.db, proof['seat'], proof['session'], pr, 'claude', str(self.root))
+            sealed = self.seal_action(proof, snapshot)
+            self.assertIn('journal', sealed)
+            self.assertEqual(sealed['journal']['digest'], staff.file_digest(journal))
+            self.assertEqual(sealed['shutdown_seal']['original_checkpoint'], proof)
+            self.assertEqual(sealed['shutdown_seal']['prefix_bytes'], len(prefix))
+            self.assertEqual(sealed['shutdown_seal']['tail_bytes'], len(before) - len(prefix))
+            self.assertEqual(self.seal_action(proof, snapshot), sealed)
+            self.assertEqual(staff._resume(self.store.db, proof['seat'], proof['session'], pr, 'claude', str(self.root)), sealed)
+        self.assertEqual(journal.read_bytes(), before)
+        self.assertEqual(staff.records(self.store.db), [])
+        self.assertEqual(self.launched, [])
+
+    def test_shutdown_seal_rejects_new_messages_unknown_metadata_and_unanchored_prompt(self):
+        pr, proof, snapshot, prefix, rows = self.shutdown_fixture()
+        journal = Path(proof['journal']['path'])
+        cases = [
+            [*rows, dict(type='user', sessionId=proof['session'], message={'content': 'new work'})],
+            [rows[0], {**rows[1], 'lastPrompt': 'Invented work'}, rows[2]],
+            [rows[0], {**rows[1], 'leafUuid': 'unknown-leaf'}, rows[2]],
+            [{**rows[0], 'message': 'unknown'}, rows[1], rows[2]],
+            [{**rows[0], 'totalCostUSD': float('nan')}, rows[1], rows[2]],
+            [rows[0], {**rows[1], 'sessionId': 'other-session'}, rows[2]],
+            [rows[0], rows[1], {**rows[2], 'totalAPIDuration': 99}],
+        ]
+        with patch.object(staff.os, 'kill', side_effect=ProcessLookupError), \
+                patch.object(staff, '_call', side_effect=self.stopped_inventory):
+            for changed in cases:
+                with self.subTest(changed_types=[r['type'] for r in changed]):
+                    journal.write_bytes(prefix + b''.join((json.dumps(row) + '\n').encode() for row in changed))
+                    with self.assertRaisesRegex(ValueError, 'shutdown|prompt|metadata|session'):
+                        self.seal_action(proof, snapshot)
+                    current = json.loads(self.store.db.execute('SELECT body FROM staff_resume_proofs WHERE seat=?', (proof['seat'],)).fetchone()[0])
+                    self.assertEqual(current, proof)
+        self.assertEqual(self.launched, [])
+
+    def test_shutdown_seal_rejects_modified_prefix_or_live_original_pid(self):
+        pr, proof, snapshot, prefix, rows = self.shutdown_fixture()
+        journal = Path(proof['journal']['path'])
+        original = journal.read_bytes()
+        with patch.object(staff, '_call', side_effect=self.stopped_inventory):
+            with patch.object(staff.os, 'kill', return_value=None):
+                with self.assertRaisesRegex(ValueError, 'PID still exists'):
+                    self.seal_action(proof, snapshot)
+            journal.write_bytes(original.replace(b'Keep', b'Lose', 1))
+            with patch.object(staff.os, 'kill', side_effect=ProcessLookupError):
+                with self.assertRaisesRegex(ValueError, 'prefix'):
+                    self.seal_action(proof, snapshot)
+        current = json.loads(self.store.db.execute('SELECT body FROM staff_resume_proofs WHERE seat=?', (proof['seat'],)).fetchone()[0])
+        self.assertEqual(current, proof)
+        self.assertEqual(self.launched, [])
+
+    def test_pending_resume_checkpoint_fences_only_cold_factory_and_keeps_existing_codex(self):
+        self.configure(); self.fake_boundaries()
+        ticket = self.ticket(role='documenter', kind='document', product='docs')
+        codex = next(p for p in workers.plans(self.config, self.state, ticket) if p['provider'] == 'codex')
+        codex.update(new=False, terminal='t300', pid=300)
+        self.queue._save_attempt(dict(id='completed-codex', ticket=ticket['id'], executor=codex, phase='completed'))
+        self.queue._save({**ticket, 'state': 'completed', 'attempt': 'completed-codex'}, 'fixture_completed')
+        # A second approved docs request uses its original identity, independently of the completed one.
+        spec = {k: ticket[k] for k in ('product', 'role', 'kind', 'goal', 'completion', 'checks', 'scope', 'profiles', 'resources', 'approval')}
+        spec['id'] = 'T-pending-docs'
+        pending = self.queue.enqueue(spec, 'pending-docs', user_approved=True)
+        staff._schema(self.store.db)
+        self.store.db.execute('INSERT INTO staff_resume_proofs VALUES (?,?)', ('docs/claude', json.dumps({'session': 'original-session'})))
+        self.assertEqual(workers.plans(self.config, self.state, pending), [])
+        with patch('teamkit.session_pool._read', return_value={'slots': {}}):
+            candidates = operations.NativeRuntime(self.config, self.state).executors(pending)
+        self.assertIn(codex, candidates)
+        self.assertNotIn('claude', {p['provider'] for p in candidates})
 
     def test_resume_without_official_proof_never_launches(self):
         self.configure(); self.fake_boundaries()

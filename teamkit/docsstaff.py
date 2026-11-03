@@ -79,6 +79,11 @@ def check(config, db, ticket, executor):
 
 def available(config, db, ticket, provider, reserved_owner=None):
     previous = actors(config, db, ticket, provider)
+    if (not previous and db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='staff_resume_proofs'").fetchone()
+            and db.execute('SELECT 1 FROM staff_resume_proofs WHERE seat=?',
+                           (ticket['product'] + '/' + provider,)).fetchone()):
+        return False
     return not previous or (reserved_owner is not None and
                             all(actor['owner'] == reserved_owner for actor in previous))
 
