@@ -111,7 +111,7 @@ class UsageTests(UsageFixture):
 class NativeHc:
     def __init__(self):
         self.calls=[];self.labels={};self.state='live';self.missing=False
-        self.initial_screen='❯ ';self.screen_complete=True
+        self.initial_screen='❯ ';self.screen_complete=True;self.turn=0;self.extra_labels={}
         self.screen='Session\nUsage: 0 input, 0 output, 0 cache read, 0 cache write\nCurrent session\n0% used\nCurrent week (all models)\n32% used'
         self.ready=True;self.timeout_run=False;self.queried=False;self.foreground_name='claude';self.status_app='claude';self.foreground_missing_once=False;self.gets=0;self.wrap_sends=False;self.received_text=None
     def read_result(self,argv,text):
@@ -128,7 +128,7 @@ class NativeHc:
         elif op=='get':
             self.gets+=1
             if self.missing:return subprocess.CompletedProcess(argv,3,'','not_found')
-            value={'address':'t9','state':self.state,'labels':self.labels,'name':'usage-test',
+            value={'address':'t9','state':self.state,'labels':{**self.labels,**self.extra_labels},'name':'usage-test','turn':self.turn,
                    'foreground':None if self.foreground_missing_once and self.gets==1 else {'pid':99,'name':self.foreground_name},'status':{'app':self.status_app,'state':'idle'} if self.ready else None}
         elif op=='wait':value={'ended':self.ready,'reason':'status' if self.ready else 'timeout','status':'idle' if self.ready else None}
         elif op=='send':
@@ -276,6 +276,56 @@ class NativeUsageTests(UsageFixture):
         self.assertEqual(sum(a[1]=='run' for a in native.calls),1)
         self.assertEqual(sum(a[1]=='keys' for a in native.calls),1)
         self.assertTrue(native.missing)
+
+    def test_hidden_pristine_try_hint_is_empty_only_for_the_owned_probe(self):
+        from teamkit.app_usage import refresh_native_usage
+        native=NativeHc();native.initial_screen='❯\u00a0Try "create a util logging.py that..."\n';ticks=iter(range(100))
+        native.foreground_name='claude.exe';native.status_app='claude-code'
+        with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=native),patch('teamkit.app_usage.time.sleep'),patch('teamkit.app_usage.time.monotonic',side_effect=lambda:next(ticks)):
+            result=refresh_native_usage(self.value,self.state,'personal')
+        self.assertEqual(result['weekly'],32)
+        self.assertEqual(sum(a[1]=='run' for a in native.calls),1)
+        self.assertEqual(sum(a[1]=='keys' for a in native.calls),1)
+        self.assertFalse(any(a[1]=='send' for a in native.calls));self.assertTrue(native.missing)
+        self.assertNotIn('teamkit.owner',native.labels)
+        attempt=json.loads(Path(str(self.state)+'.native-usage-personal.json').read_text())
+        self.assertTrue(attempt['zero_token_usage'])
+
+    def test_initial_hint_rejects_visible_nonpristine_or_multiline_probes(self):
+        from teamkit.app_usage import refresh_native_usage,UsageUnavailable
+        for change in ('space','tab','turn','bool_turn','multiline','history_draft'):
+            with self.subTest(change=change):
+                native=NativeHc();native.initial_screen='❯ Try "create a util"\n';ticks=iter(range(100))
+                if change in ('space','tab'):native.extra_labels={'herdr.'+change:'visible'}
+                if change=='turn':native.turn=1
+                if change=='bool_turn':native.turn=False
+                if change=='multiline':native.initial_screen+='  preserve draft\n'
+                if change=='history_draft':native.initial_screen='old answer\n'+native.initial_screen+'  preserve hidden draft\n'
+                with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=native),patch('teamkit.app_usage.time.sleep'),patch('teamkit.app_usage.time.monotonic',side_effect=lambda:next(ticks)):
+                    with self.assertRaisesRegex(UsageUnavailable,'native_not_ready'):
+                        refresh_native_usage(self.value,self.state,'team')
+                self.assertFalse(any(a[1] in ('send','keys') for a in native.calls))
+                self.assertTrue(native.missing)
+
+    def test_initial_hint_rechecks_process_turn_and_app_attachment_after_read(self):
+        from teamkit.app_usage import refresh_native_usage,UsageUnavailable
+        for change in ('pid','turn','space'):
+            with self.subTest(change=change):
+                native=NativeHc();native.initial_screen='❯ Try "create a util"\n';ticks=iter(range(100))
+                def reading(argv,**opts):
+                    result=native(argv,**opts)
+                    if argv[1]=='get' and native.gets==2:
+                        value=json.loads(result.stdout)
+                        if change=='pid':value['foreground']['pid']=100
+                        if change=='turn':value['turn']=1
+                        if change=='space':value['labels']['herdr.space']='new-attachment'
+                        return subprocess.CompletedProcess(argv,0,json.dumps(value),'')
+                    return result
+                with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=reading),patch('teamkit.app_usage.time.sleep'),patch('teamkit.app_usage.time.monotonic',side_effect=lambda:next(ticks)):
+                    with self.assertRaisesRegex(UsageUnavailable,'native_not_ready'):
+                        refresh_native_usage(self.value,self.state,'team')
+                self.assertFalse(any(a[1] in ('send','keys') for a in native.calls))
+                self.assertTrue(native.missing)
 
     def test_os_process_name_is_distinct_from_reported_claude_program_id(self):
         from teamkit.app_usage import refresh_native_usage

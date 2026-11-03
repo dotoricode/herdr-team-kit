@@ -414,6 +414,8 @@ def refresh_native_usage(config,state,account):
             if not isinstance(address,str) or not re.fullmatch(r't[0-9a-z]+',address):
                 address=None;raise UsageUnavailable('native_outcome_unknown')
             record['terminal']=address;_write(path,record)
+            from .session_pool import _hint_guard
+            hint_slot={'provider':'claude','phase':'preparing'}
             startup_deadline=time.monotonic()+15
             while True:
                 remaining=startup_deadline-time.monotonic()
@@ -436,8 +438,16 @@ def refresh_native_usage(config,state,account):
                 if dialog:raise UsageUnavailable(dialog)
                 if 'Current week (all models)' in baseline:raise UsageUnavailable('native_outcome_unknown')
                 plain=re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]','',baseline)
+                hint=None
+                empty=empty_input(plain)
+                if not empty and screen.get('complete') is True and _hint_guard(hint_slot,native):
+                    prompts=list(re.finditer(r'^[ \t]*[›❯][^\S\r\n]*(.*)$',plain,re.M))
+                    candidate=prompts[-1].group(1).strip() if prompts else None
+                    if (isinstance(candidate,str) and re.fullmatch(r'Try "[^"\r\n]{1,200}"',candidate)
+                            and candidate.isprintable() and empty_input(plain,candidate)):
+                        hint=candidate;empty=True
                 if (status.get('state')=='idle' and status.get('app') in ('claude','claude-code')
-                        and foreground and screen.get('complete') is True and empty_input(plain)):
+                        and foreground and screen.get('complete') is True and empty):
                     break
                 if time.monotonic()>=startup_deadline:raise UsageUnavailable('native_not_ready')
                 time.sleep(0.1)
@@ -445,6 +455,8 @@ def refresh_native_usage(config,state,account):
             if remaining<=0:raise UsageUnavailable('native_not_ready')
             ready=_owned_usage(address,labels,timeout=remaining)
             if (time.monotonic()>=startup_deadline or ready.get('state')!='live' or ready.get('foreground')!=native.get('foreground')
+                    or ready.get('turn')!=native.get('turn')
+                    or hint is not None and not _hint_guard(hint_slot,ready)
                     or (ready.get('status') or {}).get('state')!='idle'
                     or (ready.get('status') or {}).get('app') not in ('claude','claude-code')):
                 raise UsageUnavailable('native_not_ready')
