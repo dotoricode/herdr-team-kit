@@ -28,6 +28,33 @@ def policy(config):
     return validate_policy(config.get('operations', {}).get('resource_policy'))
 
 
+def prove_uncertain_slot(executor):
+    """Read-only proof that an `uncertain` pool slot still runs exactly what was launched.
+
+    The manifest is never changed. Anything short of an exact match keeps the
+    previous start result unknown; the official recovery stays `pool recheck`.
+    """
+    from .core_runtime import _call
+    unknown = ValueError('pool slot uncertain: previous start result unknown; native not proven to be the launched process')
+    try:
+        native = _call('get', executor['terminal'])
+    except Exception as error:
+        raise unknown from error
+    foreground = native.get('foreground') or {}
+    argv, cwd = foreground.get('argv'), foreground.get('cwd') or native.get('cwd')
+    args = executor.get('pool_launch_args')
+    import re
+    flag = ['--resume'] if executor.get('provider') == 'claude' else ['resume']
+    # A restart may append exactly one conversation resume pair to the launch arguments.
+    resumed = (isinstance(args, list) and isinstance(argv, list) and len(argv) == len(args) + 3
+               and argv[1:len(args) + 1] == args and argv[len(args) + 1:len(args) + 2] == flag
+               and re.fullmatch(r'[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}', str(argv[-1])) is not None)
+    if (native.get('state') != 'live' or foreground.get('pid') != executor.get('pid')
+            or not isinstance(args, list) or not isinstance(argv, list) or not (argv[1:] == args or resumed)
+            or not isinstance(cwd, str) or Path(cwd).resolve() != Path(executor['root']).resolve()):
+        raise unknown
+
+
 class NativeRuntime:
     def __init__(self, config, state):
         self.config, self.state = config, Path(state)
@@ -40,9 +67,13 @@ class NativeRuntime:
         result = []
         for slot in _read(self.state)['slots'].values():
             runtime = slot.get('runtime') or {}
-            if slot.get('phase') not in ('prepared', 'leased'):
+            if slot.get('phase') not in ('prepared', 'leased', 'uncertain'):
                 continue
-            result.append(dict(terminal=slot['terminal'], pid=slot['native_pid'], owner=slot['owner'],
+            # Uncertain slots stay candidates only through a read-only launch proof in admit();
+            # prepared/leased executor identity is unchanged.
+            proof = dict(pool_phase='uncertain', pool_launch_args=(slot.get('spec') or {}).get('args')) \
+                if slot['phase'] == 'uncertain' else {}
+            result.append(dict(**proof, terminal=slot['terminal'], pid=slot['native_pid'], owner=slot['owner'],
                                provider=slot['provider'], account=slot['account'], product=slot['team'],
                                roles=['leader', 'investigator', 'implementer', 'reviewer'], root=slot['root'],
                                profile_binding=slot['binding'], task=slot['task'], runtime=runtime,
@@ -82,6 +113,42 @@ class NativeRuntime:
         return sorted(result, key=lambda e: pairs.index((e['provider'], e['account']))
                       if (e['provider'], e['account']) in pairs else len(pairs))
 
+    def roster(self, ticket, executors):
+        """Read-only view of the product team's real terminals (same label source as the sidebar)."""
+        from .core_runtime import _call
+        info = {}
+        for executor in executors:
+            if executor.get('terminal') in info or executor.get('new') is True:
+                continue
+            try:
+                native = _call('get', executor['terminal'])
+                labels = native.get('labels') or {}
+                info[executor['terminal']] = dict(state=native.get('state'), label=labels.get('ui.display-name'),
+                                                  space=labels.get('herdr.space'),
+                                                  background=labels.get('operations.presentation') == 'background')
+            except Exception:
+                info[executor['terminal']] = dict(state='missing', label=None, space=None)
+        unregistered = []
+        space = self.config.get('operations', {}).get('spaces', {}).get(ticket['product'])
+        if space:
+            try:
+                listing = _call('ls').get('terminals', [])
+            except Exception:
+                listing = []
+            known = {e.get('terminal') for e in executors}
+            for entry in listing:
+                address = entry.get('address')
+                if (entry.get('state') != 'live' or entry.get('agent') not in ('codex', 'claude-code')
+                        or address in known or str(entry.get('name') or '').startswith('tk-')):
+                    continue
+                try:
+                    labels = _call('get', address).get('labels') or {}
+                except Exception:
+                    continue
+                if labels.get('herdr.space') == space:
+                    unregistered.append(dict(terminal=address, label=labels.get('ui.display-name')))
+        return dict(info=info, unregistered=unregistered)
+
     def native(self, executor, require_idle=True):
         from .core_runtime import CoreRuntime
         task = dict(id=executor['task'], owner=executor['owner'], provider=executor['provider'],
@@ -117,6 +184,8 @@ class NativeRuntime:
             return executor
         if executor['product'] not in (ticket['product'], '*') or ticket['role'] not in executor['roles']:
             raise ValueError('executor responsibility or role mismatch')
+        if executor.get('pool_phase') == 'uncertain':
+            prove_uncertain_slot(executor)
         from .core_runtime import _model_effort
         from .workers import _policy_task
         from .departments import execution_config

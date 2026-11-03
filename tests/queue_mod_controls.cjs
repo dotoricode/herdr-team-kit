@@ -147,6 +147,23 @@ function id(x,key){return nodes(x).find(x=>x.value.props.id?.[0]===key)}
   assert(sendCall[sendCall.indexOf('--reason')+1].length<=300);
   assert(text(force.render(cx)).includes('대상 화면에 입력 중인 내용이 있어 전송하지 않았습니다'),'delivery-time draft guard is explained, not hidden');
   assert.equal(force.pendingExecution,null);
+  // Team roster: own team by default, other teams behind a toggle, terminal address shown, no doubled account label.
+  const roster=view('detail');
+  calls=[];reply=async()=>({code:0,stdout:JSON.stringify({send_allowed:true,expected_ticket:'ticket-roster',candidates:[
+    {id:'own',alias:'박과장 (팀)',terminal:'t7v',account:'team',role:'leader',eligible:true,other_team:false,hidden_by_default:false},
+    {id:'busy',alias:'이사원 (개인)',terminal:'t7t',account:'personal',role:'leader',eligible:false,reason_ko:'직원이 작업 중이거나 준비되지 않았습니다',override_allowed:true,other_team:false},
+    {id:'foreign',alias:'정과장 (팀)',terminal:'t9z',account:'team',role:'leader',eligible:false,reason_ko:'담당 제품·역할이 이 업무와 맞지 않습니다',override_allowed:true,other_team:true,hidden_by_default:true},
+    {id:'temp',alias:'우누리 (팀)',terminal:'t106',account:'team',role:'leader',eligible:false,reason_ko:'화면에 입력 중인 내용이나 확인 창이 있습니다',override_allowed:true,other_team:false,hidden_by_default:true}]})});
+  await roster.loadCandidates(cx);
+  let rtree=roster.render(cx);
+  assert(id(rtree,'queue-send-own')&&id(rtree,'queue-force-busy'),'own-team staff are listed with send and force actions');
+  assert(!id(rtree,'queue-force-foreign')&&!id(rtree,'queue-force-temp'),'other-team and temporary staff are hidden by default');
+  assert(text(rtree).includes('다른 팀·임시 직원 보기 (2)'),'toggle shows how many other-team or temporary staff are hidden');
+  assert(text(rtree).includes('t7v'),'terminal address is shown');
+  assert(!text(rtree).includes('(팀) (팀)')&&!text(rtree).includes('(개인) (개인)'),'account label is not doubled');
+  id(rtree,'queue-other-team-toggle').value.handlers.click({},cx);
+  rtree=roster.render(cx);
+  assert(id(rtree,'queue-force-foreign')&&id(rtree,'queue-force-temp'),'hidden staff can be force-sent after the toggle');
   const plainOnly=view('detail');plainOnly.candidates={send_allowed:false,expected_ticket:'t',candidates:[{id:'x',eligible:false,override_allowed:false}]};
   plainOnly.forceCandidate=plainOnly.candidates.candidates[0];calls=[];
   await plainOnly.executeAction(cx,'send',plainOnly.candidates.candidates[0],true);assert.equal(calls.length,0,'non-overridable candidate is never forced');

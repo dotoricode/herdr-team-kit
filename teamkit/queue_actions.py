@@ -104,6 +104,8 @@ REASON_KO = (
     ('approval missing or changed', '승인 기록이 없거나 바뀌었습니다'),
     ('ticket already assigned', '이미 배정·완료되었거나 대기 상태가 아니라 다시 보낼 수 없습니다'),
     ('new work is disabled', '현재 운영 정책에서 새 업무 전송이 꺼져 있습니다'),
+    ('previous start result unknown', '이전 시작 결과 불명 — 직원 터미널이 시작할 때 만든 프로세스와 같은지 확인되지 않았습니다'),
+    ('unregistered terminal in team space', '팀 스페이스에 있지만 직원으로 등록되지 않은 터미널이라 업무를 보낼 수 없습니다 (등록 필요)'),
     ('no eligible registered executor', '배정 가능한 등록 직원이 없습니다'),
 )
 _OVERRIDE_REASON_MAX = 300
@@ -139,7 +141,16 @@ def candidates(config_path, state, ident, runtime=None):
             executors = runtime.executors(ticket)
         except Exception as error:
             return dict(ticket=ident, expected_ticket=digest(ticket), candidates=[], send_allowed=False, reason=str(error))
+        roster = getattr(runtime, 'roster', None)
+        view = roster(ticket, executors) if roster else dict(info={}, unregistered=[])
+        info, excluded = view.get('info', {}), []
         for executor in executors:
+            seen = info.get(executor.get('terminal'), {})
+            if executor.get('new') is not True and seen.get('state') not in (None, 'live'):
+                # A finished or removed terminal is not staff; keep why it was left out.
+                excluded.append(dict(terminal=executor['terminal'], label=seen.get('label'), state=seen['state'],
+                                     reason_ko='터미널이 종료되었거나 사라져 후보에서 제외했습니다'))
+                continue
             problem = None
             try:
                 runtime.admit(ticket, executor)
@@ -162,16 +173,30 @@ def candidates(config_path, state, ident, runtime=None):
             except Exception as error:
                 problem = str(error)
             from .staff import display_name
-            rows.append(dict(id=executor_identity(executor),
-                alias=display_name(executor['provider'], executor['account'], product=ticket['product'],
+            generated = display_name(executor['provider'], executor['account'], product=ticket['product'],
                     role=ticket['role'], owner=None if executor.get('new') else executor.get('owner'),
-                    aliases=config.get('operations', {}).get('staff_aliases')),
+                    aliases=config.get('operations', {}).get('staff_aliases'))
+            rows.append(dict(id=executor_identity(executor),
+                # Same source as the sidebar: the terminal's own display label, then the generated alias.
+                alias=seen.get('label') or generated, name_source='label' if seen.get('label') else 'generated',
+                terminal=executor.get('terminal'),
+                other_team=executor.get('new') is not True and executor.get('product') not in (ticket['product'], '*'),
+                # Background temporary workers are not part of the visible team roster.
+                hidden_by_default=(executor.get('new') is not True and executor.get('product') not in (ticket['product'], '*'))
+                    or seen.get('background') is True,
                 account=executor['account'], provider=executor['provider'], role=ticket['role'],
                 eligible=problem is None, reason=problem or '', reason_ko=reason_ko(problem),
                 # Manual priority never creates a worker beyond capacity; only an existing terminal can be forced.
                 override_allowed=problem is not None and executor.get('new') is not True,
                 planned=executor.get('new') is True))
-        return dict(ticket=ident, expected_ticket=digest(ticket), candidates=rows,
+        for item in view.get('unregistered', []):
+            rows.append(dict(id=digest(dict(unregistered=item['terminal'], ticket=ident)),
+                alias=item.get('label') or '이름 미확인', name_source='label' if item.get('label') else 'generated',
+                terminal=item['terminal'], other_team=False, hidden_by_default=False, account=None, provider=None, role=ticket['role'],
+                eligible=False, reason='unregistered terminal in team space',
+                reason_ko=reason_ko('unregistered terminal in team space'), override_allowed=False,
+                planned=False, unregistered=True))
+        return dict(ticket=ident, expected_ticket=digest(ticket), candidates=rows, excluded=excluded,
                     send_allowed=any(row['eligible'] for row in rows),
                     reason='' if any(row['eligible'] for row in rows) else 'no eligible registered executor or approved worker plan')
     finally:

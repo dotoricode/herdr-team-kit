@@ -66,7 +66,7 @@ export default class TeamQueue extends View {
     this.data = null; this.failure = null; this.inFlight = false;
     this.actionFlight = false; this.actionFailure = null; this.pendingAction = null;
     this.executionFlight=false; this.executionFailure=null; this.executionResult=null; this.pendingExecution=null;
-    this.candidates=null; this.candidateFlight=false; this.candidateFailure=null; this.forceCandidate=null;
+    this.candidates=null; this.showOtherTeam=false; this.candidateFlight=false; this.candidateFailure=null; this.forceCandidate=null;
     this.filter = "active"; this.selected = this.options.item ?? null;
     this.revealed = this.role !== "detail";
     this.entering = new Set(); this.leaving = new Map(); this.minute = 0; this.again = false;
@@ -346,6 +346,10 @@ export default class TeamQueue extends View {
       const nativeLabel = typeof nativeState === "string" ? ({working:"응답 중",done:"새 응답 있음",idle:"대기",blocked:"입력 필요"}[nativeState] ?? nativeState) : "앱 상태 미확인";
       const linkedSession=item.current_terminal ? `${account(item.account)} ${provider(item.provider)} · ${nativeLabel}` : "현재 실행자 미배정";
       const pair=(label,value) => v_flex().min_w(0).gap(4).child(div().text_size(11).text_color(t.muted).child(label)).child(words(value).line_height("20px"));
+      const allCandidates=this.candidates?.candidates??[];
+      const hides=x=>(x.hidden_by_default??x.other_team)===true;
+      const otherTeam=allCandidates.filter(hides);
+      const visibleCandidates=allCandidates.filter(x=>!hides(x)||this.showOtherTeam);
       const section=(label,body) => v_flex().flex_none().min_w(0).gap(8).child(div().text_size(12).font_semibold().text_color(t.muted).child(label)).child(body);
       return shell
         .child(v_flex().flex_none().p(18).gap(10).border_b(1).border_color(t.border)
@@ -378,11 +382,14 @@ export default class TeamQueue extends View {
             .when(Boolean(this.candidates),el=>el
               .when(this.candidates?.send_allowed!==true,x=>x.child(words(this.candidates?.reason||"현재 전송 불가 · 승인·수신 상태 확인 필요").text_color(t.blocked)))
               .when(!this.candidates?.candidates.length,x=>x.child(words("선택 가능한 담당자가 없습니다")))
-              .children((this.candidates?.candidates??[]).map(candidate=>v_flex().gap(4)
-                .child(words((candidate.alias||"별명 미확인")+" ("+({personal:"개인",team:"팀"}[candidate.account]||"계정 미확인")+") · "+(candidate.role||"역할 미확인")))
+              .when(otherTeam.length>0,x=>x.child(button("queue-other-team-toggle",(this.showOtherTeam?"다른 팀·임시 직원 숨기기 (":"다른 팀·임시 직원 보기 (")+otherTeam.length+")",()=>{this.showOtherTeam=!this.showOtherTeam;},t)))
+              .children(visibleCandidates.map(candidate=>v_flex().gap(4)
+                .child(words((/\)\s*$/.test(candidate.alias||"")?candidate.alias:(candidate.alias||"별명 미확인")+" ("+({personal:"개인",team:"팀"}[candidate.account]||"계정 미확인")+")")+(candidate.terminal?" · "+candidate.terminal:"")+" · "+(candidate.role||"역할 미확인")))
                 .when(candidate.eligible!==true,x=>x.child(words("배정 불가 · "+(candidate.reason_ko||candidate.reason||"현재 배정 불가")).text_color(t.blocked)))
                 .when(candidate.eligible!==true&&Boolean(candidate.reason)&&Boolean(candidate.reason_ko)&&candidate.reason!==candidate.reason_ko,x=>x.child(words(candidate.reason).text_size(11).text_color(t.muted)))
                 .when(this.candidates?.send_allowed===true&&candidate.eligible===true&&!this.pendingExecution,x=>x.child(button("queue-send-"+candidate.id,"이 담당자에게 전송",cx=>cx.spawn(async cx=>this.executeAction(cx,"send",candidate)),t)))
+                .when(candidate.eligible===true,x=>x.child(words("배정 가능").text_size(11).text_color(t.muted)))
+                .when(candidate.eligible!==true&&candidate.override_allowed!==true&&candidate.unregistered===true,x=>x.child(words("직원으로 등록되지 않아 강제 전송도 할 수 없습니다").text_size(11).text_color(t.muted)))
                 .when(candidate.eligible!==true&&candidate.override_allowed!==true&&candidate.planned===true,x=>x.child(words("새로 만들 직원이라 강제 전송할 수 없습니다").text_size(11).text_color(t.muted)))
                 .when(candidate.override_allowed===true&&!this.pendingExecution&&this.forceCandidate?.id!==candidate.id,x=>x.child(button("queue-force-"+candidate.id,"그래도 전송",()=>{this.forceCandidate=candidate;this.executionFailure=null;this.executionResult=null;},t)))
                 .when(candidate.override_allowed===true&&!this.pendingExecution&&this.forceCandidate?.id===candidate.id,x=>x.child(v_flex().gap(6).p(10).border_1().border_color(t.blocked)

@@ -112,6 +112,8 @@ Receipt waiters record SIGINT/SIGTERM cancellation before exiting. SIGKILL or ho
 
 우회하지 않는 것: 업무 승인·고정 승인 기록, `pending`이 아닌 업무의 재전송 금지, 이전 선택이 queued·running·uncertain일 때의 재선택 금지, UI 업무, 새로 만들 직원(계획 항목)의 용량 우회, 다른 attempt와의 터미널 세션·쓰기 자원 충돌, 전송 시점의 소유자·프로세스 확인과 입력 초안·확인 창 검사. 마지막 둘은 전송 직전에 다시 읽어 입력 중인 내용이 있으면 전송하지 않고 blocked로 보고합니다.
 
+전송 후보는 업무 제품의 팀 스페이스 직원을 기본으로 하고 이름은 사이드바와 같은 터미널 `ui.display-name` 라벨을 씁니다. 다른 팀·임시(background) 직원은 `other_team`/`hidden_by_default`로 표시해 "다른 팀·임시 직원 보기"에서만 보이고, 종료된 터미널은 `excluded`에 사유와 함께 기록합니다. 팀 스페이스에 있어도 직원으로 등록되지 않은 터미널은 전송할 수 없는 후보로만 표시합니다. 세션 풀의 `uncertain` slot은 읽기 전용 증명(같은 터미널·PID·작업 폴더·시작 인자, 재기동 시 붙는 `resume <세션>` 한 쌍만 허용)이 모두 맞을 때만 후보 판정을 이어가며, 하나라도 다르면 "이전 시작 결과 불명"으로 배정 불가+강제 전송 가능입니다. 판정은 slot 파일을 바꾸지 않으며 공식 복구는 `pool recheck`입니다.
+
 우회 전송은 supervisor가 새 소스를 읽어야 실제 반영됩니다. 위 `팀장 작업 큐`의 fingerprint 규칙에 따라 active jobs와 전달 불명을 확인한 뒤 supervisor만 안전하게 재기동합니다.
 
 ## 운영 현황과 계정 사용률
