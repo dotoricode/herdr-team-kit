@@ -577,19 +577,22 @@ class PoolControlTests(Fixture):
         self.prepare()
         message = self.root / 'pin-request.txt'
         message.write_text('Inspect the approved SDK scope only.')
-        with patch.object(context, 'ensure'), patch.object(context, 'refresh_candidates'):
+        with patch.object(context, 'ensure'), patch.object(context, 'refresh_candidates'), \
+             patch.object(context, '_call', return_value={'terminals': []}), \
+             patch.object(control, 'official', return_value={'state': 'unconfirmed'}) as official:
             request = self.call('pool', 'assign', '--team', 'alpha', '--message-file', str(message),
                                 '--provider', 'claude', '--account', 'team')
             control.advance(self.config, self.state, request['id'])
+        official.assert_called_once()
+        self.assertIn('dispatch', official.call_args.args)
         self.assertEqual(request['execution_constraint'], {'provider': 'claude', 'account': 'team'})
         self.assertEqual(self.call('show', 'L1')['execution_constraint'], request['execution_constraint'])
         planned = self.call('pool', 'plan', '--team', 'alpha')
         self.assertEqual((planned['action'], planned['selection']['provider'], planned['selection']['account']),
                          ('dispatch', 'codex', 'team'))
         self.assertEqual(self.call('plan', 'L1')['account'], 'team')
-        # The request is no longer parked waiting for the designated account; delivery itself
-        # is not mocked here, so only the absence of that wait is asserted.
-        self.assertNotEqual(control.requests(self.state)[0]['phase'], 'pending')
+        # An unconfirmed mocked dispatch is uncertain, never successful delivery.
+        self.assertEqual(control.requests(self.state)[0]['phase'], 'uncertain')
 
     def test_requested_provider_account_survives_official_handoff_and_dispatch(self):
         previous = self.dispatched('claude')
