@@ -1,11 +1,11 @@
 import unittest
-from test_operations import OperationsTest as Fixture
+import test_operations as fixtures
 from teamkit.operations import tick, reconcile
 from teamkit.tickets import TicketStore
 
 class RecoveryTest(unittest.TestCase):
-    setUp = Fixture.setUp
-    enqueue = Fixture.enqueue
+    setUp = fixtures.OperationsTest.setUp
+    enqueue = fixtures.OperationsTest.enqueue
     def test_blocked_submission_requests_help_instead_of_defect_child(self):
         self.enqueue('BLOCKED')
         old_submit=TicketStore.submit
@@ -39,3 +39,16 @@ class RecoveryTest(unittest.TestCase):
         q.recover_intervention('STOPPED',attempt,self.runtime.native({}),True,'operator confirms stop')
         self.assertEqual('pending',q.get('STOPPED')['state'])
         self.assertEqual('abandoned',q.attempt(attempt)['phase'])
+
+    def test_parent_recovery_question_clears_after_children_complete(self):
+        self.enqueue('PARENT')
+        tick(self.config,self.state,self.runtime)
+        q=TicketStore(self.state);self.addCleanup(q.close)
+        item=q.get('PARENT')
+        q.request_intervention('PARENT',item['attempt'],'child_blocked','child needs recovery')
+        with q.transaction():
+            item=q.get('PARENT');item['state']='waiting_children';q._save(item,'fixture_wait')
+        q.resume_parents()
+        self.assertEqual('pending',q.get('PARENT')['state'])
+        self.assertNotIn('intervention',q.get('PARENT'))
+        self.assertEqual('',q.get('PARENT')['reason'])

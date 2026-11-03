@@ -775,7 +775,8 @@ class TicketStore:
         with self.transaction():
             for item in self.list():
                 if item['state'] == 'waiting_children' and not self.incomplete_children(item['id']):
-                    item.update(state='pending', attempt=None, next_action='resume with child results')
+                    item.pop('intervention', None)
+                    item.update(state='pending', attempt=None, reason='', next_action='resume with child results')
                     self._save(item, 'children_completed')
                     changed = True
         if changed:
