@@ -41,6 +41,7 @@ def writes_overlap(first, second):
 class Store:
     def __init__(self, path, timeout=10, *, read_only=False):
         self.path = Path(path).expanduser()
+        self.read_only = read_only
         if read_only:
             self.db = sqlite3.connect(self.path.resolve().as_uri() + '?mode=ro', uri=True,
                                       timeout=timeout, isolation_level=None)
@@ -301,6 +302,9 @@ class Store:
                 self.db.execute('SELECT seq,event,at,body FROM events WHERE task=? ORDER BY seq', (task,))]
 
     def quota(self, profile, value=None):
+        if self.read_only and value is None and not self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='quotas'").fetchone():
+            return None
         if value is not None:
             self.db.execute('INSERT OR REPLACE INTO quotas VALUES (?,?)', (profile, json.dumps(value)))
             if not self.db.in_transaction:
