@@ -144,12 +144,14 @@ class CoreRuntime:
             raise RuntimeError('Core agent is not idle and ready; inspect before sending')
         return native
 
-    def launch(self, task, spec, name, on_created=None):
+    def launch(self, task, spec, name, on_created=None, *, keep=True):
+        if type(keep) is not bool:
+            raise RuntimeError('Core launch keep must be an explicit boolean')
         require_managed()
         owner = spec['env'].get('TEAMKIT_OWNER')
         if not owner or spec['kind'] not in ('codex', 'claude'):
             raise RuntimeError('Core launch requires an explicit task owner and provider')
-        args = ['run', '--json', '--bg', '--keep', '--outlive-parent', '--no-notify',
+        args = ['run', '--json', '--bg', *(['--keep'] if keep else []), '--outlive-parent', '--no-notify',
                 '--name', name, '--cwd', task['root'],
                 '--label', 'teamkit.owner='+owner, '--label', 'teamkit.task='+task['id'],
                 '--label', 'teamkit.name='+name]

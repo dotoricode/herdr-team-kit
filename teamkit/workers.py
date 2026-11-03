@@ -304,7 +304,7 @@ def launch(config_path, state, ticket, attempt):
         spec['env'].update(TEAMKIT_TASK=executor['task'], TEAMKIT_OWNER=executor['owner'],
                            TEAMKIT_CONFIG=str(Path(config_path).resolve()), TEAMKIT_STATE=str(Path(state).resolve()))
         actor = store.get(executor['task'])
-        CoreRuntime().launch({**actor, 'root': executor['root']}, spec, actor['runtime']['name'], created)
+        CoreRuntime().launch({**actor, 'root': executor['root']}, spec, actor['runtime']['name'], created, keep=False)
         fresh = _attempt(store, attempt['id'])
         executor = fresh['executor']
         actor = store.get(executor['task'])

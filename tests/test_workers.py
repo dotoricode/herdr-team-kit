@@ -82,7 +82,8 @@ class WorkerTests(unittest.TestCase):
                            'teamkit.name': 'tk-' + executor['owner'][:20]},
                 'status': {'app': 'claude-code', 'state': 'idle'}}
 
-    def fake_launch(self, task, spec, name, on_created):
+    def fake_launch(self, task, spec, name, on_created, *, keep=True):
+        self.assertIs(keep,False)
         on_created({'backend': 'core', 'name': name, 'terminal': 't100', 'pane': 't100',
                     'session_cwd': task['root'], 'managed_workspace': False, 'ephemeral': True})
         row = self.queue.attempt(self.attempt['id'])
@@ -184,6 +185,7 @@ class WorkerTests(unittest.TestCase):
              patch.object(workers.CoreRuntime, 'accept') as accept:
             ready = workers.launch(self.config_path, self.state, ticket, self.attempt)
         launch.assert_called_once()
+        self.assertIs(launch.call_args.kwargs.get('keep'), False)
         accept.assert_not_called()
         self.assertEqual(ready['pid'], 123)
         self.assertEqual(ready['empty_prompt'], 'Try "write a test"')

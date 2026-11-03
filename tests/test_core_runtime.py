@@ -69,6 +69,18 @@ class CoreTests(unittest.TestCase):
         self.assertIn('teamkit.owner=owner',argv)
         self.assertEqual(argv[-2:],['codex','--no-daemon'])
         self.assertFalse(any(a[:2]==['hc','send'] for a,_ in self.hc.calls))
+    def test_background_launch_preserves_identity_readiness_without_kept_presentation(self):
+        recorded=[]
+        result=CoreRuntime().launch(self.task,self.spec,'tk-owner',recorded.append,keep=False)
+        argv=next(a for a,_ in self.hc.calls if a[:2]==['hc','run'])
+        self.assertNotIn('--keep',argv)
+        self.assertIn('--bg',argv)
+        self.assertIn('--outlive-parent',argv)
+        self.assertIn('teamkit.owner=owner',argv)
+        self.assertEqual(88,result['native_pid'])
+        self.assertEqual('t8',recorded[0]['terminal'])
+        self.assertFalse(any(a[:2]==['hc','send'] for a,_ in self.hc.calls))
+
     def launched_env(self,env):
         spec={'kind':'codex','env':{'TEAMKIT_OWNER':'owner',**env},'args':['--model','m']}
         CoreRuntime().launch(self.task,spec,'tk-owner')

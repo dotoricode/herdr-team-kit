@@ -81,6 +81,43 @@ class OperationsTest(unittest.TestCase):
         finally:
             queue.close()
 
+    def test_temporary_launch_keeps_routing_metadata_without_app_pane_optin(self):
+        from teamkit.operations import NativeRuntime
+        from unittest.mock import patch
+        config=json.loads(self.config.read_text())
+        config['operations']['spaces']={'example':'space-example'}
+        runtime=NativeRuntime(config,self.state)
+        executor=dict(self.runtime.executor,operation_actor=True)
+        calls=[]
+        with patch('teamkit.workers.launch',return_value=executor), \
+             patch('teamkit.core_runtime._call',side_effect=lambda *args,**kw:calls.append(args) or {}), \
+             patch.object(runtime,'admit',return_value=executor), \
+             patch.object(runtime,'native',return_value={'turn':0}), \
+             patch('teamkit.operations.time.sleep'):
+            runtime.launch(self.config,{'id':'ONE','role':'investigator','product':'example'}, {'id':'attempt-one'})
+        labels=calls[0][2:]
+        self.assertIn('operations.product=example',labels)
+        self.assertIn('operations.space=space-example',labels)
+        self.assertIn('operations.presentation=background',labels)
+        self.assertFalse(any(label.startswith(('herdr.space=','herdr.tab=')) for label in labels))
+
+    def test_completed_operation_actor_precedes_fresh_plan_with_same_profile(self):
+        from teamkit.operations import NativeRuntime
+        from unittest.mock import patch
+        self.runtime.executor['operation_actor']=True
+        self.enqueue('ONE')
+        tick(self.config,self.state,self.runtime)
+        tick(self.config,self.state,self.runtime)
+        ticket=self.enqueue('TWO')
+        runtime=NativeRuntime(json.loads(self.config.read_text()),self.state)
+        planned=dict(self.runtime.executor,owner='new-owner',terminal=None,pid=None,new=True)
+        with patch('teamkit.session_pool._read',return_value={'slots':{}}), \
+             patch('teamkit.workers.plans',return_value=[planned]), \
+             patch('teamkit.workers._policy_task',return_value=None), \
+             patch('teamkit.routing.execution_candidates',return_value=[{'provider':'codex','account':'personal'}]):
+            candidates=runtime.executors(ticket)
+        self.assertEqual([self.runtime.executor['owner'],'new-owner'],[item['owner'] for item in candidates])
+
     def test_result_submission_completion_and_next_ticket(self):
         self.enqueue('ONE')
         self.enqueue('TWO', ['ONE'])
