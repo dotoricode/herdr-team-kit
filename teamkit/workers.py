@@ -134,15 +134,17 @@ def plans(config, state, ticket, *, reserved_owner=None):
         if task is None:
             return []
         root, actor_root = _roots(config, ticket, queue)
-        role = execution_policy(config, task)
-        if role['action'] != 'dispatch':
-            return []
-        candidate_config = config
-        if staff:
-            candidate_config = docsstaff.routing_config(config, role)
-        candidates = execution_candidates(candidate_config, task, role, time.time())
-        if candidates is None:
-            candidates = [{**role, 'account': account} for account in account_order(config, time.time())]
+        from .allocation import usage_only, profile_candidates
+        if usage_only(config) and not staff:
+            candidates = profile_candidates(config)
+        else:
+            role = execution_policy(config, task)
+            if role['action'] != 'dispatch':
+                return []
+            candidate_config = docsstaff.routing_config(config, role) if staff else config
+            candidates = execution_candidates(candidate_config, task, role, time.time())
+            if candidates is None:
+                candidates = [{**role, 'account': account} for account in account_order(config, time.time())]
         from .__main__ import instructions_basis, git
         basis_kind = 'git' if ticket.get('workflow_ref') else 'instructions'
         base = git(actor_root, 'rev-parse', 'HEAD') if basis_kind == 'git' else instructions_basis(config['teams'][ticket['product']])
