@@ -235,7 +235,8 @@ def _advance(config_path,state,ident):
                        key=lambda j:(-j.get('priority',0),j.get('sequence',0),j.get('at',0),j['id']))
         if job['phase']=='pending':
             reason='앞선 요청의 업무 완료·보류 인계를 기다립니다.' if active else queue_policy.admission(config,state,job,all_jobs)
-            if not reason:
+            from .allocation import usage_only
+            if not reason and not usage_only(config):
                 eligible=next((j for j in waiting if queue_policy.admission(config,state,j,all_jobs) is None),None)
                 if eligible and eligible['id']!=ident:reason='먼저 실행 가능한 우선 요청을 기다립니다.'
             if reason:

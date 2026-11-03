@@ -286,7 +286,8 @@ def plan(config, state, team):
     if config.get('operations',{}).get('allocation_policy') != 'usage':return None
     store=Store(state,read_only=True)
     try:
-        for actor in executors(state):
+        ordered = sorted(executors(state), key=lambda actor: (actor['account'] != 'team', actor['provider'] != 'claude'))
+        for actor in ordered:
             if actor['product']!=team:continue
             task=store.get(actor['task'])
             if task['state']!='ready' or task.get('owner')!=actor['owner']:continue

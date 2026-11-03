@@ -265,3 +265,51 @@ class WorkspaceTests(Fixture):
         store=ws.Store(self.state);task=store.get(actor['task']);store.close()
         with patch.object(ws,'eligible',new=actual_eligible):
             with self.assertRaisesRegex(ValueError,'quota'):pool_control.idle_native(task,self.c,self.state)
+
+    def test_legacy_pool_prefers_company_workspace_even_when_personal_registered_first(self):
+        import time
+        from teamkit import context_handoff as context
+        from teamkit.policy import eligible
+        from teamkit.config import binding, profile
+        self.value['operations']={'allocation_policy':'usage'}
+        self.config.write_text(json.dumps(self.value));self.c=load(self.config)
+        self.call('create','L1','--team','alpha','--role','leader','--root',str(self.repo),'--goal-file',str(self.root/'goal.txt'))
+        natives={'t1':copy.deepcopy(self.native)}
+        natives['t2']=copy.deepcopy(self.native);natives['t2']['address']='t2';natives['t2']['foreground']['pid']=124
+        def call(*args,**kwargs):
+            if args[0]=='ls':return {'terminals':[{'address':key} for key in natives]}
+            if args[0]=='read':return {'complete':True,'text':'› '}
+            native=natives[args[1]]
+            if args[0]=='get':return copy.deepcopy(native)
+            if args[0]=='label':
+                for value in args[2:]:
+                    k,v=value.split('=',1);native['labels'][k]=v
+                return {}
+            raise AssertionError(args)
+        store=ws.Store(self.state)
+        try:
+            for account in ('team','personal'):
+                store.quota('codex/'+account,dict(source='codex-native-quota',observed_at=time.time(),
+                    binding=binding(profile(self.c,'codex',account)),five_hour={'used':10,'resets_at':time.time()+300},weekly={'used':10,'resets_at':time.time()+300}))
+        finally:store.close()
+        with patch.object(ws,'_call',side_effect=call),patch('teamkit.core_runtime._call',side_effect=call), \
+             patch.object(ws,'_process_environment',side_effect=lambda pid:{'account':'personal' if pid==123 else 'team'}), \
+             patch.object(ws,'_namespace_matches',side_effect=lambda p,pr,e:pr['home']==self.c['profiles'][p][e['account']]['home']), \
+             patch.object(ws,'eligible',side_effect=eligible),patch.object(ws.CoreRuntime,'accept',return_value={'accepted':True}):
+            for terminal in ('t1','t2'):
+                ws.register(self.config,self.state,'alpha',terminal,True)
+                q=TicketStore(self.state);record=next(r for r in ws.rows(q.db) if r['terminal']==terminal);q.close()
+                natives[terminal]['turn']=5
+                with patch.dict(os.environ,{'HC_TERMINAL_ID':terminal}):ws.receipt(self.config,self.state,terminal,record['actor']['owner'],record['nonce'])
+            company=next(a for a in ws.executors(self.state) if a['account']=='team')
+            message=self.root/'pull-order.txt';message.write_text('Read fixture only.')
+            with patch.object(pool_control,'notify'):job=pool_control.enqueue(self.config,self.state,'alpha',message)
+            sent=[]
+            def official(config,state,*args):
+                sent.append(args[1]);store=ws.Store(state)
+                try:return store.get(args[1])
+                finally:store.close()
+            with patch.object(context,'capacity_available',return_value=True),patch.object(pool_control,'refresh_choice'),patch.object(pool_control,'official',side_effect=official):
+                pool_control.advance(self.config,self.state,job['id'])
+            self.assertEqual([company['task']],sent)
+            self.assertEqual('received',pool_control.requests(self.state)[0]['phase'])

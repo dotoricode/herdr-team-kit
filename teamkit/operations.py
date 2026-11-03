@@ -728,6 +728,8 @@ def tick(config_path, state, runtime=None, *, selection=None, team=None, ticket_
                 intake['classification'] = {'reason':str(error)}
         from .admission import configure
         configure(queue.db, policy(config))
+        from .queue_actions import reject_unstarted_selections
+        reject_unstarted_selections(queue, config, team=team, ticket=ticket_id)
         if automatic:
             reconcile(queue, runtime, config)
             queue.resume_parents()

@@ -747,3 +747,24 @@ class PoolControlTests(Fixture):
             self.call('pool','bootstrap','--team','alpha')
         self.assertEqual(attach.call_args.args[2],{'kind':'task','id':'L1','terminal':'told'})
         self.assertEqual(attach.call_args.args[3],'tnew')
+
+    def test_usage_mode_explicit_later_request_is_not_blocked_by_pending_head(self):
+        self.dispatched()
+        self.value['operations']={'allocation_policy':'usage'}
+        self.config.write_text(json.dumps(self.value))
+        message=self.root/'pull-later.txt';message.write_text('Read approved fixture only.')
+        with patch.object(control,'notify'):
+            first=control.enqueue(self.config,self.state,'alpha',message)
+            message.write_text('Read another approved fixture only.')
+            later=control.enqueue(self.config,self.state,'alpha',message)
+        def official(config,state,*args):
+            self.assertEqual('tell',args[0])
+            store=Store(state)
+            try:return store.get(args[1])
+            finally:store.close()
+        with patch.object(context,'capacity_available',return_value=True),patch.object(control,'refresh_choice'),patch.object(control,'official',side_effect=official) as sent:
+            control.advance(self.config,self.state,later['id'])
+        by_id={job['id']:job for job in control.requests(self.state)}
+        self.assertEqual('pending',by_id[first['id']]['phase'])
+        self.assertEqual('received',by_id[later['id']]['phase'])
+        self.assertEqual(1,sent.call_count)

@@ -377,11 +377,50 @@ def enqueue(config_path, state, kind, client_request_id, *, ticket=None, candida
         queue.close()
 
 
+def reject_unstarted_selections(queue, config, *, team=None, ticket=None):
+    """Audit-reject only legacy preflight failures proven never dispatched.
+
+    A blocked action that entered the consumer, any existing execution attempt,
+    or another unresolved action remains held for original-outcome inspection.
+    """
+    if not _manual_send_reason(config):
+        return []
+    if not queue.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='queue_actions'").fetchone():
+        return []
+    rejected = []
+    with queue.transaction():
+        actions = [json.loads(row[0]) for row in queue.db.execute('SELECT body FROM queue_actions')]
+        for action in actions:
+            if (action['kind'] != 'send' or action['status'] != 'blocked'
+                    or action.get('selection_rejected') or 'started_at' in action or action.get('result') is not None):
+                continue
+            ident = action['request']['ticket']
+            if ticket is not None and ident != ticket:
+                continue
+            current = queue.get(ident)
+            if (current['state'] != 'pending' or current.get('attempt')
+                    or team is not None and current['product'] != team):
+                continue
+            if queue.db.execute('SELECT 1 FROM operation_attempts WHERE ticket=? LIMIT 1', (ident,)).fetchone():
+                continue
+            if any(other['kind'] == 'send' and other['request']['ticket'] == ident
+                   and other['status'] in ('queued', 'running', 'uncertain') for other in actions):
+                continue
+            action['selection_rejected'] = True
+            action['selection_rejection'] = dict(at=time.time(), original_reason=action.get('reason'),
+                reason=_manual_send_reason(config), proof='blocked before consumer; no attempt or unresolved send')
+            _save(queue.db, action)
+            queue._save(current, 'manual_selection_rejected', dict(action=action['id'], **action['selection_rejection']))
+            rejected.append(action['id'])
+    return rejected
+
+
 def consume(config_path, state, runtime=None):
     """CAS-claim queued requests; a second consumer never repeats a claimed action."""
     queue = TicketStore(state)
     try:
         schema(queue.db)
+        reject_unstarted_selections(queue, load(config_path))
         pending = [row[0] for row in queue.db.execute("SELECT id FROM queue_actions ORDER BY rowid")]
         results = []
         for ident in pending:
