@@ -24,7 +24,8 @@ const item={id:'one',title:'Example task',team_label:'Example',category:'waiting
 const archived={...item,id:'archived',category:'archived',board_state:{revision:'archive-revision',can_restore:true}};
 const data={schema_version:1,jobs:[item,archived],counts:{},fingerprint:'initial'};
 const tasks=[];
-const cx={stop_propagation(){},notify(){},spawn(fn){const task=fn(cx);tasks.push(task);return task},timer:{every(){},after(){}}};
+let notifies=0;
+const cx={stop_propagation(){},notify(){notifies++},spawn(fn){const task=fn(cx);tasks.push(task);return task},timer:{every(){},after(){}}};
 function view(role='list'){
   const v=new context.TeamQueue();
   Object.assign(v,{role,options:{item},data,filter:'active',selected:item,revealed:true,
@@ -33,6 +34,8 @@ function view(role='list'){
 function nodes(x){return x?.value?[x,...x.value.kids.flatMap(nodes)]:[]}
 function text(x){return x?.value?x.value.kids.map(text).join(' '):typeof x==='string'?x:''}
 function id(x,key){return nodes(x).find(x=>x.value.props.id?.[0]===key)}
+// A click that changes view state must request a redraw (Herdr re-renders only on notify or live-data change).
+function clickNotifies(x,key,label){const before=notifies;id(x,key).value.handlers.click({},cx);assert(notifies>before,label+' must call cx.notify()')}
 (async()=>{
   const capacityView=view('operations');
   capacityView.data={...data,capacity:{global_limit:null,available:null,used:4}};
@@ -131,14 +134,14 @@ function id(x,key){return nodes(x).find(x=>x.value.props.id?.[0]===key)}
   assert(text(ftree).includes('새로 만들 직원이라 강제 전송할 수 없습니다'));
   calls=[];await force.executeAction(cx,'send',force.candidates.candidates[0],true);
   assert.equal(calls.length,0,'force without the confirmation step sends nothing');
-  id(ftree,'queue-force-mismatch').value.handlers.click({},cx);
+  clickNotifies(ftree,'queue-force-mismatch','그래도 전송');
   ftree=force.render(cx);
   assert(id(ftree,'queue-force-confirm-mismatch')&&id(ftree,'queue-force-cancel-mismatch'),'confirmation step has confirm and cancel');
   assert(text(ftree).includes('닫기·Esc·바깥 클릭은 전송하지 않고 닫습니다'));
   assert.equal(calls.length,0,'opening the confirmation sends nothing');
-  id(ftree,'queue-force-cancel-mismatch').value.handlers.click({},cx);
+  clickNotifies(ftree,'queue-force-cancel-mismatch','취소');
   ftree=force.render(cx);assert(!id(ftree,'queue-force-confirm-mismatch'));assert(id(ftree,'queue-force-mismatch'));assert.equal(calls.length,0);
-  id(ftree,'queue-force-mismatch').value.handlers.click({},cx);
+  clickNotifies(ftree,'queue-force-mismatch','그래도 전송');
   reply=async args=>({code:0,stdout:JSON.stringify({id:args[args.indexOf('--client-request-id')+1],kind:'send',status:'blocked',reason:'executor draft, dialog or incomplete screen'})});
   const forced=force.executeAction(cx,'send',force.candidates.candidates[0],true);
   await forced;
@@ -161,7 +164,7 @@ function id(x,key){return nodes(x).find(x=>x.value.props.id?.[0]===key)}
   assert(text(rtree).includes('다른 팀·임시 직원 보기 (2)'),'toggle shows how many other-team or temporary staff are hidden');
   assert(text(rtree).includes('t7v'),'terminal address is shown');
   assert(!text(rtree).includes('(팀) (팀)')&&!text(rtree).includes('(개인) (개인)'),'account label is not doubled');
-  id(rtree,'queue-other-team-toggle').value.handlers.click({},cx);
+  clickNotifies(rtree,'queue-other-team-toggle','다른 팀·임시 직원 보기');
   rtree=roster.render(cx);
   assert(id(rtree,'queue-force-foreign')&&id(rtree,'queue-force-temp'),'hidden staff can be force-sent after the toggle');
   const plainOnly=view('detail');plainOnly.candidates={send_allowed:false,expected_ticket:'t',candidates:[{id:'x',eligible:false,override_allowed:false}]};
@@ -171,7 +174,8 @@ function id(x,key){return nodes(x).find(x=>x.value.props.id?.[0]===key)}
   await legacy.loadCandidates(cx);assert.equal(calls.length,0,'legacy request never calls the ticket backend');
   assert(text(legacy.render(cx)).includes('구형 요청이라 이 창에서 전송할 수 없습니다'));
   const unknown=view('detail');calls=[];reply=async()=>({code:1,stderr:'unknown ticket'});
-  await unknown.loadCandidates(cx);assert(text(unknown.render(cx)).includes('구형 요청이라 이 창에서 전송할 수 없습니다'));
-  assert(!text(unknown.render(cx)).includes('unknown ticket'));
+  await unknown.loadCandidates(cx);
+  assert(!text(unknown.render(cx)).includes('구형 요청이라 이 창에서 전송할 수 없습니다'),'unknown ticket without a legacy marker is not called a legacy request');
+  assert(text(unknown.render(cx)).includes('unknown ticket'),'the real backend error stays visible');
   console.log('PASS queue controls: CAS, direct selection, asynchronous sync, double-click fence, unknown-outcome polling, archive/restore, truthful manual state. Manual priority send confirmation and legacy notice covered. Native pixels/Esc/outside not exercised.');
 })().catch(error=>{console.error(error);process.exitCode=1});

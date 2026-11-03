@@ -163,7 +163,7 @@ export default class TeamQueue extends View {
       const result=await this.queueCall(["candidates",this.selected.id]);
       if(!Array.isArray(result.candidates)) throw new Error("담당자 후보 자료 형식을 확인하세요");
       this.candidates=result;
-    } catch(error) { this.candidates=null; this.candidateFailure=/unknown ticket/.test(String(error)) ? LEGACY_SEND : String(error); }
+    } catch(error) { this.candidates=null; this.candidateFailure=String(error); }
     finally { this.candidateFlight=false; cx.notify(); }
   }
   // Manual priority send: only after the explicit confirmation step, only for a listed candidate that the backend marked overridable.
@@ -382,7 +382,7 @@ export default class TeamQueue extends View {
             .when(Boolean(this.candidates),el=>el
               .when(this.candidates?.send_allowed!==true,x=>x.child(words(this.candidates?.reason||"현재 전송 불가 · 승인·수신 상태 확인 필요").text_color(t.blocked)))
               .when(!this.candidates?.candidates.length,x=>x.child(words("선택 가능한 담당자가 없습니다")))
-              .when(otherTeam.length>0,x=>x.child(button("queue-other-team-toggle",(this.showOtherTeam?"다른 팀·임시 직원 숨기기 (":"다른 팀·임시 직원 보기 (")+otherTeam.length+")",()=>{this.showOtherTeam=!this.showOtherTeam;},t)))
+              .when(otherTeam.length>0,x=>x.child(button("queue-other-team-toggle",(this.showOtherTeam?"다른 팀·임시 직원 숨기기 (":"다른 팀·임시 직원 보기 (")+otherTeam.length+")",cx=>{this.showOtherTeam=!this.showOtherTeam;cx.notify();},t)))
               .children(visibleCandidates.map(candidate=>v_flex().gap(4)
                 .child(words((/\)\s*$/.test(candidate.alias||"")?candidate.alias:(candidate.alias||"별명 미확인")+" ("+({personal:"개인",team:"팀"}[candidate.account]||"계정 미확인")+")")+(candidate.terminal?" · "+candidate.terminal:"")+" · "+(candidate.role||"역할 미확인")))
                 .when(candidate.eligible!==true,x=>x.child(words("배정 불가 · "+(candidate.reason_ko||candidate.reason||"현재 배정 불가")).text_color(t.blocked)))
@@ -391,14 +391,14 @@ export default class TeamQueue extends View {
                 .when(candidate.eligible===true,x=>x.child(words("배정 가능").text_size(11).text_color(t.muted)))
                 .when(candidate.eligible!==true&&candidate.override_allowed!==true&&candidate.unregistered===true,x=>x.child(words("직원으로 등록되지 않아 강제 전송도 할 수 없습니다").text_size(11).text_color(t.muted)))
                 .when(candidate.eligible!==true&&candidate.override_allowed!==true&&candidate.planned===true,x=>x.child(words("새로 만들 직원이라 강제 전송할 수 없습니다").text_size(11).text_color(t.muted)))
-                .when(candidate.override_allowed===true&&!this.pendingExecution&&this.forceCandidate?.id!==candidate.id,x=>x.child(button("queue-force-"+candidate.id,"그래도 전송",()=>{this.forceCandidate=candidate;this.executionFailure=null;this.executionResult=null;},t)))
+                .when(candidate.override_allowed===true&&!this.pendingExecution&&this.forceCandidate?.id!==candidate.id,x=>x.child(button("queue-force-"+candidate.id,"그래도 전송",cx=>{this.forceCandidate=candidate;this.executionFailure=null;this.executionResult=null;cx.notify();},t)))
                 .when(candidate.override_allowed===true&&!this.pendingExecution&&this.forceCandidate?.id===candidate.id,x=>x.child(v_flex().gap(6).p(10).border_1().border_color(t.blocked)
                   .child(words("강제 전송 확인").font_semibold())
                   .child(words("배정 불가 사유: "+(candidate.reason_ko||candidate.reason||"미확인")).text_color(t.blocked))
                   .child(words("사유를 알고도 이 직원에게 보냅니다. 대상 화면에 입력 중인 내용이 있거나 터미널이 바뀌었으면 전송하지 않습니다. 이 선택은 기록에 남습니다. 닫기·Esc·바깥 클릭은 전송하지 않고 닫습니다.").text_size(11).text_color(t.muted))
                   .child(h_flex().flex_wrap().gap(6)
                     .child(button("queue-force-confirm-"+candidate.id,"이 직원에게 강제 전송",cx=>cx.spawn(async cx=>this.executeAction(cx,"send",candidate,true)),t))
-                    .child(button("queue-force-cancel-"+candidate.id,"취소",()=>{this.forceCandidate=null;},t))))))))
+                    .child(button("queue-force-cancel-"+candidate.id,"취소",cx=>{this.forceCandidate=null;cx.notify();},t))))))))
             .child(this.actionStatus(t))))
           .child(section("요청 내용",(()=>{
             const text=item.request || "저장된 요청 본문 없음";
