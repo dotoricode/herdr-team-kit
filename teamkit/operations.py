@@ -445,18 +445,38 @@ def tick(config_path, state, runtime=None, *, selection=None):
             except (ValueError, KeyError, OSError, subprocess.SubprocessError, NativeError) as error:
                 queue.block(ticket['id'], str(error))
                 continue
+            override = selection.get('override') if selection else None
             for candidate in candidates:
+                bypassed = []
                 try:
-                    executor = runtime.admit(ticket, candidate)
+                    if override:
+                        # Explicit manual priority send: role, responsibility, capacity and usage
+                        # gates are recorded and waived. Approval, plan creation and the live
+                        # owner/PID/draft checks below are never waived.
+                        if candidate.get('new') is True:
+                            raise ValueError('planned worker cannot be sent by manual priority; no input sent')
+                        try:
+                            runtime.admit(ticket, candidate)
+                        except (ValueError, KeyError, OSError, subprocess.SubprocessError, NativeError) as error:
+                            bypassed.append(str(error))
+                        work_gate(config, state, ticket)
+                        runtime.native(candidate)
+                        executor = candidate
+                    else:
+                        executor = runtime.admit(ticket, candidate)
                     eligible_observed_at = time.time()
                     observation = runtime.observation()
                     from . import docsstaff
                     def staff_guard(item, actor):
-                        docsstaff.check(config, queue.db, item, actor)
+                        if not override:
+                            docsstaff.check(config, queue.db, item, actor)
                     attempt = queue.reserve(ticket['id'], executor, policy(config), observation,
                                             expected_revision=selection['expected_ticket'] if selection else None,
                                             manual_action=selection['action_id'] if selection else None,
-                                            before_reserve=staff_guard)
+                                            before_reserve=staff_guard,
+                                            override=dict(action=selection['action_id'], reason=override['reason'],
+                                                          original_reasons=override['original_reasons'],
+                                                          bypassed=bypassed) if override else None)
                 except (ValueError, KeyError, OSError, subprocess.SubprocessError, NativeError) as error:
                     reasons.append(str(error))
                     continue
@@ -475,12 +495,14 @@ def tick(config_path, state, runtime=None, *, selection=None):
                                 or reserved['executor'] != executor or queue.gate(current['id'])):
                             raise ValueError('approval or attempt changed after reservation; no input sent')
                         work_gate(config,state,current)
-                        docsstaff.check(config, queue.db, current, executor)
+                        if not override:
+                            docsstaff.check(config, queue.db, current, executor)
                         store=Store(state)
                         try:
                             quota=cached_quota(config,store,executor['provider'],executor['account'])
                         finally:store.close()
-                        if isinstance(runtime,NativeRuntime) and not eligible(quota,time.time(),config['quota_ttl_seconds']):
+                        if (not override and isinstance(runtime,NativeRuntime)
+                                and not eligible(quota,time.time(),config['quota_ttl_seconds'])):
                             raise ValueError('profile quota changed before delivery; no input sent')
                         if Path(config_path).read_bytes() != config_bytes or queue.gate(current['id']):
                             raise ValueError('approval/configuration changed before delivery; no input sent')
@@ -493,7 +515,8 @@ def tick(config_path, state, runtime=None, *, selection=None):
                     queue.delivery(attempt['id'], False, {'error': type(error).__name__,'reason':str(error)})
                 started.append(dict(ticket=ticket['id'], attempt=attempt['id'],
                                     enqueue_to_dispatch_seconds=attempt['created_at'] - ticket['created_at'],
-                                    eligible_observed_to_dispatch_seconds=attempt['created_at'] - eligible_observed_at))
+                                    eligible_observed_to_dispatch_seconds=attempt['created_at'] - eligible_observed_at,
+                                    **({'override': dict(bypassed=bypassed)} if override else {})))
                 break
             else:
                 queue.block(ticket['id'], '; '.join(sorted(set(reasons))) or 'no registered executor supports this ticket')

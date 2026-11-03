@@ -266,7 +266,7 @@ class ResourceLedger:
                                                policy, native_observation, session=session)
 
     def reserve_in_transaction(self, connection, attempt, ticket, profile, resources,
-                               policy, native_observation, session=None):
+                               policy, native_observation, session=None, override_capacity=False):
         if not connection.in_transaction:
             raise ValueError('reservation requires caller-owned active transaction')
         if not isinstance(attempt, str) or not IDENTITY.fullmatch(attempt) or not isinstance(ticket, str) or not IDENTITY.fullmatch(ticket):
@@ -282,9 +282,12 @@ class ResourceLedger:
                 raise ResourceUnavailable('attempt_released', 'released attempts cannot be resurrected')
             return old
         snap = self._snapshot(connection, policy, native_observation)
-        if snap['available'] is not None and snap['available'] <= 0:
+        # Only an explicit manual priority send skips the two capacity counters.
+        # Session and write-lease conflicts below always remain enforced.
+        if override_capacity is not True and snap['available'] is not None and snap['available'] <= 0:
             raise ResourceUnavailable('global_capacity', 'global execution capacity is exhausted')
-        if snap['profile_used'][profile] + snap['profile_unknown'][profile.split('/')[0]] >= snap['profile_limits'][profile]:
+        if (override_capacity is not True
+                and snap['profile_used'][profile] + snap['profile_unknown'][profile.split('/')[0]] >= snap['profile_limits'][profile]):
             raise ResourceUnavailable('profile_capacity', 'profile execution capacity is exhausted or unknown')
         self._session_available(connection, attempt, session)
         for existing in self._rows(connection):

@@ -353,7 +353,8 @@ class TicketStore:
         self.db.execute('INSERT OR REPLACE INTO operation_attempts VALUES (?,?,?)',
                         (attempt['id'], attempt['ticket'], json.dumps(attempt)))
 
-    def reserve(self, ident, executor, policy, observation, expected_revision=None, manual_action=None, *, before_reserve=None):
+    def reserve(self, ident, executor, policy, observation, expected_revision=None, manual_action=None, *, before_reserve=None,
+                override=None):
         from .resources import ResourceLedger
         ledger = ResourceLedger(self.db)
         with self.transaction():
@@ -367,7 +368,9 @@ class TicketStore:
             profile = executor['provider'] + '/' + executor['account']
             planned = (executor.get('new') is True and executor.get('pid') is None
                        and executor.get('terminal') is None)
-            if (profile not in item['profiles'] or not executor.get('owner')
+            # An explicit manual priority send waives only the ticket's account
+            # list; the executor must still be a concrete observed identity.
+            if ((profile not in item['profiles'] and not override) or not executor.get('owner')
                     or not planned and type(executor.get('pid')) is not int):
                 raise ValueError('executor identity/profile mismatch')
             from .queue_actions import reserve_selection
@@ -380,13 +383,16 @@ class TicketStore:
             attempt = dict(id=uuid.uuid4().hex, ticket=ident, ordinal=item['attempt_count'] + 1,
                            executor=executor, phase='reserved', created_at=self.clock(),
                            delivery_id=uuid.uuid4().hex, estimated_tokens=estimate)
+            if override:
+                attempt['override'] = override
             constraints,resources=_resource_contract(item)
             attempt['resource_constraints']=constraints
             self._continue_own_writes(item, attempt, executor, observation)
             from .admission import reserve_in_transaction
             reserve_in_transaction(self.db, attempt['id'], ident, profile,
                                    resources, policy, observation,
-                                   session=None if planned else {k: executor[k] for k in ('terminal', 'pid', 'owner')})
+                                   session=None if planned else {k: executor[k] for k in ('terminal', 'pid', 'owner')},
+                                   override_capacity=bool(override))
             budget['attempts'] += 1
             budget['tokens_reserved'] += estimate
             self._save_budget(item['origin_id'], budget)

@@ -30,6 +30,7 @@ def parser(commands):
     item.add_argument('--expected-digest')
     item.add_argument('--candidate-id')
     item.add_argument('--expected-ticket')
+    item.add_argument('--override-eligibility', action='store_true')
 
 
 def handle(args):
@@ -40,7 +41,8 @@ def handle(args):
         if args.action == 'action-status':
             return queue_actions.status(args.state, args.client_request_id)
         return queue_actions.enqueue(args.config, args.state, args.action, args.client_request_id,
-            ticket=args.ticket, candidate_id=args.candidate_id, expected_ticket=args.expected_ticket)
+            ticket=args.ticket, candidate_id=args.candidate_id, expected_ticket=args.expected_ticket,
+            override=args.override_eligibility, override_reason=args.reason)
     if args.action == 'status':
         if args.board:
             from .queue_view import board

@@ -112,7 +112,7 @@ def _legacy_resource_conflicts(connection, ticket, resources):
 
 
 def reserve_in_transaction(connection, attempt, ticket, profile, resources, policy,
-                           native_observation=None, session=None):
+                           native_observation=None, session=None, override_capacity=False):
     ledger = ResourceLedger(connection)
     if _has_table(connection, 'operations_admission_policy'):
         enabled, stored_policy = policy_for(None, connection)
@@ -128,7 +128,8 @@ def reserve_in_transaction(connection, attempt, ticket, profile, resources, poli
         raise ResourceUnavailable('previous_execution_unconfirmed', 'a previous execution of this ticket has not stopped')
     _legacy_resource_conflicts(connection, ticket, resources)
     return ledger.reserve_in_transaction(connection, attempt, ticket, profile, resources,
-                                          policy, observe(connection, native_observation), session=session)
+                                          policy, observe(connection, native_observation), session=session,
+                                          override_capacity=override_capacity)
 
 
 def reserve_task(store, task, owner, provider, account, config=None, native_observation=None):

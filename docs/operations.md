@@ -104,6 +104,16 @@ Receipt waiters record SIGINT/SIGTERM cancellation before exiting. SIGKILL or ho
 
 `pool status`는 요청별 work ID·계정 제약·완료 조건과 안전한 오류 단계·코드를 표시합니다. 오류 원문은 저장하지 않으므로 이 코드만으로 과거 native 실패의 정확한 원인을 단정하지 않습니다. supervisor와 현재 Python 소스의 fingerprint가 다르면 새 assign은 거절합니다. active jobs와 전달 불명을 먼저 확인하고 supervisor만 안전하게 재기동해야 하며 기존 팀장 세션은 재시작하지 않습니다. 새 supervisor는 실행 중 소스 변경을 감지하면 다음 tick을 중단하고 진행 중 작업이 끝나기를 기다립니다.
 
+## 담당자 우선 전송
+
+`queue candidates TICKET`은 배정 불가 직원도 모두 보여 주며 각 후보에 원문 `reason`, 한국어 `reason_ko`, `override_allowed`를 담습니다. 배정 불가 후보에도 사용자가 직접 지정하면 `queue send TICKET --candidate-id ID --expected-ticket DIGEST --client-request-id KEY --override-eligibility --reason "사유"`로 보낼 수 있습니다. `--reason`은 1~300자 필수이고 `--override-eligibility` 없이 쓸 수 없습니다.
+
+우회하는 것은 역할·책임·모델 정책, 계정 용량(전체·계정), 사용량, 업무에 적힌 계정 목록입니다. 우회 사실·사용자 사유·미리보기 때 원래 사유·실행 시점에 실제로 무시한 사유는 큐 action 기록(`request.override`, `result.override`)과 attempt(`override`)에 남습니다.
+
+우회하지 않는 것: 업무 승인·고정 승인 기록, `pending`이 아닌 업무의 재전송 금지, 이전 선택이 queued·running·uncertain일 때의 재선택 금지, UI 업무, 새로 만들 직원(계획 항목)의 용량 우회, 다른 attempt와의 터미널 세션·쓰기 자원 충돌, 전송 시점의 소유자·프로세스 확인과 입력 초안·확인 창 검사. 마지막 둘은 전송 직전에 다시 읽어 입력 중인 내용이 있으면 전송하지 않고 blocked로 보고합니다.
+
+우회 전송은 supervisor가 새 소스를 읽어야 실제 반영됩니다. 위 `팀장 작업 큐`의 fingerprint 규칙에 따라 active jobs와 전달 불명을 확인한 뒤 supervisor만 안전하게 재기동합니다.
+
 ## 운영 현황과 계정 사용률
 
 `monitor`는 호스트에서 native 실행 상태를 3초마다 관측하고 Codex 회사/개인 사용률을 30초마다 조회합니다. provider 조회는 별도 스레드에서 실행하여 지연된 한도 조회가 실행 상태 관측을 막지 않습니다. Claude는 기존 실제 응답에 연결된 statusline 수집을 유지합니다. 한도 확인을 위한 모델 턴·API fallback은 만들지 않습니다.

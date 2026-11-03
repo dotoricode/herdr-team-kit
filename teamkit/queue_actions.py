@@ -72,6 +72,59 @@ def _send_reason(queue, ticket, config):
     return queue.gate(ticket['id'])
 
 
+# Known gate messages -> short Korean phrases. Unknown text keeps its original wording.
+REASON_KO = (
+    ('executor responsibility or role mismatch', '담당 제품·역할이 이 업무와 맞지 않습니다'),
+    ('executor draft, dialog or incomplete screen', '화면에 입력 중인 내용이나 확인 창이 있습니다'),
+    ('global execution capacity is exhausted', '전체 동시 실행 용량이 가득 찼습니다'),
+    ('profile execution capacity is exhausted or unknown', '계정 동시 실행 용량이 가득 찼거나 확인되지 않았습니다'),
+    ('Core terminal owner/process changed', '터미널의 소유자나 프로세스가 바뀌었거나 종료되었습니다'),
+    ('registered executor PID changed', '등록된 직원 프로세스가 바뀌었습니다'),
+    ('Core agent is not idle and ready', '직원이 작업 중이거나 준비되지 않았습니다'),
+    ('profile quota unavailable', '계정 사용량을 확인할 수 없거나 한도에 도달했습니다'),
+    ('profile quota changed before delivery', '전송 직전 계정 사용량이 바뀌었습니다'),
+    ('executor model/effort differs', '직원의 모델·추론 강도가 역할 정책과 다릅니다'),
+    ('executor provider is outside', '직원의 계정이 역할 정책 범위 밖입니다'),
+    ('executor profile binding changed', '직원의 계정 연결이 바뀌었습니다'),
+    ('executor working boundary', '직원의 작업 폴더가 업무 범위를 덮지 않습니다'),
+    ('review executor must be independent', '리뷰는 구현 담당과 다른 직원이어야 합니다'),
+    ('no explicit responsibility/role policy', '이 업무의 역할 정책이 정해져 있지 않습니다'),
+    ('role policy requires a user decision', '역할 정책상 사용자 결정이 필요합니다'),
+    ('planned role/profile/quota no longer eligible', '새로 만들 직원 계획이 더 이상 유효하지 않습니다'),
+    ('executor identity/profile mismatch', '직원 식별 정보나 계정이 업무 조건과 맞지 않습니다'),
+    ('previous selected action is queued, running or uncertain', '이전에 선택한 전송이 진행 중이거나 결과가 불명확해 먼저 확인이 필요합니다'),
+    ('native terminal already belongs to another live attempt', '이 직원은 다른 작업을 진행 중입니다'),
+    ('another attempt holds a conflicting resource lease', '다른 작업이 같은 자원을 쓰고 있어 충돌합니다'),
+    ('origin execution budget exhausted', '이 업무의 실행 횟수·토큰 한도를 모두 썼습니다'),
+    ('personal document staff', '개인 문서 담당 규칙에 맞지 않습니다'),
+    ('staff department does not support this role', '이 부서는 해당 역할을 지원하지 않습니다'),
+    ('UI work requires', 'UI 업무는 UI 검증실을 통해서만 처리할 수 있습니다'),
+    ('pinned product design approval', '제품 설계 승인이 없거나 바뀌었습니다'),
+    ('code/integration ticket requires', '코드 업무는 고정된 승인 기록이 필요합니다'),
+    ('approval missing or changed', '승인 기록이 없거나 바뀌었습니다'),
+    ('ticket already assigned', '이미 배정·완료되었거나 대기 상태가 아니라 다시 보낼 수 없습니다'),
+    ('new work is disabled', '현재 운영 정책에서 새 업무 전송이 꺼져 있습니다'),
+    ('no eligible registered executor', '배정 가능한 등록 직원이 없습니다'),
+)
+_OVERRIDE_REASON_MAX = 300
+
+
+def reason_ko(reason):
+    """Short Korean label for a gate message; unknown messages keep the original text."""
+    if not reason:
+        return ''
+    for needle, korean in REASON_KO:
+        if needle in reason:
+            return korean
+    return '배정 불가 사유(원문): ' + reason
+
+
+def _clean_override_reason(value):
+    if not isinstance(value, str) or not value.strip() or len(value.strip()) > _OVERRIDE_REASON_MAX:
+        raise ValueError('override reason required: 1..%d characters' % _OVERRIDE_REASON_MAX)
+    return value.strip()
+
+
 def candidates(config_path, state, ident, runtime=None):
     config = load(config_path)
     runtime = runtime or NativeRuntime(config, state)
@@ -114,7 +167,10 @@ def candidates(config_path, state, ident, runtime=None):
                     role=ticket['role'], owner=None if executor.get('new') else executor.get('owner'),
                     aliases=config.get('operations', {}).get('staff_aliases')),
                 account=executor['account'], provider=executor['provider'], role=ticket['role'],
-                eligible=problem is None, reason=problem or '', planned=executor.get('new') is True))
+                eligible=problem is None, reason=problem or '', reason_ko=reason_ko(problem),
+                # Manual priority never creates a worker beyond capacity; only an existing terminal can be forced.
+                override_allowed=problem is not None and executor.get('new') is not True,
+                planned=executor.get('new') is True))
         return dict(ticket=ident, expected_ticket=digest(ticket), candidates=rows,
                     send_allowed=any(row['eligible'] for row in rows),
                     reason='' if any(row['eligible'] for row in rows) else 'no eligible registered executor or approved worker plan')
@@ -143,7 +199,8 @@ def _save(db, action):
     db.execute('INSERT OR REPLACE INTO queue_actions VALUES (?,?)', (action['id'], json.dumps(action)))
 
 
-def enqueue(config_path, state, kind, client_request_id, *, ticket=None, candidate_id=None, expected_ticket=None):
+def enqueue(config_path, state, kind, client_request_id, *, ticket=None, candidate_id=None, expected_ticket=None,
+            override=False, override_reason=None, runtime=None):
     if not isinstance(client_request_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', client_request_id):
         raise ValueError('bounded stable client-request-id required')
     if kind not in ('send', 'sync'):
@@ -152,6 +209,18 @@ def enqueue(config_path, state, kind, client_request_id, *, ticket=None, candida
                                            for x in (candidate_id, expected_ticket))):
         raise ValueError('ticket, exact candidate-id and expected-ticket required')
     request = dict(kind=kind, ticket=ticket, candidate_id=candidate_id, expected_ticket=expected_ticket)
+    if override is not True and override_reason not in (None, ''):
+        raise ValueError('override reason requires the explicit override option')
+    if override is True:
+        if kind != 'send':
+            raise ValueError('manual priority applies only to a send action')
+        text = _clean_override_reason(override_reason)
+        # Preview the gates now so the durable record keeps why this was not assignable.
+        chosen = next((row for row in candidates(config_path, state, ticket, runtime=runtime)['candidates']
+                       if row['id'] == candidate_id), None)
+        if chosen is not None and chosen.get('planned'):
+            raise ValueError('planned worker cannot be sent by manual priority')
+        request['override'] = dict(reason=text, original_reasons=[chosen['reason']] if chosen and chosen['reason'] else [])
     queue = TicketStore(state)
     try:
         schema(queue.db)
@@ -204,6 +273,7 @@ def consume(config_path, state, runtime=None):
                 _save(queue.db, action)
             try:
                 before = {x['id']: x for x in queue.list()}
+                forced = None
                 request = action['request']
                 if action['kind'] == 'send':
                     ticket = queue.get(request['ticket'])
@@ -213,10 +283,11 @@ def consume(config_path, state, runtime=None):
                     if problem:
                         raise ValueError(problem)
                     dispatch = tick(config_path, state, runtime=runtime, selection={**request, 'action_id':action['id']})
+                    forced = next((x['override'] for x in dispatch.get('started', []) if 'override' in x), None)
                 else:
                     dispatch = tick(config_path, state, runtime=runtime)
                 after = {x['id']: x for x in queue.list()}
-                actual = dict(dispatch=dispatch, tickets={key: dict(before=before.get(key, {}).get('state'), after=value['state'])
+                actual = dict(dispatch=dispatch, **({'override': forced} if forced else {}), tickets={key: dict(before=before.get(key, {}).get('state'), after=value['state'])
                                                          for key, value in after.items()},
                               observed_count=len(after), completed=[key for key, value in after.items()
                                 if value['state']=='completed' and before.get(key, {}).get('state')!='completed'])
