@@ -173,7 +173,7 @@ def plans(config, state, ticket, *, reserved_owner=None):
                                new=True, pid=None, terminal=None, runtime={}, empty_prompt=None,
                                operation_actor=True, profile_binding=binding(pr),
                                ticket_signature=_ticket_signature(ticket), base=base, basis_kind=basis_kind))
-        return prefer_designated(ticket, result, lambda plan: (plan['provider'], plan['account']))
+        return result if usage_only(config) else prefer_designated(ticket, result, lambda plan: (plan['provider'], plan['account']))
     finally:
         store.close()
         queue.close()

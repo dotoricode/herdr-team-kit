@@ -140,10 +140,7 @@ class NativeRuntime:
             pairs = [(x['provider'], x['account']) for x in profile_candidates(self.config)]
             by_order = sorted(result, key=lambda e: pairs.index((e['provider'], e['account']))
                               if (e['provider'], e['account']) in pairs else len(pairs))
-            if ticket is not None:
-                from .workers import prefer_designated
-                return prefer_designated(ticket, by_order, lambda e: (e['provider'], e['account']))
-            return by_order
+            return [item for item in by_order if ticket is None or item['product'] == ticket['product']]
         from .routing import execution_candidates
         first = next(iter(self.config['profiles']))
         role = {'provider': first, 'model': self.config['profiles'][first]['team']['model'], 'effort': 'medium'}
@@ -301,7 +298,12 @@ class NativeRuntime:
                 raise ValueError('executor responsibility or role mismatch')
         from .allocation import usage_only
         flexible = usage_only(self.config) and not docsstaff.policy(self.config, ticket)
-        if not flexible:
+        if flexible:
+            def own_team():
+                if executor['product'] != ticket['product']:
+                    raise ValueError('team pull executor belongs to another team')
+            gate('team', False, own_team)
+        else:
             gate('role', True, responsibility)
         from .core_runtime import _model_effort
         from .workers import _policy_task
@@ -467,7 +469,7 @@ def prompt(config_path, state, ticket, attempt, *, allocation_policy='role'):
         split_instruction = ('이 업무는 분리 작업 폴더 ' + split['worktree'] +
                              '에서 작업하고 결과물도 해당 승인 경로 안에 쓰세요. 원본 경로는 작업 대상으로 사용하지 마세요.\n')
     from .protocol import tool_permission_hint, leader_guidance
-    allocation_instruction = ('현재 사용자 승인에 따라 이 실행자가 원 업무를 직접 수행합니다. '
+    allocation_instruction = ('현재 사용자 승인에 따라 자기 팀의 준비된 업무를 가져온 이 실행자가 원 업무를 직접 수행합니다. 회사 계정을 먼저 검토하고 개인 계정은 그 다음에 사용합니다. '
                               '과거 계정·모델·역할 지정은 이번 배정의 필수 조건이 아닙니다. '
                               '계정 지정만을 이유로 다른 담당자에게 재위임하거나 대기하지 마세요. '
                               '원문, 읽기 전용 제약과 승인된 작업·자료 범위, 독립 리뷰 조건은 그대로 지키세요.\n'
@@ -676,24 +678,43 @@ def reconcile(queue, runtime, config=None):
             queue.block(ticket['id'], str(error))
 
 
-def tick(config_path, state, runtime=None, *, selection=None):
+def tick(config_path, state, runtime=None, *, selection=None, team=None, ticket_id=None):
     config_bytes = Path(config_path).read_bytes()
     config = load(config_path)
     if Path(config_path).read_bytes() != config_bytes:
         raise ValueError('configuration changed while loading; dispatch deferred')
     if not enabled(config):
         return {'enabled': False}
+    if team is not None:
+        from .departments import definitions
+        if team not in definitions(config):
+            raise ValueError('unknown pull team')
+        if selection is not None:
+            raise ValueError('team pull cannot use manual executor selection')
+        if ticket_id is not None:
+            inspection = TicketStore(state, read_only=True)
+            try:
+                selected = inspection.get(ticket_id)
+                if selected['product'] != team:
+                    raise ValueError('selected ticket belongs to another team')
+                if selected['state'] != 'pending' or inspection.gate(ticket_id):
+                    raise ValueError('selected team ticket is not ready; inspect its state and dependencies')
+            finally:
+                inspection.close()
+    elif ticket_id is not None:
+        raise ValueError('selected ticket requires a team')
     from .allocation import refresh_usage
     usage_refresh = refresh_usage(config_path, state)
+    automatic = selection is None and team is None
     runtime = runtime or NativeRuntime(config, state)
     queue = TicketStore(state)
     try:
         from .intake import capture
         try:
-            intake = capture(config, state) if selection is None else None
+            intake = capture(config, state) if automatic else None
         except (ValueError, OSError, json.JSONDecodeError) as error:
             intake = {'enabled': True, 'reason': str(error)}
-        if selection is None and config.get('operations',{}).get('intake',{}).get('enabled') is True:
+        if automatic and config.get('operations',{}).get('intake',{}).get('enabled') is True:
             from . import intake_dispatch
             try:
                 intake['classification'] = intake_dispatch.tick(config_path, state)
@@ -701,11 +722,11 @@ def tick(config_path, state, runtime=None, *, selection=None):
                 intake['classification'] = {'reason':str(error)}
         from .admission import configure
         configure(queue.db, policy(config))
-        if selection is None:
+        if automatic:
             reconcile(queue, runtime, config)
             queue.resume_parents()
         ui = None
-        if selection is None and any(t['role']=='ui' and t['state'] not in ('completed','cancelled','backlog') for t in queue.list()):
+        if automatic and any(t['role']=='ui' and t['state'] not in ('completed','cancelled','backlog') for t in queue.list()):
             from . import ui_jobs
             try:
                 ui = ui_jobs.tick(config_path,state)
@@ -713,6 +734,8 @@ def tick(config_path, state, runtime=None, *, selection=None):
                 ui = {'reason':str(error)}
         started = []
         for ticket in queue.ready():
+            if team is not None and ticket['product'] != team or ticket_id is not None and ticket['id'] != ticket_id:
+                continue
             if ticket['role']=='ui' or selection is not None and ticket['id'] != selection['ticket']:
                 continue
             from .queue_actions import selection_hold
@@ -721,6 +744,9 @@ def tick(config_path, state, runtime=None, *, selection=None):
             reasons = []
             try:
                 candidates = runtime.executors(ticket)
+                from .allocation import usage_only
+                if usage_only(config):
+                    candidates = [candidate for candidate in candidates if candidate['product'] == ticket['product']]
                 if selection is not None:
                     from .queue_actions import executor_identity
                     candidates = [candidate for candidate in candidates
@@ -865,3 +891,13 @@ def view(config_path, state):
                 'candidate_slots': len(__import__('teamkit.session_pool', fromlist=['_read'])._read(state)['slots'])}
     finally:
         queue.close()
+
+
+def pull(config_path, state, team, *, ticket=None, runtime=None):
+    """A team claims any ready ticket, optionally choosing a later one explicitly."""
+    if not isinstance(team, str) or not team:
+        raise ValueError('team pull requires an explicit team')
+    from .allocation import usage_only
+    if not usage_only(load(config_path)):
+        raise ValueError('team pull requires usage allocation policy')
+    return tick(config_path, state, runtime, team=team, ticket_id=ticket)

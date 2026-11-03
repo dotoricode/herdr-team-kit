@@ -11,8 +11,9 @@ from .tickets import TicketStore
 def parser(commands):
     item = commands.add_parser('queue')
     item.add_argument('action', choices=('create', 'approve', 'show', 'status', 'submit', 'receipt',
-                                        'recover', 'wait-children', 'dependencies', 'tick', 'intake', 'classify', 'approval-template', 'organize', 'dismiss', 'candidates', 'send', 'sync', 'action-status'))
+                                        'recover', 'pull', 'wait-children', 'dependencies', 'tick', 'intake', 'classify', 'approval-template', 'organize', 'dismiss', 'candidates', 'send', 'sync', 'action-status'))
     item.add_argument('ticket', nargs='?')
+    item.add_argument('--team')
     item.add_argument('--ticket-file')
     item.add_argument('--key')
     item.add_argument('--approval-file')
@@ -53,6 +54,9 @@ def handle(args):
         from .queue_view import organize
         return organize(args.config, args.state, args.ticket, args.board_action,
                         args.client_request_id, args.expected_revision)
+    if args.action == 'pull':
+        from .operations import pull
+        return pull(args.config, args.state, args.team, ticket=args.ticket)
     if args.action == 'tick':
         return tick(args.config, args.state)
     if args.action == 'classify':

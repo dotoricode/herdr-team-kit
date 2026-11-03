@@ -16,7 +16,7 @@ class UsageAdmissionTests(unittest.TestCase):
 
     def test_opt_in_ignores_role_and_provider_policy_but_keeps_quota_and_native(self):
         self.enqueue('ONE')
-        runtime = self.runtime_for({'product': 'other', 'roles': []}, {'allocation_policy': 'usage'})
+        runtime = self.runtime_for({'roles': []}, {'allocation_policy': 'usage'})
         quota = {'observed_at': time.time(), 'five_hour': {'used': 20, 'resets_at': time.time()+300},
                  'weekly': {'used': 30, 'resets_at': time.time()+300}}
         queue = TicketStore(self.state)

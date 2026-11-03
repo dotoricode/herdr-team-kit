@@ -187,7 +187,14 @@ def candidates(config_path, state, ident, runtime=None):
         except Exception as error:
             return dict(ticket=ident, expected_ticket=digest(ticket), candidates=[], send_allowed=False, reason=str(error))
         from .workers import prefer_designated, preferred
-        executors = prefer_designated(ticket, executors, lambda item: (item['provider'], item['account']))
+        from .allocation import usage_only, profile_candidates
+        if usage_only(config):
+            pairs = [(x['provider'], x['account']) for x in profile_candidates(config)]
+            executors = sorted((x for x in executors if x['product'] == ticket['product']),
+                key=lambda x: pairs.index((x['provider'], x['account']))
+                    if (x['provider'], x['account']) in pairs else len(pairs))
+        else:
+            executors = prefer_designated(ticket, executors, lambda item: (item['provider'], item['account']))
         roster = getattr(runtime, 'roster', None)
         view = roster(ticket, executors) if roster else dict(info={}, unregistered=[])
         info, excluded = view.get('info', {}), []
@@ -228,7 +235,7 @@ def candidates(config_path, state, ident, runtime=None):
                     or seen.get('background') is True,
                 account=executor['account'], provider=executor['provider'], role=ticket['role'],
                 # The ticket's designated account is only listed first; it never changes eligibility.
-                preferred=preferred(ticket, executor['provider'], executor['account']),
+                preferred=not usage_only(config) and preferred(ticket, executor['provider'], executor['account']),
                 split_preview=split_preview,
                 eligible=not issues, reason='; '.join(x['reason'] for x in issues),
                 reason_ko=' / '.join(x['reason_ko'] for x in issues), reasons=issues,
