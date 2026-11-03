@@ -37,6 +37,7 @@ class DocumentStaffTests(unittest.TestCase):
                          {('codex', 'personal'), ('claude', 'personal')})
         self.assertEqual(digest(self.queue.get(ticket['id'])), before)
         self.assertEqual({p['policy_role'] for p in plans}, {'implementer'})
+        self.assertEqual(plans[0]['provider'], 'claude')
 
     def test_busy_or_uncertain_slots_never_spawn_replacements(self):
         ticket = self.configure()

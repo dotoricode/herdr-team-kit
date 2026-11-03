@@ -131,8 +131,7 @@ class NativeRuntime:
             from .routing import execution_candidates
             staff = docsstaff.policy(self.config, ticket)
             if staff:
-                effective['execution_preference'] = dict(
-                    provider_order=[p.split('/')[0] for p in staff['profiles']], weekend_account_first=True)
+                effective = docsstaff.routing_config(effective, role)
             choices = execution_candidates(effective, task, role, time.time())
             expected = next((c for c in choices or [] if c['provider']==executor['provider']
                              and c['account']==executor['account']), None)

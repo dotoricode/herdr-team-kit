@@ -55,3 +55,13 @@ def available(config, db, ticket, provider, reserved_owner=None):
     previous = actors(config, db, ticket, provider)
     return not previous or (reserved_owner is not None and
                             all(actor['owner'] == reserved_owner for actor in previous))
+
+
+def routing_config(config, role):
+    """Keep configured provider priority while making both staff profiles reachable."""
+    preference = config.get('execution_preference', {})
+    order = preference.get('provider_order', [role['provider']])
+    providers = list(dict.fromkeys([*order, 'claude', 'codex']))
+    return {**config, 'execution_preference': {
+        'provider_order': providers,
+        'weekend_account_first': preference.get('weekend_account_first', True)}}

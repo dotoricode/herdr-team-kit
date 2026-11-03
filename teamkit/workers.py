@@ -114,9 +114,7 @@ def plans(config, state, ticket, *, reserved_owner=None):
             return []
         candidate_config = config
         if staff:
-            # Supply the department's two providers through the existing model/constraint router.
-            candidate_config = {**config, 'execution_preference': {
-                'provider_order': [p.split('/')[0] for p in staff['profiles']], 'weekend_account_first': True}}
+            candidate_config = docsstaff.routing_config(config, role)
         candidates = execution_candidates(candidate_config, task, role, time.time())
         if candidates is None:
             candidates = [{**role, 'account': account} for account in account_order(config, time.time())]
