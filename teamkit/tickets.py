@@ -353,13 +353,15 @@ class TicketStore:
         self.db.execute('INSERT OR REPLACE INTO operation_attempts VALUES (?,?,?)',
                         (attempt['id'], attempt['ticket'], json.dumps(attempt)))
 
-    def reserve(self, ident, executor, policy, observation):
+    def reserve(self, ident, executor, policy, observation, *, before_reserve=None):
         from .resources import ResourceLedger
         ledger = ResourceLedger(self.db)
         with self.transaction():
             item = self.get(ident)
             if item['state'] != 'pending' or self.gate(ident):
                 raise ValueError('ticket is not eligible')
+            if before_reserve is not None:
+                before_reserve(item, executor)
             profile = executor['provider'] + '/' + executor['account']
             planned = (executor.get('new') is True and executor.get('pid') is None
                        and executor.get('terminal') is None)

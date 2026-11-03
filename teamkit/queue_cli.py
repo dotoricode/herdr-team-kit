@@ -93,6 +93,8 @@ def handle(args):
             current_config=load(args.config)
             if not enabled(current_config):
                 raise ValueError('new work is disabled by current operations policy')
+            from . import docsstaff
+            docsstaff.check(current_config, queue.db, queue.get(args.ticket), executor)
             native = runtime.native(executor, require_idle=False)
             work_gate(current_config,args.state,queue.get(args.ticket))
             if Path(args.config).read_bytes()!=config_bytes:

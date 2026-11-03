@@ -99,6 +99,12 @@ class NativeRuntime:
 
     def admit(self, ticket, executor):
         work_gate(self.config, self.state, ticket)
+        from . import docsstaff
+        queue = TicketStore(self.state, read_only=True)
+        try:
+            docsstaff.check(self.config, queue.db, ticket, executor)
+        finally:
+            queue.close()
         if ticket['role'] == 'ui':
             raise ValueError('UI work requires the existing personal Codex UI lab, test host and exclusive screen lease')
         if executor.get('new') is True:
@@ -123,6 +129,10 @@ class NativeRuntime:
         if role:
             self.native(executor)
             from .routing import execution_candidates
+            staff = docsstaff.policy(self.config, ticket)
+            if staff:
+                effective['execution_preference'] = dict(
+                    provider_order=[p.split('/')[0] for p in staff['profiles']], weekend_account_first=True)
             choices = execution_candidates(effective, task, role, time.time())
             expected = next((c for c in choices or [] if c['provider']==executor['provider']
                              and c['account']==executor['account']), None)
@@ -426,7 +436,11 @@ def tick(config_path, state, runtime=None):
                     executor = runtime.admit(ticket, candidate)
                     eligible_observed_at = time.time()
                     observation = runtime.observation()
-                    attempt = queue.reserve(ticket['id'], executor, policy(config), observation)
+                    from . import docsstaff
+                    def staff_guard(item, actor):
+                        docsstaff.check(config, queue.db, item, actor)
+                    attempt = queue.reserve(ticket['id'], executor, policy(config), observation,
+                                            before_reserve=staff_guard)
                 except (ValueError, KeyError, OSError, subprocess.SubprocessError, NativeError) as error:
                     reasons.append(str(error))
                     continue
@@ -445,6 +459,7 @@ def tick(config_path, state, runtime=None):
                                 or reserved['executor'] != executor or queue.gate(current['id'])):
                             raise ValueError('approval or attempt changed after reservation; no input sent')
                         work_gate(config,state,current)
+                        docsstaff.check(config, queue.db, current, executor)
                         store=Store(state)
                         try:
                             quota=cached_quota(config,store,executor['provider'],executor['account'])

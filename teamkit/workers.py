@@ -88,11 +88,13 @@ def _roots(config, ticket):
     return str(root), str(actor_root)
 
 
-def plans(config, state, ticket):
+def plans(config, state, ticket, *, reserved_owner=None):
     """Return eligible fresh workers without creating sessions or editing profiles."""
     if config.get('operations', {}).get('enabled') is not True:
         return []
     from .operations import work_gate
+    from . import docsstaff
+    staff = docsstaff.policy(config, ticket)
     work_gate(config, state, ticket)
     from .departments import execution_config
     config = execution_config(config)
@@ -110,7 +112,12 @@ def plans(config, state, ticket):
         role = execution_policy(config, task)
         if role['action'] != 'dispatch':
             return []
-        candidates = execution_candidates(config, task, role, time.time())
+        candidate_config = config
+        if staff:
+            # Supply the department's two providers through the existing model/constraint router.
+            candidate_config = {**config, 'execution_preference': {
+                'provider_order': [p.split('/')[0] for p in staff['profiles']], 'weekend_account_first': True}}
+        candidates = execution_candidates(candidate_config, task, role, time.time())
         if candidates is None:
             candidates = [{**role, 'account': account} for account in account_order(config, time.time())]
         from .__main__ import instructions_basis, git
@@ -119,6 +126,9 @@ def plans(config, state, ticket):
         result = []
         for candidate in candidates:
             provider, account = candidate['provider'], candidate['account']
+            if staff and (provider + '/' + account not in docsstaff.PROFILES
+                          or not docsstaff.available(config, queue.db, ticket, provider, reserved_owner)):
+                continue
             if provider + '/' + account not in ticket['profiles']:
                 continue
             pr = profile(config, provider, account, candidate)
@@ -219,7 +229,7 @@ def launch(config_path, state, ticket, attempt):
             raise ValueError('worker launch already attempted; preserve its known or uncertain native')
         if executor.get('new') is not True or executor.get('terminal') is not None or executor.get('pid') is not None:
             raise ValueError('worker launch requires an unlaunched reserved worker plan')
-        candidates = plans(config, state, item)
+        candidates = plans(config, state, item, reserved_owner=executor['owner'])
         if not any(all(candidate.get(key) == executor.get(key) for key in PLAN_FIELDS) for candidate in candidates):
             raise ValueError('worker role, profile, model, quota or approval changed before launch')
         if Path(config_path).read_bytes() != config_bytes:
