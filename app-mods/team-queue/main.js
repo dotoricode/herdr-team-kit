@@ -65,6 +65,7 @@ export default class TeamQueue extends View {
     this.filter = "active"; this.selected = this.options.item ?? null;
     this.revealed = this.role !== "detail";
     this.entering = new Set(); this.leaving = new Map(); this.minute = 0; this.again = false;
+    this.requestOpen = false; this.takenFlash = false;
     cx.spawn(async cx => {
       try {
         const local = this.options.local ?? appHome() + "/mods/" + MOD + "/local.json";
@@ -115,7 +116,11 @@ export default class TeamQueue extends View {
     for(const x of fresh) { this.entering.add(x.id); this.leaving.delete(x.id); }
     for(const x of gone) this.leaving.set(x.id, x);
     if(fresh.length) cx.timer.after(32, cx => { this.entering.clear(); cx.notify(); });
-    if(gone.length) cx.timer.after(280, cx => { for(const x of gone) this.leaving.delete(x.id); cx.notify(); });
+    if(gone.length) cx.timer.after(420, cx => { for(const x of gone) this.leaving.delete(x.id); cx.notify(); });
+    if(splitLane(before.jobs).taken.length !== splitLane(after.jobs).taken.length) {
+      this.takenFlash=true;
+      cx.timer.after(450, cx => { this.takenFlash=false; cx.notify(); });
+    }
   }
   async organize(cx, action) {
     if(this.actionFlight || this.executionFlight || this.pendingExecution || !this.config || !this.selected?.board_state) return;
@@ -217,42 +222,55 @@ export default class TeamQueue extends View {
     const lane=[...queued,...[...this.leaving.values()].filter(x=>!queuedIds.has(x.id))].sort(fifo);
     const status=this.stripStatus();
     const openList=()=>openOverlay({ mod:MOD, props:{ role:"list", local:this.options.local }, kind:"dialog", modal:false, frame:"none", width:0.72, height:0.82 });
-    const linkBtn=(id,label,cb)=>div().id(id).flex_none().whitespace_nowrap().px(8).h(20).flex().items_center().border_1().border_color(t.dim).text_size(12).text_color(t.foreground).cursor_pointer()
+    const linkBtn=(id,label,cb)=>div().id(id).flex_none().whitespace_nowrap().px(10).h(24).flex().items_center().border_1().border_color(t.dim).text_size(13).text_color(t.foreground).cursor_pointer()
       .hover(el=>el.bg(t.raised)).on_click((_e,c)=>{c.stop_propagation();cb(c);}).child(label);
+    // Motion is native only: width/left/opacity transitions and loops run without this script.
+    const CARD_W=320, RING=3, ARROW_W=26, SLOT_W=CARD_W+RING*2+ARROW_W, CARD_H=68;
     const card=(item,head)=>{
-      const leaving=!queuedIds.has(item.id), entering=this.entering.has(item.id);
+      const leaving=!queuedIds.has(item.id), entering=this.entering.has(item.id), hidden=leaving||entering;
       const alert=needsAttention(item), ts=arrival(item);
       const age=ts==null?"":elapsed(Math.max(0,now-ts))+" 대기";
-      return h_flex().id("queue-lane-"+item.id).flex_none().items_center().gap(4)
-        .opacity(leaving||entering?0:1).transition("opacity",{duration:200,easing:"ease-out"})
-        .child(v_flex().flex_none().w(196).h(50).px(8).py(5).gap(3).border_1().border_color(alert?t.blocked:head?t.accent:t.border).bg(t.surface)
-          .cursor_pointer().hover(el=>el.bg(t.raised)).on_click(()=>this.detail(item)).tooltip(item.title+(item.reason?" · "+item.reason:""))
-          .accessibility_label((head?"다음 배정 · ":"")+item.team_label+" · "+item.title+" · "+age)
-          .child(h_flex().min_w(0).items_center().gap(6).text_size(11)
-            .when(head,el=>el.child(div().flex_none().whitespace_nowrap().px(4).bg(t.accent).text_color(t.accent_foreground).font_semibold().child("다음")))
-            .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(shortTeam(item.team_label)))
-            .child(div().flex_none().whitespace_nowrap().text_color(alert?t.blocked:t.muted).child(age)))
-          .child(div().min_w(0).truncate().child(item.short_title ?? item.title)))
-        .child(div().flex_none().text_color(t.dim).child("›"));
+      return h_flex().id("queue-lane-"+item.id).flex_none().items_center().overflow_hidden()
+        .w(hidden?0:SLOT_W).opacity(hidden?0:1)
+        .transition("width",{duration:340,easing:"ease-out"}).transition("opacity",{duration:260,easing:"ease-out"})
+        .child(h_flex().relative().flex_none().items_center().w(SLOT_W).left(leaving?-60:entering?60:0)
+          .transition("left",{duration:340,easing:"ease-out"})
+          .child(v_flex().relative().flex_none().w(CARD_W+RING*2).h(CARD_H+RING*2).p(RING)
+            .when(head&&!alert,el=>el.child(div().absolute().left(0).top(0).right(0).bottom(0).border_2().border_color(t.accent)
+              .loop("opacity",{from:0.2,to:1,period:2200})))
+            .child(v_flex().flex_none().w(CARD_W).h(CARD_H).px(12).py(8).gap(4).justify_center().border_1().border_color(alert?t.blocked:head?t.accent:t.border).bg(t.surface)
+              .cursor_pointer().hover(el=>el.bg(t.raised)).on_click(()=>this.detail(item)).tooltip(item.title+(item.reason?" · "+item.reason:""))
+              .accessibility_label((head?"다음 배정 · ":"")+item.team_label+" · "+item.title+" · "+age)
+              .child(h_flex().min_w(0).items_center().gap(8).text_size(12)
+                .when(head,el=>el.child(div().flex_none().whitespace_nowrap().px(6).bg(t.accent).text_color(t.accent_foreground).font_semibold()
+                  .loop("opacity",{from:0.55,to:1,period:2200}).child("다음")))
+                .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(shortTeam(item.team_label)))
+                .child(div().flex_none().whitespace_nowrap().text_color(alert?t.blocked:t.muted).child(age)))
+              .child(div().min_w(0).truncate().text_size(16).font_semibold().child(item.short_title ?? item.title))))
+          .child(div().w(ARROW_W).flex_none().flex().justify_center().text_size(20).text_color(t.dim)
+            .loop("opacity",{from:0.25,to:1,period:2400}).child("›")));
     };
-    const end=(id,label)=>div().id(id).flex_none().whitespace_nowrap().text_size(11).text_color(t.muted).child(label);
     const live=lane.filter(x=>queuedIds.has(x.id));
-    const body=!this.data ? words(this.failure ? "최신 조회 확인 필요 · "+this.failure : "업무를 읽고 있습니다").text_size(12).text_color(this.failure?t.blocked:t.muted)
-      : !lane.length ? div().text_size(12).text_color(t.muted).child("대기 중인 업무 없음 · 들어오면 자동 배정됩니다")
+    const body=!this.data ? words(this.failure ? "최신 조회 확인 필요 · "+this.failure : "업무를 읽고 있습니다").text_size(14).text_color(this.failure?t.blocked:t.muted)
+      : !lane.length ? h_flex().id("queue-lane-empty").flex_none().items_center().gap(10).h(CARD_H).px(16).border_1().border_color(t.border).text_size(14).text_color(t.muted)
+          .loop("opacity",{from:0.55,to:1,period:3200}).child(div().text_color(t.dim).child("—")).child("대기 중인 업무 없음 · 들어오면 자동 배정됩니다")
       : h_flex().id("queue-lane-track").flex_1().min_w(0).items_center().overflow_x_scrollbar().children(lane.map(x=>card(x,x.id===live[0]?.id)));
-    return base().text_size(13)
-      .child(h_flex().flex_none().min_w(0).h(28).items_center().gap(10).px(12)
-        .child(div().flex_none().font_semibold().child("업무 큐 · 대기 "+queued.length))
-        .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(this.executionFailure?t.blocked:t.muted).child(status))
-        .child(div().id("queue-strip-taken").flex_none().whitespace_nowrap().text_size(12).text_color(attention?t.blocked:t.muted).cursor_pointer()
-          .on_click(()=>openList()).child("처리 중 "+taken.length+(attention?" · 확인 필요 "+attention:"")))
+    const end=(id,label,w)=>div().id(id).flex_none().whitespace_nowrap().text_size(14).text_color(t.muted).child(label);
+    return base().text_size(14)
+      .child(h_flex().flex_none().min_w(0).h(36).items_center().gap(12).px(14)
+        .child(div().flex_none().text_size(15).font_semibold().child("업무 큐 · 대기 "+queued.length))
+        .child(div().flex_1().min_w(0).truncate().text_size(13).text_color(this.executionFailure?t.blocked:t.muted).child(status))
+        .child(div().id("queue-strip-taken").relative().flex_none().whitespace_nowrap().px(8).py(2).text_size(13).text_color(attention?t.blocked:t.muted).cursor_pointer()
+          .on_click(()=>openList())
+          .child(div().absolute().left(0).top(0).right(0).bottom(0).bg(t.accent).opacity(this.takenFlash?0.35:0).transition("opacity",{duration:420,easing:"ease-out"}))
+          .child("처리 중 "+taken.length+(attention?" · 확인 필요 "+attention:"")))
         .when(Boolean(this.options.overlay),el=>el.child(linkBtn("queue-strip-close","닫기",()=>closeOverlay(this.options.overlay))))
         .child(linkBtn("queue-strip-sync",this.executionFlight?"확인 중…":"동기화",cx=>cx.spawn(async cx=>this.executeAction(cx,"sync"))))
         .child(linkBtn("queue-strip-all","전체 ›",()=>openList())))
-      .child(h_flex().flex_1().min_h(0).min_w(0).items_center().gap(8).px(12)
+      .child(h_flex().flex_1().min_h(0).min_w(0).items_center().gap(10).px(14)
         .child(end("queue-lane-exit","◀ 배정"))
         .child(body)
-        .child(end("queue-lane-entry","입구")));
+        .child(end("queue-lane-entry","‹ 입구").frames(["‹ 입구","‹‹ 입구","‹‹‹ 입구"],700)));
   }
   render(cx) {
     const t=theme();
@@ -308,7 +326,8 @@ export default class TeamQueue extends View {
       return shell
         .child(v_flex().flex_none().p(18).gap(10).border_b(1).border_color(t.border)
           .child(h_flex().min_w(0).items_start().gap(12)
-            .child(words(item.title).flex_1().text_size(19).font_semibold().line_height("25px"))
+            .child(div().id("queue-detail-title").flex_1().min_w(0).truncate().text_size(19).font_semibold().line_height("25px").tooltip(clean(item.title))
+              .child(clean(item.short_title ?? item.title).split("\n")[0]))
             .child(button("queue-detail-close","닫기",()=>closeOverlay(this.options.overlay),t)))
           .child(h_flex().flex_wrap().items_center().gap(7).child(badge(item.team_label,t.foreground,t)).child(badge(displayState,categoryColor(item.category,t),t))
             .when(Boolean(manualState(item)),el=>el.child(badge(manualState(item),t.muted,t)))
@@ -340,7 +359,19 @@ export default class TeamQueue extends View {
                 .when(candidate.eligible!==true,x=>x.child(words(candidate.reason||"현재 배정 불가").text_color(t.blocked)))
                 .when(this.candidates?.send_allowed===true&&candidate.eligible===true&&!this.pendingExecution,x=>x.child(button("queue-send-"+candidate.id,"이 담당자에게 전송",cx=>cx.spawn(async cx=>this.executeAction(cx,"send",candidate)),t))))))
             .child(this.actionStatus(t))))
-          .child(section("요청 내용",words(item.request || "저장된 요청 본문 없음").line_height("21px")))
+          .child(section("요청 내용",(()=>{
+            const text=item.request || "저장된 요청 본문 없음";
+            const lines=clean(text).split("\n");
+            const long=lines.length>4 || text.length>240;
+            const folded=long && !this.requestOpen;
+            return v_flex().gap(8)
+              .child(words(folded ? lines.slice(0,4).join("\n") : text).line_height("21px")
+                .when(folded,el=>el.max_h(90).overflow_hidden()))
+              .when(long,el=>el.child(div().id("queue-request-toggle").flex_none().self_start().whitespace_nowrap().px(10).h(24).flex().items_center().border_1().border_color(t.dim)
+                .text_size(12).text_color(t.foreground).cursor_pointer().hover(x=>x.bg(t.raised))
+                .on_click((_e,c)=>{c.stop_propagation();this.requestOpen=!this.requestOpen;c.notify();})
+                .child(folded ? "전체 보기 ("+lines.length+"줄)" : "접기")));
+          })()))
           .child(section("책임·연결",v_flex().gap(5).child(words("책임 조직: "+item.team_label+" · 실행 역할: "+(item.role??"기존 요청"))).child(words("원 지시: "+(item.origin_id??item.id)+" · 부모: "+(item.parent_id??"없음"))).child(words("다음 행동: "+(item.next_action??"담당자 확인")))))
           .when(Boolean(item.handoff),el => el.child(section("인계 상태",words((item.handoff?.phase ?? "미확인")+" · "+(item.handoff?.reason ?? "기록된 이유 없음")).text_size(12))))
           .child(section("기록",v_flex().gap(8).child(pair("등록",clock(item.created_at))).child(pair("최근 변경",clock(item.updated_at)))
