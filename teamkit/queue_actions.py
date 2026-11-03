@@ -151,7 +151,7 @@ def _reserve_issues(queue, config, runtime, ticket, executor, observation):
         from .admission import configure
         configure(preview.db, policy(config))
         preview.reserve(ticket['id'], executor, policy(config), observation(), expected_revision=digest(ticket),
-                        override=override)
+                        override=override, preview=True)
     except Exception as error:
         issues.append(dict(code='reservation', bypassable=False, reason=str(error)))
     finally:

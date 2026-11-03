@@ -193,7 +193,7 @@ def _fence(store, ticket, attempt):
         raise ValueError('worker attempt, owner, ticket or approval scope changed')
     lease=next((r for r in ResourceLedger._rows(store.db) if r['attempt']==attempt['id']),{})
     if (not lease.get('execution_reserved') or not lease.get('writes_held')
-            or lease.get('resources')!=execution_resources(item)):
+            or lease.get('resources')!=execution_resources(item, current)):
         raise ValueError('worker resource reservation differs from the host execution contract')
     return item, current
 
@@ -273,7 +273,7 @@ def launch(config_path, state, ticket, attempt):
             reservation = next((r for r in ResourceLedger._rows(store.db) if r['attempt'] == attempt['id']), None)
             if (not reservation or not reservation['execution_reserved'] or not reservation['writes_held']
                     or reservation['ticket'] != item['id']
-                    or reservation['resources']!=execution_resources(item)
+                    or reservation['resources']!=execution_resources(item, current)
                     or reservation['profile'] != executor['provider'] + '/' + executor['account']
                     or reservation.get('session') is not None):
                 raise ValueError('worker has no matching unbound execution reservation')
@@ -284,6 +284,8 @@ def launch(config_path, state, ticket, attempt):
                           runtime=dict(name=name, backend='core', resource_attempt=attempt['id'],
                                        profile_binding=executor['profile_binding'], identity_checked=False))
             store._save(staged, 'operation_actor_bound', {'attempt': attempt['id']})
+            if current.get('worktree_split'):
+                current['executor']['execution_root'] = current['worktree_split']['worktree']
             current['executor']['runtime'] = dict(staged['runtime'])
             current.update(launch_intent={'at': time.time(), 'task': staged['id'], 'owner': executor['owner']},
                            launch_phase='launching', model_startup_started_at=time.time())
@@ -318,11 +320,16 @@ def launch(config_path, state, ticket, attempt):
         spec['env'].update(TEAMKIT_TASK=executor['task'], TEAMKIT_OWNER=executor['owner'],
                            TEAMKIT_CONFIG=str(Path(config_path).resolve()), TEAMKIT_STATE=str(Path(state).resolve()))
         actor = store.get(executor['task'])
-        CoreRuntime().launch({**actor, 'root': executor['root']}, spec, actor['runtime']['name'], created, keep=False)
+        execution_root = current['executor'].get('execution_root', executor['root'])
+        CoreRuntime().launch({**actor, 'root': execution_root}, spec, actor['runtime']['name'], created, keep=False)
         fresh = _attempt(store, attempt['id'])
         executor = fresh['executor']
         actor = store.get(executor['task'])
         native = CoreRuntime(actor)._native(executor['runtime']['name'], ready=True)
+        if current.get('worktree_split'):
+            observed_cwd = (native.get('foreground') or {}).get('cwd') or native.get('cwd')
+            if not observed_cwd or Path(observed_cwd).resolve() != Path(execution_root).resolve():
+                raise ValueError('new worker did not start in the split worktree')
         hint = _hint(executor, native)
         with store.transaction():
             _, fresh = _fence(store, ticket, attempt)
