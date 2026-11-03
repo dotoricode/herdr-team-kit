@@ -420,6 +420,7 @@ export default class TeamQueue extends View {
               .when(otherTeam.length>0,x=>x.child(button("queue-other-team-toggle",(this.showOtherTeam?"다른 팀·임시 직원 숨기기 (":"다른 팀·임시 직원 보기 (")+otherTeam.length+")",cx=>{this.showOtherTeam=!this.showOtherTeam;cx.notify();},t)))
               .children(visibleCandidates.map(candidate=>v_flex().gap(4)
                 .child(words((/\)\s*$/.test(candidate.alias||"")?candidate.alias:(candidate.alias||"별명 미확인")+" ("+({personal:"개인",team:"팀"}[candidate.account]||"계정 미확인")+")")+(candidate.terminal?" · "+candidate.terminal:"")+" · "+(candidate.role||"역할 미확인")+(candidate.preferred===true?" · 지정 계정":"")))
+                .when(Boolean(candidate.split_preview),x=>x.child(words("분리 예정 · "+candidate.split_preview.worktree+" · 실제 생성 전").text_size(11).text_color(t.muted)))
                 .when(candidate.eligible!==true,x=>x.child(words("배정 불가 · "+(candidate.reason_ko||candidate.reason||"현재 배정 불가")).text_color(t.blocked)))
                 .when(candidate.eligible!==true&&Boolean(candidate.reason)&&Boolean(candidate.reason_ko)&&candidate.reason!==candidate.reason_ko,x=>x.child(words(candidate.reason).text_size(11).text_color(t.muted)))
                 .when(this.candidates?.send_allowed===true&&candidate.eligible===true&&!this.pendingExecution,x=>x.child(button("queue-send-"+candidate.id,"이 담당자에게 전송",cx=>cx.spawn(async cx=>this.executeAction(cx,"send",candidate)),t)))

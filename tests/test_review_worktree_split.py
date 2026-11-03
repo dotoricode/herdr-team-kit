@@ -178,6 +178,27 @@ class ReviewWorktreeSplitTest(unittest.TestCase):
         self.assertFalse(Path(attempt['worktree_split']['worktree']).exists())
         self.assertEqual('pending', self.queue.get('TWO')['state'])
 
+    def test_candidate_response_previews_split_without_git_mutation(self):
+        from teamkit.queue_actions import candidates
+        self.register('ONE', 'implementer', 'code')
+        self.register('TWO', 'reviewer', 'review')
+        self.reserve('ONE')
+        actor = dict(provider='codex', account='personal', owner='owner-TWO',
+                     terminal='tTWO', pid=103, root=str(self.root), product='fixture')
+        class Runtime:
+            def executors(self, ticket): return [actor]
+            def observation(self): return dict(observed_at=time.time(), complete=True, terminals=[])
+        config = {'operations': {'enabled':True, 'resource_policy': {'global_limit':8}}}
+        with patch('teamkit.queue_actions.load', return_value=config), \
+             patch('teamkit.queue_actions._send_reason', return_value=None), \
+             patch('teamkit.queue_actions.gate_issues', return_value=[]):
+            result = candidates(self.root/'config', self.root/'state.sqlite', 'TWO', Runtime())
+        choice = result['candidates'][0]
+        self.assertTrue(choice['eligible'])
+        self.assertTrue(choice['split_preview']['worktree'])
+        self.assertFalse(Path(choice['split_preview']['worktree']).exists())
+        self.assertEqual('pending', self.queue.get('TWO')['state'])
+
     def test_existing_executor_without_split_boundary_is_not_sent_or_created(self):
         self.register('ONE', 'implementer', 'code')
         self.register('TWO', 'reviewer', 'review')

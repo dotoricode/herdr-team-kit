@@ -79,10 +79,11 @@ function clickNotifies(x,key,label){const before=notifies;id(x,key).value.handle
   const direct=view('detail');
   assert(id(direct.render(cx),'queue-send-candidates'),'detail exposes direct recipient selection');
   calls=[];reply=async args=>({code:0,stdout:JSON.stringify({send_allowed:true,expected_ticket:'ticket-proof',candidates:[
-    {id:'available',alias:'Example worker',account:'personal',role:'implementation',eligible:true},
+    {id:'available',alias:'Example worker',account:'personal',role:'implementation',eligible:true,split_preview:{worktree:'/fixture/planned'}},
     {id:'busy',alias:'Busy worker',account:'team',role:'implementation',eligible:false,reason:'수신 확인 대기'}]})});
   await direct.loadCandidates(cx);
   assert(text(direct.render(cx)).includes('Example worker (개인) · implementation'));
+  assert(text(direct.render(cx)).includes('분리 예정 · /fixture/planned · 실제 생성 전'));
   assert(text(direct.render(cx)).includes('수신 확인 대기'));
   assert(!id(direct.render(cx),'queue-send-busy'),'ineligible candidate never has send callback');
   reply=async()=>new Promise(r=>resolve=r);

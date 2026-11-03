@@ -139,6 +139,7 @@ def _reserve_issues(queue, config, runtime, ticket, executor, observation):
     manual = executor.get('new') is not True
     override = dict(action='preview', reason='preview', original_reasons=[], bypassed=[]) if manual else None
     issues = []
+    split_preview = None
     preview = object.__new__(TicketStore)
     preview.db = sqlite3.connect(':memory:', isolation_level=None)
     preview.path, preview.clock = queue.path, time.time
@@ -150,15 +151,16 @@ def _reserve_issues(queue, config, runtime, ticket, executor, observation):
         preview.db.execute('DROP TABLE IF EXISTS queue_actions')
         from .admission import configure
         configure(preview.db, policy(config))
-        preview.reserve(ticket['id'], executor, policy(config), observation(), expected_revision=digest(ticket),
-                        override=override, preview=True)
+        attempt = preview.reserve(ticket['id'], executor, policy(config), observation(), expected_revision=digest(ticket),
+                                  override=override, preview=True)
+        split_preview = attempt.get('worktree_split')
     except Exception as error:
         issues.append(dict(code='reservation', bypassable=False, reason=str(error)))
     finally:
         preview.close()
     waived = [dict(code='capacity', bypassable=True, reason=text)
               for text in (override or {}).get('bypassed', [])]
-    return waived + issues
+    return waived + issues, split_preview
 
 
 def _with_korean(issues):
@@ -196,6 +198,7 @@ def candidates(config_path, state, ident, runtime=None):
                 observed.append(runtime.observation())
             return observed[0]
         for executor in executors:
+            split_preview = None
             seen = info.get(executor.get('terminal'), {})
             if executor.get('new') is not True and seen.get('state') not in (None, 'live'):
                 # A finished or removed terminal is not staff; keep why it was left out.
@@ -206,7 +209,8 @@ def candidates(config_path, state, ident, runtime=None):
             # priority send would ignore and which gates can never be ignored.
             try:
                 issues = gate_issues(runtime, ticket, executor)
-                issues += _reserve_issues(queue, config, runtime, ticket, executor, cached_observation)
+                reservation_issues, split_preview = _reserve_issues(queue, config, runtime, ticket, executor, cached_observation)
+                issues += reservation_issues
             except Exception as error:
                 issues = [dict(code='unclassified', bypassable=False, reason=str(error))]
             issues = _with_korean(issues)
@@ -225,6 +229,7 @@ def candidates(config_path, state, ident, runtime=None):
                 account=executor['account'], provider=executor['provider'], role=ticket['role'],
                 # The ticket's designated account is only listed first; it never changes eligibility.
                 preferred=preferred(ticket, executor['provider'], executor['account']),
+                split_preview=split_preview,
                 eligible=not issues, reason='; '.join(x['reason'] for x in issues),
                 reason_ko=' / '.join(x['reason_ko'] for x in issues), reasons=issues,
                 # Manual priority never creates a worker beyond capacity; only an existing terminal can be forced,
