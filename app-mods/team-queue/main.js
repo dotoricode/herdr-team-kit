@@ -219,6 +219,7 @@ export default class TeamQueue extends View {
     const {queued,taken}=splitLane(this.data?.jobs??[]);
     const attention=taken.filter(needsAttention).length;
     const queuedIds=new Set(queued.map(x=>x.id));
+    // lane: oldest (head) first, as splitLane defines it. Rendering reverses it: newest at the left entrance, head at the right exit.
     const lane=[...queued,...[...this.leaving.values()].filter(x=>!queuedIds.has(x.id))].sort(fifo);
     const status=this.stripStatus();
     const openList=()=>openOverlay({ mod:MOD, props:{ role:"list", local:this.options.local }, kind:"dialog", modal:false, frame:"none", width:0.72, height:0.82 });
@@ -233,7 +234,7 @@ export default class TeamQueue extends View {
       return h_flex().id("queue-lane-"+item.id).flex_none().items_center().overflow_hidden()
         .w(hidden?0:SLOT_W).opacity(hidden?0:1)
         .transition("width",{duration:340,easing:"ease-out"}).transition("opacity",{duration:260,easing:"ease-out"})
-        .child(h_flex().relative().flex_none().items_center().w(SLOT_W).left(leaving?-60:entering?60:0)
+        .child(h_flex().relative().flex_none().items_center().w(SLOT_W).left(leaving?60:entering?-60:0)
           .transition("left",{duration:340,easing:"ease-out"})
           .child(v_flex().relative().flex_none().w(CARD_W+RING*2).h(CARD_H+RING*2).p(RING)
             .when(head&&!alert,el=>el.child(div().absolute().left(0).top(0).right(0).bottom(0).border_2().border_color(t.accent)
@@ -254,7 +255,8 @@ export default class TeamQueue extends View {
     const body=!this.data ? words(this.failure ? "최신 조회 확인 필요 · "+this.failure : "업무를 읽고 있습니다").text_size(14).text_color(this.failure?t.blocked:t.muted)
       : !lane.length ? h_flex().id("queue-lane-empty").flex_none().items_center().gap(10).h(CARD_H).px(16).border_1().border_color(t.border).text_size(14).text_color(t.muted)
           .loop("opacity",{from:0.55,to:1,period:3200}).child(div().text_color(t.dim).child("—")).child("대기 중인 업무 없음 · 들어오면 자동 배정됩니다")
-      : h_flex().id("queue-lane-track").flex_1().min_w(0).items_center().overflow_x_scrollbar().children(lane.map(x=>card(x,x.id===live[0]?.id)));
+      : // justify_end + overflow_hidden: when full, the newest (left) cards are clipped so the head at the right stays visible.
+          h_flex().id("queue-lane-track").flex_1().min_w(0).items_center().justify_end().overflow_hidden().children([...lane].reverse().map(x=>card(x,x.id===live[0]?.id)));
     const end=(id,label,w)=>div().id(id).flex_none().whitespace_nowrap().text_size(14).text_color(t.muted).child(label);
     return base().text_size(14)
       .child(h_flex().flex_none().min_w(0).h(36).items_center().gap(12).px(14)
@@ -268,9 +270,9 @@ export default class TeamQueue extends View {
         .child(linkBtn("queue-strip-sync",this.executionFlight?"확인 중…":"동기화",cx=>cx.spawn(async cx=>this.executeAction(cx,"sync"))))
         .child(linkBtn("queue-strip-all","전체 ›",()=>openList())))
       .child(h_flex().flex_1().min_h(0).min_w(0).items_center().gap(10).px(14)
-        .child(end("queue-lane-exit","◀ 배정"))
+        .child(end("queue-lane-entry","입구 ›").frames(["입구 ›","입구 ››","입구 ›››"],700))
         .child(body)
-        .child(end("queue-lane-entry","‹ 입구").frames(["‹ 입구","‹‹ 입구","‹‹‹ 입구"],700)));
+        .child(end("queue-lane-exit","배정 ▶")));
   }
   render(cx) {
     const t=theme();
