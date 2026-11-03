@@ -570,6 +570,28 @@ def reconcile(queue, runtime, config=None):
     for ticket in queue.list():
         if ticket['role']=='ui':
             continue  # Only the official UI lab result adapter can validate UI work.
+        if ticket['state'] == 'waiting_children':
+            blocked_children = [queue.get(ident) for ident in queue.incomplete_children(ticket['id'])]
+            blocked_children = [child for child in blocked_children if child.get('intervention')]
+            if blocked_children:
+                child = blocked_children[0]
+                queue.request_intervention(ticket['id'], ticket['attempt'], 'child_blocked',
+                    child['id'] + ': ' + child['intervention']['reason'])
+            continue
+        if ticket['state'] == 'running':
+            attempt = queue.attempt(ticket['attempt'])
+            if not attempt.get('submission') and attempt.get('actor_receipt'):
+                try:
+                    native = runtime.native(attempt['executor'])
+                    receipt = attempt['actor_receipt']
+                    if (native.get('status') in ('idle','done')
+                            and type(native.get('turn')) is int and type(receipt.get('turn')) is int
+                            and native['turn'] > receipt['turn']):
+                        queue.request_intervention(ticket['id'], attempt['id'], 'missing_result',
+                            '실행 턴이 끝났지만 결과 제출이 없습니다. 기존 쓰기 중단 확인과 재배정이 필요합니다')
+                except (ValueError, OSError, NativeError):
+                    pass
+            continue
         if ticket['state'] == 'waiting_children_stop':
             attempt = queue.attempt(ticket['attempt'])
             try:
@@ -587,6 +609,11 @@ def reconcile(queue, runtime, config=None):
                 native = runtime.native(attempt['executor'])
                 queue.record_stop(ticket['id'], attempt['id'], native)
                 attempt = queue.attempt(attempt['id'])
+            submission = attempt.get('submission') or {}
+            if submission.get('status') in ('blocked','incomplete'):
+                queue.request_intervention(ticket['id'], attempt['id'], 'blocked_result',
+                    submission.get('reason') or '담당자가 미완료·차단 결과를 제출했습니다. 운영 확인이 필요합니다')
+                continue
             proof = verify(ticket, attempt, config, queue.path)
             if not all(proof['checks'].values()):
                 failed = [name for name, passed in proof['checks'].items() if not passed]

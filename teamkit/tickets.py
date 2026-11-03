@@ -851,6 +851,48 @@ class TicketStore:
         self.resume_parents()
         return item
 
+    def request_intervention(self, ident, attempt_id, kind, reason):
+        """Preserve the actor and leases until an explicit, fenced recovery."""
+        with self.transaction():
+            item = self.get(ident)
+            if item.get('attempt') != attempt_id:
+                raise ValueError('stale intervention attempt')
+            intervention = dict(attempt=attempt_id, kind=kind, reason=reason,
+                question='담당자가 작업을 마쳤지만 완료 결과가 없습니다. 쓰기 중단을 확인하고 다른 담당자에게 이어 맡길까요?',
+                next_action='운영본부가 기존 실행·쓰기 중단을 확인한 뒤 queue recover로 원 업무를 재배정합니다')
+            if kind == 'child_blocked':
+                intervention.update(question='하위 작업이 멈춰 원 업무가 대기 중입니다. 하위 작업의 종료 확인과 재배정이 필요합니다.',
+                    next_action='운영본부가 표시된 하위 작업의 기존 실행·쓰기 중단을 확인하고 해당 하위 작업을 복구합니다')
+            if item.get('intervention') != intervention:
+                item.update(intervention=intervention, reason=reason, next_action=intervention['next_action'])
+                self._save(item, 'intervention_required', intervention)
+        return item
+
+    def recover_intervention(self, ident, attempt_id, native, writer_stopped, reason):
+        from .resources import ResourceLedger
+        with self.transaction():
+            item = self.get(ident)
+            attempt = self.attempt(attempt_id)
+            actor = attempt['executor']
+            receipt = attempt.get('actor_receipt') or {}
+            if (item.get('attempt') != attempt_id or not item.get('intervention')
+                    or item['state'] not in ('running', 'awaiting_verification')
+                    or self.incomplete_children(ident) or writer_stopped is not True
+                    or not isinstance(reason, str) or not reason.strip()
+                    or any(native.get(k) != actor.get(k) for k in ('terminal','pid','owner'))
+                    or native.get('status') not in ('idle','done')
+                    or type(native.get('turn')) is not int or type(receipt.get('turn')) is not int
+                    or native['turn'] <= receipt['turn']):
+                raise ValueError('recovery requires current intervention, fenced completed turn and explicit stopped-writer confirmation')
+            ResourceLedger(self.db).release_in_transaction(self.db,attempt_id,True,True,True)
+            attempt.update(phase='abandoned', recovery=dict(reason=reason,native=native,writer_stopped=True,at=self.clock()))
+            self._save_attempt(attempt)
+            item.pop('intervention', None)
+            item.update(state='pending', attempt=None, reason='',next_action='assign available executor after recovery')
+            self._save(item,'execution_recovered',dict(attempt=attempt_id,reason=reason))
+        self.notify()
+        return item
+
     def block(self, ident, reason):
         with self.transaction():
             item = self.get(ident)

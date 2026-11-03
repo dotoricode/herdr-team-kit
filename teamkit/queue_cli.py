@@ -11,7 +11,7 @@ from .tickets import TicketStore
 def parser(commands):
     item = commands.add_parser('queue')
     item.add_argument('action', choices=('create', 'approve', 'show', 'status', 'submit', 'receipt',
-                                        'wait-children', 'dependencies', 'tick', 'intake', 'classify', 'approval-template', 'organize', 'dismiss', 'candidates', 'send', 'sync', 'action-status'))
+                                        'recover', 'wait-children', 'dependencies', 'tick', 'intake', 'classify', 'approval-template', 'organize', 'dismiss', 'candidates', 'send', 'sync', 'action-status'))
     item.add_argument('ticket', nargs='?')
     item.add_argument('--ticket-file')
     item.add_argument('--key')
@@ -21,6 +21,7 @@ def parser(commands):
     item.add_argument('--owner')
     item.add_argument('--result-file')
     item.add_argument('--depends-on', action='append', default=[])
+    item.add_argument('--writer-stopped', action='store_true')
     item.add_argument('--release-writes', action='store_true')
     item.add_argument('--board', action='store_true')
     item.add_argument('--board-action', choices=('waiting','progress','done','archive','restore'))
@@ -96,6 +97,11 @@ def handle(args):
             return queue.get(args.ticket)
         attempt = queue.attempt(args.attempt)
         executor = attempt['executor']
+        if args.action == 'recover':
+            if not args.user_approved or not args.writer_stopped or not args.reason:
+                raise ValueError('operator-approved recovery requires explicit stopped-writer confirmation and reason')
+            runtime = NativeRuntime(load(args.config), args.state)
+            return queue.recover_intervention(args.ticket,args.attempt,runtime.native(executor),True,args.reason)
         if os.environ.get('HC_TERMINAL_ID') != executor['terminal'] or args.owner != executor['owner']:
             raise ValueError('only the actual current execution terminal may report this attempt')
         runtime = NativeRuntime(load(args.config), args.state)
