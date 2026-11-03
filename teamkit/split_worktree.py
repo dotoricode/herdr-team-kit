@@ -37,7 +37,7 @@ def _existing_parent(path):
     return path if path.is_dir() else path.parent
 
 
-def plan(ticket_id, resources, destination_root):
+def plan(ticket_id, resources, destination_root, *, base=None, ref=None):
     """Build a read-only immutable proposal; every mapped path belongs to one repo."""
     from .resources import normalize_resources
     if not isinstance(ticket_id, str) or not _TICKET.fullmatch(ticket_id):
@@ -53,9 +53,18 @@ def plan(ticket_id, resources, destination_root):
             source = root
         if root != source:
             raise ValueError('all split paths must be in the same git worktree')
-    base = _git(source, 'rev-parse', '--verify', 'HEAD^{commit}').lower()
+    if base is not None and (not isinstance(base, str) or not _SHA.fullmatch(base)):
+        raise ValueError('git base is not a full commit identity')
+    if ref is not None and (base is not None or not isinstance(ref, str)
+                            or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,199}', ref)
+                            or '..' in ref or ref.endswith(('.', '/'))):
+        raise ValueError('invalid explicit git base reference')
+    expected_base = base
+    base = _git(source, 'rev-parse', '--verify', '--end-of-options', (base or ref or 'HEAD') + '^{commit}').lower()
     if not _SHA.fullmatch(base):
         raise ValueError('git HEAD is not a full commit identity')
+    if expected_base is not None and base != expected_base:
+        raise ValueError('git base changed')
     # Use a hash rather than an untrusted path component or a globally shared ticket ID.
     token = hashlib.sha256((str(source)+'\0'+ticket_id+'\0'+base).encode()).hexdigest()[:24]
     branch = 'teamkit/split-' + token
@@ -104,7 +113,7 @@ def create(intent):
                 raise ValueError('mapped path escaped the intended worktree')
             value['name'] = str(source / path.relative_to(target))
         paths.append(value)
-    expected = plan(intent['ticket'], paths, target.parent)
+    expected = plan(intent['ticket'], paths, target.parent, base=intent['base'])
     if expected != intent:
         raise ValueError('worktree intent no longer matches source HEAD or derived paths')
     if target.exists() or target.is_symlink():

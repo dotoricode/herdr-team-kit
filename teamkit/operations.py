@@ -438,6 +438,8 @@ def prompt(config_path, state, ticket, attempt):
     contract = {k: ticket[k] for k in ('id', 'origin_id', 'parent_id', 'responsible', 'role',
                                       'kind', 'goal', 'completion', 'checks', 'scope', 'approval',
                                       'resources', 'profiles')}
+    if ticket.get('git_base'):
+        contract['git_base'] = ticket['git_base']
     split_instruction = ''
     if split:
         from .split_worktree import mapped_scope
@@ -445,6 +447,7 @@ def prompt(config_path, state, ticket, attempt):
         contract['resources'] = split['resources']
         contract['original_scope'] = ticket['scope']
         contract['original_resources'] = ticket['resources']
+        contract['split_base'] = split['base']
         split_instruction = ('이 업무는 분리 작업 폴더 ' + split['worktree'] +
                              '에서 작업하고 결과물도 해당 승인 경로 안에 쓰세요. 원본 경로는 작업 대상으로 사용하지 마세요.\n')
     from .protocol import tool_permission_hint, leader_guidance
@@ -557,7 +560,7 @@ def followup(queue, ticket, attempt, relation, goal, *, reviewer=False):
                 parent_attempt=attempt['id'])
     if ticket.get('workflow_ref'):
         spec['workflow_ref'] = ticket['workflow_ref']
-    for field in ('execution_constraint', 'classification', 'user_decision', 'failures'):
+    for field in ('execution_constraint', 'classification', 'user_decision', 'failures', 'git_base'):
         if field in ticket:
             spec[field] = ticket[field]
     return queue.enqueue(spec, key)

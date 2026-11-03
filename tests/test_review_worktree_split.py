@@ -31,14 +31,14 @@ class ReviewWorktreeSplitTest(unittest.TestCase):
         self.queue = TicketStore(self.root / 'state.sqlite')
         self.addCleanup(self.queue.close)
 
-    def register(self, ident, role, kind, root=None):
+    def register(self, ident, role, kind, root=None, **extra):
         root = root or self.repo
         return self.queue.enqueue(dict(id=ident, product='fixture', role=role, kind=kind,
             goal='Write bounded fixture output', completion=['output'], checks=['report'],
             profiles=['codex/personal'], dependencies=[],
             resources=[dict(kind='path', name=str(root / 'report'), mode='write')],
             scope=dict(paths=[str(root)], actions=['read', 'write'], data=['fixture']),
-            approval=dict(state='approved', reference=str(self.approval))), ident, user_approved=True)
+            approval=dict(state='approved', reference=str(self.approval)), **extra), ident, user_approved=True)
 
     def reserve(self, ident):
         return self.queue.reserve(ident, dict(provider='codex', account='personal', owner='owner-'+ident,
@@ -57,6 +57,18 @@ class ReviewWorktreeSplitTest(unittest.TestCase):
         self.assertEqual(original['scope'], self.queue.get('TWO')['scope'])
         lease = next(x for x in ResourceLedger._rows(self.queue.db) if x['attempt'] == attempt['id'])
         self.assertIn(dict(kind='path', name=str(Path(split['worktree'])/'report'), mode='write'), lease['resources'])
+
+    def test_explicit_git_base_is_used_and_pinned(self):
+        old = subprocess.check_output(['git','-C',str(self.repo),'rev-parse','HEAD'], text=True).strip()
+        (self.repo/'README').write_text('newer')
+        subprocess.run(['git','-C',str(self.repo),'add','README'],check=True)
+        subprocess.run(['git','-C',str(self.repo),'commit','-qm','newer'],check=True)
+        self.register('ONE', 'implementer', 'code')
+        self.register('TWO', 'reviewer', 'review', git_base=old)
+        self.reserve('ONE')
+        split = self.reserve('TWO')['worktree_split']
+        self.assertEqual(old, split['base'])
+        self.assertEqual('fixture\n', (Path(split['worktree'])/'README').read_text())
 
     def test_non_conflicting_document_stays_in_original_path(self):
         original = self.register('ONE', 'documenter', 'document')
@@ -112,6 +124,25 @@ class ReviewWorktreeSplitTest(unittest.TestCase):
         self.assertEqual('planned', phase)
         self.assertEqual(intent, self.queue.materialize_split_intent('TWO'))
         self.assertEqual('preserve', (Path(intent['worktree'])/'keep').read_text())
+
+    def test_resumed_ticket_keeps_split_after_original_conflict_ends(self):
+        self.register('ONE', 'implementer', 'code')
+        self.register('TWO', 'reviewer', 'review')
+        first = self.reserve('ONE')
+        split_attempt = self.reserve('TWO')
+        target = Path(split_attempt['worktree_split']['worktree'])
+        (target/'report').write_text('preserve')
+        ledger = ResourceLedger(self.queue.db)
+        for ident in (first['id'], split_attempt['id']):
+            ledger.release(ident, execution_stopped=True, release_writes=True, writer_stopped=True)
+        item = self.queue.get('TWO')
+        item.update(state='pending', attempt=None)
+        self.queue._save(item, 'fixture_resume')
+        resumed = self.reserve('TWO')
+        self.assertEqual(split_attempt['worktree_split'], resumed['worktree_split'])
+        self.assertEqual('preserve', (target/'report').read_text())
+        reservation = next(r for r in ResourceLedger._rows(self.queue.db) if r['attempt'] == resumed['id'])
+        self.assertEqual(str(target/'report'), reservation['resources'][0]['name'])
 
     def test_conflicting_code_still_waits(self):
         self.register('ONE', 'implementer', 'code')
@@ -202,6 +233,11 @@ class ReviewWorktreeSplitTest(unittest.TestCase):
         self.assertEqual(attempt['worktree_split'], child['inherited_worktree'])
         self.assertEqual([attempt['worktree_split']['worktree']], child['scope']['paths'])
         self.assertEqual(str(report), child['resources'][0]['name'])
+        grandchild = followup(self.queue, child, {'id':'fixture-attempt'}, 'defect', 'correct again')
+        self.assertEqual(attempt['worktree_split'], grandchild['inherited_worktree'])
+        from teamkit.workers import _roots
+        root, _ = _roots({'teams':{'fixture':{'root':str(self.repo)}}}, grandchild, self.queue)
+        self.assertEqual(attempt['worktree_split']['worktree'], root)
 
 
 if __name__ == '__main__':

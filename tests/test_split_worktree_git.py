@@ -59,6 +59,23 @@ class SplitWorktreeGitTest(unittest.TestCase):
             create(proposal)
         self.assertEqual('preserve', (target/'keep').read_text())
 
+    def test_original_head_advance_does_not_invalidate_persisted_intent(self):
+        proposal = plan('TICKET-1', self.resources, self.root / 'isolated')
+        create(proposal)
+        (self.repo/'doc'/'file').write_text('new source commit')
+        git(self.repo, 'add', 'doc/file')
+        git(self.repo, 'commit', '-qm', 'source advanced')
+        self.assertEqual(proposal, create(proposal))
+        self.assertEqual('base', (Path(proposal['worktree'])/'doc'/'file').read_text())
+
+    def test_intent_created_before_head_advance_uses_its_pinned_base(self):
+        proposal = plan('TICKET-1', self.resources, self.root / 'isolated')
+        (self.repo/'doc'/'file').write_text('new source commit')
+        git(self.repo, 'add', 'doc/file')
+        git(self.repo, 'commit', '-qm', 'source advanced')
+        self.assertEqual(proposal, create(proposal))
+        self.assertEqual(proposal['base'], git(proposal['worktree'], 'rev-parse', 'HEAD'))
+
     def test_untracked_write_destination_cannot_escape_source(self):
         outside = self.root/'outside'
         outside.mkdir()

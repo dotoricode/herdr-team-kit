@@ -34,7 +34,7 @@ PLAN_FIELDS = ('provider', 'account', 'model', 'effort', 'product', 'roles', 'ro
 def _ticket_signature(ticket):
     fields = ('id', 'origin_id', 'parent_id', 'product', 'role', 'kind', 'goal', 'completion',
               'checks', 'scope', 'approval', 'profiles', 'resources', 'workflow_ref',
-              *POLICY_FIELDS)
+              'git_base', *POLICY_FIELDS)
     return digest({key: ticket.get(key) for key in fields})
 
 
@@ -102,7 +102,7 @@ def _roots(config, ticket, queue=None):
         if not inherited or queue is None or not ticket.get('parent_id'):
             raise ValueError('worker root is outside configured product/shared roots')
         parent = queue.get(ticket['parent_id'])
-        if parent.get('worktree_split') != inherited or not within(str(root), [inherited['worktree']]):
+        if (parent.get('worktree_split') or parent.get('inherited_worktree')) != inherited or not within(str(root), [inherited['worktree']]):
             raise ValueError('worker root is outside its parent split worktree')
         from .split_worktree import _check_existing
         _check_existing(inherited)

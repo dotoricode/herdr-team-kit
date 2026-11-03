@@ -188,6 +188,10 @@ class TicketStore:
             raise ValueError('ticket identity and idempotency key required')
         if spec.get('role') not in ROLES or spec.get('kind') not in KINDS:
             raise ValueError('explicit ticket role and kind required')
+        if 'git_base' in spec and (not isinstance(spec['git_base'], str)
+                or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,199}', spec['git_base'])
+                or '..' in spec['git_base'] or spec['git_base'].endswith(('.', '/'))):
+            raise ValueError('invalid explicit git base reference')
         for field in ('product', 'goal'):
             if not isinstance(spec.get(field), str) or not spec[field].strip():
                 raise ValueError(field + ' required')
@@ -258,7 +262,7 @@ class TicketStore:
                 narrowed = narrowed and (same_verifiers or safe_review)
                 # These fields affect routing/approval, rather than the requested
                 # subtask. Descendants cannot weaken a parent's execution policy.
-                for field in ('execution_constraint', 'classification', 'user_decision', 'workflow_ref', 'failures'):
+                for field in ('execution_constraint', 'classification', 'user_decision', 'workflow_ref', 'failures', 'git_base'):
                     if spec.get(field) != parent.get(field):
                         narrowed = False
                 for resource in resources:
@@ -270,8 +274,9 @@ class TicketStore:
                 if spec.get('approval', {}).get('reference') not in (None, parent['approval'].get('reference')):
                     raise ValueError('child approval must be explicitly granted as a new instruction')
                 origin = parent['origin_id']
-                if parent.get('worktree_split') and narrowed:
-                    spec['inherited_worktree'] = parent['worktree_split']
+                inherited = parent.get('worktree_split') or parent.get('inherited_worktree')
+                if inherited and narrowed:
+                    spec['inherited_worktree'] = inherited
             else:
                 approval = spec.get('approval', {'state': 'pending'})
                 if not user_approved:
@@ -383,7 +388,7 @@ class TicketStore:
     @staticmethod
     def _split_contract(ticket):
         return digest({key: ticket.get(key) for key in
-                       ('id', 'role', 'kind', 'resources', 'scope', 'approval', 'workflow_ref')})
+                       ('id', 'role', 'kind', 'resources', 'scope', 'approval', 'workflow_ref', 'git_base')})
 
     def _split_conflict(self, item):
         """Only a conflicting path write justifies creating a separate checkout."""
@@ -426,7 +431,8 @@ class TicketStore:
                 return json.loads(old[1])
             if not self._split_conflict(item):
                 raise ValueError('no conflicting path write')
-            intent = plan(ident, item['resources'], self.path.resolve().parent / 'operation-worktrees')
+            intent = plan(ident, item['resources'], self.path.resolve().parent / 'operation-worktrees',
+                          ref=item.get('git_base'))
             self.db.execute('INSERT INTO operation_worktree_intents VALUES (?,?,?,?)',
                             (ident, contract, json.dumps(intent, sort_keys=True), 'planned'))
             return intent
@@ -451,6 +457,16 @@ class TicketStore:
     def reserve(self, ident, executor, policy, observation, expected_revision=None, manual_action=None, *, before_reserve=None,
                 override=None, preview=False):
         from .resources import ResourceUnavailable
+        existing = self.get(ident).get('worktree_split')
+        if existing:
+            if executor.get('new') is not True and (not executor.get('root') or
+                    not within(existing['worktree'], [executor['root']])):
+                raise ValueError('executor working boundary does not cover the split worktree')
+            if not preview and self.materialize_split_intent(ident) != existing:
+                raise ValueError('persisted split differs from ticket')
+            return self._reserve(ident, executor, policy, observation, expected_revision, manual_action,
+                                 before_reserve=before_reserve, override=override, split=existing,
+                                 preview=preview, reuse=True)
         try:
             return self._reserve(ident, executor, policy, observation, expected_revision, manual_action,
                                  before_reserve=before_reserve, override=override)
@@ -465,7 +481,8 @@ class TicketStore:
                 from .split_worktree import plan
                 if not self._split_conflict(item):
                     raise
-                intent = plan(ident, item['resources'], self.path.resolve().parent / 'operation-worktrees')
+                intent = plan(ident, item['resources'], self.path.resolve().parent / 'operation-worktrees',
+                              ref=item.get('git_base'))
             else:
                 intent = self.record_split_intent(ident)
             if executor.get('new') is not True and (not executor.get('root') or
@@ -477,7 +494,7 @@ class TicketStore:
                                  before_reserve=before_reserve, override=override, split=intent, preview=preview)
 
     def _reserve(self, ident, executor, policy, observation, expected_revision=None, manual_action=None, *, before_reserve=None,
-                 override=None, split=None, preview=False):
+                 override=None, split=None, preview=False, reuse=False):
         from .resources import ResourceLedger
         ledger = ResourceLedger(self.db)
         with self.transaction():
@@ -508,10 +525,13 @@ class TicketStore:
             if override:
                 attempt['override'] = override
             constraints,resources=_resource_contract(item)
+            self._continue_own_writes(item, attempt, executor, observation)
             if split is not None:
                 from .resources import normalize_resources
                 from .split_worktree import create
-                if not self._split_conflict(item):
+                if reuse and item.get('worktree_split') != split:
+                    raise ValueError('persisted split differs from ticket')
+                if not reuse and not self._split_conflict(item):
                     raise ValueError('conflicting path write no longer exists')
                 if not preview:
                     row = self.db.execute('SELECT contract,body,phase FROM operation_worktree_intents WHERE ticket=?',
@@ -530,7 +550,6 @@ class TicketStore:
                 resources = normalize_resources([*split['resources'], *constraints])
                 attempt['worktree_split'] = split
             attempt['resource_constraints']=constraints
-            self._continue_own_writes(item, attempt, executor, observation)
             from .admission import reserve_in_transaction
             reserve_in_transaction(self.db, attempt['id'], ident, profile,
                                    resources, policy, observation,
