@@ -116,6 +116,10 @@ class NativeRuntime:
         result.extend(self.config.get('operations', {}).get('executors', []))
         from .staffbootstrap import executors as staff_executors
         result.extend(staff_executors(self.state))
+        from .workspace_sessions import executors as workspace_executors
+        registered=workspace_executors(self.state)
+        addresses={x['terminal'] for x in registered}
+        result=[x for x in result if x['terminal'] not in addresses]+registered
         if ticket is not None:
             queue = TicketStore(self.state, read_only=True)
             try:
@@ -821,6 +825,7 @@ def view(config_path, state):
             capacity = {'available': None, 'reason': str(error), 'outside_controlled': False}
         legacy = [dict(id=x['id'], origin_id=x.get('work_id') or x['id'],
                        source='legacy', product=x['team'], state=x['phase'],
+                       error_code=x.get('error_code'), error_stage=x.get('error_stage'), error_type=x.get('error_type'),
                        goal=x.get('message') or x.get('request') or x.get('work_id') or x['id'],
                        created_at=x.get('created_at'), updated_at=x.get('updated_at'),
                        executor=x.get('receiver') or {},
@@ -834,6 +839,9 @@ def view(config_path, state):
         quotas = {p+'/'+a: cached_quota(config, reader, p, a) for p in config['profiles']
                   for a in config['profiles'][p]}
         tasks = [json.loads(row[0]) for row in queue.db.execute('SELECT body FROM tasks')]
+        from .workspace_sessions import executors as workspace_executors
+        tasks.extend(dict(id=a['task'], owner=a['owner'], provider=a['provider'],
+                          account=a['account'], runtime=a['runtime']) for a in workspace_executors(state))
         quota_fields = ('source','observed_at','unavailable','five_hour','weekly','not_applicable')
         profiles = {key:{**{k:value.get(k) for k in quota_fields if k in (value or {})},
                          'eligible':eligible(value,time.time(),config['quota_ttl_seconds'])} for key,value in quotas.items()}

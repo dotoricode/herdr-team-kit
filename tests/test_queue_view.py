@@ -115,6 +115,17 @@ class QueueViewTest(unittest.TestCase):
             self.assertTrue(board('config','state')['jobs'][0]['receiver_matches_current'])
 
 
+    def test_preparation_failure_is_not_displayed_as_unknown_delivery(self):
+        ticket=dict(id='OLD', product='example', state='uncertain', source='legacy',
+                    error_code='preparation_failed', error_stage='pending', error_type='RuntimeError')
+        result=self.project(ticket)['jobs'][0]
+        self.assertEqual(result['state_label'],'전달 전 준비 실패')
+        self.assertIn('실제 수신 기록이 없습니다',result['reason'])
+        self.assertIn('같은 요청',result['next_action'])
+        result=self.project(dict(ticket,executor={'terminal':'t1'}))['jobs'][0]
+        self.assertNotEqual(result['state_label'],'전달 전 준비 실패')
+
+
 class QueueShortTitleTest(unittest.TestCase):
     def setUp(self):
         for target in ('subprocess.run', 'subprocess.Popen', 'subprocess.call', 'subprocess.check_output',
@@ -172,3 +183,4 @@ class QueueShortTitleTest(unittest.TestCase):
         self.assertEqual(self.job('   ')['short_title'], '첨부된 요청')
         secret = self.job('api_key=abc123secret 로 서버 점검을 요청한다.')['short_title']
         self.assertNotIn('abc123secret', secret)
+
