@@ -113,7 +113,8 @@ def targets(config, state, starting=False):
             observer=(dispatch['enabled'] and dispatch['tasks'].get(task['team'])==task['id']
                       and task.get('team_dispatch_team')==task['team']
                       and task.get('execution_constraint')=={'provider':'codex','account':'personal'})
-            if (session_pool.enabled(config) and task.get('role')=='leader' and not task.get('work_id')
+            if (session_pool.enabled(config) and task.get('team') in config['teams']
+                    and task.get('role')=='leader' and not task.get('work_id')
                     and task.get('classification',{}).get('kind','general')=='general'
                     and task['id']!=session_pool.task_id(config,task['team']) and not observer):
                 continue
