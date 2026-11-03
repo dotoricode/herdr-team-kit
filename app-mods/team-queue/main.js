@@ -257,15 +257,16 @@ export default class TeamQueue extends View {
           .loop("opacity",{from:0.55,to:1,period:3200}).child(div().text_color(t.dim).child("—")).child("대기 중인 업무 없음 · 들어오면 자동 배정됩니다"))
       : // justify_end + overflow_hidden: when full, the newest (left) cards are clipped so the head at the right stays visible.
           h_flex().id("queue-lane-track").flex_1().min_w(0).items_center().justify_end().overflow_hidden().children([...lane].reverse().map(x=>card(x,x.id===live[0]?.id)));
-    const end=(id,label,w)=>div().id(id).flex_none().whitespace_nowrap().text_size(14).text_color(t.muted).bg(t.background).px(4).child(label);
+    const end=(id,label,w)=>div().id(id).flex_none().whitespace_nowrap().text_size(14).text_color(t.muted).bg(t.background).px(3).child(label);
     // Rail: a 2px line at the lane's vertical centre behind entry, cards and exit (all opaque), with dots shifted rightwards by native text frames.
-    const RAIL_UNIT=16, RAIL_LEN=60;
-    const railUnit="•"+" ".repeat(RAIL_UNIT-1);
+    // loop() only swings there-and-back (gpui-kit.d.ts LoopPolicy), so one-way flow uses fine native text frames: 4px steps every 64ms, 40-step cycle = 2.56s.
+    const RAIL_UNIT=40, RAIL_LEN=16;
+    const railUnit="••"+" ".repeat(RAIL_UNIT-2);
     const railFrames=Array.from({length:RAIL_UNIT},(_,k)=>(" ".repeat(k)+railUnit.repeat(RAIL_LEN)).slice(0,RAIL_UNIT*RAIL_LEN));
     const fill=()=>div().absolute().left(0).top(0).right(0).bottom(0).flex().items_center().overflow_hidden();
     const rail=fill().id("queue-lane-rail")
       .child(div().flex_1().h(2).bg(t.border))
-      .child(fill().child(div().flex_none().whitespace_nowrap().text_size(16).text_color(t.muted).frames(railFrames,220)));
+      .child(fill().child(div().flex_none().whitespace_nowrap().text_size(8).text_color(t.muted).frames(railFrames,64)));
     return base().text_size(14)
       .child(h_flex().flex_none().min_w(0).h(36).items_center().gap(12).px(14)
         .child(div().flex_none().text_size(15).font_semibold().child("업무 큐 · 대기 "+queued.length))
@@ -277,7 +278,7 @@ export default class TeamQueue extends View {
         .when(Boolean(this.options.overlay),el=>el.child(linkBtn("queue-strip-close","닫기",()=>closeOverlay(this.options.overlay))))
         .child(linkBtn("queue-strip-sync",this.executionFlight?"확인 중…":"동기화",cx=>cx.spawn(async cx=>this.executeAction(cx,"sync"))))
         .child(linkBtn("queue-strip-all","전체 ›",()=>openList())))
-      .child(h_flex().relative().flex_1().min_h(0).min_w(0).items_center().gap(10).px(14)
+      .child(h_flex().relative().flex_1().min_h(0).min_w(0).items_center().gap(2).px(14)
         .child(rail)
         .child(end("queue-lane-entry","입구 ›").frames(["입구 ›","입구 ››","입구 ›››"],700))
         .child(body)
