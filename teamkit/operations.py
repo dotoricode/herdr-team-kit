@@ -136,6 +136,9 @@ class NativeRuntime:
             pairs = [(x['provider'], x['account']) for x in profile_candidates(self.config)]
             by_order = sorted(result, key=lambda e: pairs.index((e['provider'], e['account']))
                               if (e['provider'], e['account']) in pairs else len(pairs))
+            if ticket is not None:
+                from .workers import prefer_designated
+                return prefer_designated(ticket, by_order, lambda e: (e['provider'], e['account']))
             return by_order
         from .routing import execution_candidates
         first = next(iter(self.config['profiles']))
