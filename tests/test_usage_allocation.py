@@ -76,6 +76,24 @@ class UsageRefreshTests(unittest.TestCase):
         self.assertTrue(all(row['status']=='unavailable' and row['reason']=='fixture unavailable' for row in first.values()))
 
 
+    def test_real_codex_collector_failure_is_not_reported_as_checked(self):
+        self.config['operations']['allocation_policy'] = 'usage'
+        self.config_path.write_text(json.dumps(self.config))
+        for provider, accounts in self.config['profiles'].items():
+            for account in accounts:
+                old = self.store.quota(provider+'/'+account)
+                old['observed_at'] = 0
+                self.store.quota(provider+'/'+account, old)
+        with patch('teamkit.providers.codex_quota', side_effect=ValueError('fixture transport failure')), \
+             patch('teamkit.monitor.codex_quota', side_effect=ValueError('fixture transport failure')), \
+             patch('teamkit.app_usage.refresh_native_usage', side_effect=ValueError('fixture unavailable')):
+            result = allocation.refresh_usage(self.config_path, self.state)
+        for account in ('team', 'personal'):
+            self.assertTrue(self.store.quota('codex/'+account)['unavailable'])
+            self.assertEqual('unavailable', result['codex/'+account]['status'])
+            self.assertTrue(result['codex/'+account]['reason'])
+
+
 class UsagePromptTests(unittest.TestCase):
     def test_latest_allocation_instruction_preserves_original_scope_and_goal(self):
         import tempfile

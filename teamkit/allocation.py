@@ -63,8 +63,32 @@ def refresh_usage(config_path, state):
                 else:
                     from .monitor import collect_and_save
                     collect_and_save(state, config_path, account, profile(config, provider, account))
-                result[key]['status'] = 'checked'
+                store = Store(state, read_only=True)
+                try:
+                    observed = cached_quota(config, store, provider, account)
+                finally:
+                    store.close()
+                result[key].update(quota_result(observed, time.time(), config['quota_ttl_seconds']))
             except Exception as error:
                 result[key].update(status='unavailable', reason=str(error))
             temporary.write_text(json.dumps(result)); temporary.replace(path)
         return result
+
+
+def quota_result(snapshot, now, ttl):
+    """Describe the stored observation, including collectors that swallow errors."""
+    from .policy import number, eligible
+    if not isinstance(snapshot, dict):
+        return dict(status='unknown', reason='usage collector did not save a bound quota observation')
+    if snapshot.get('unavailable'):
+        return dict(status='unavailable', reason='usage collector marked the stored quota unavailable')
+    at = snapshot.get('observed_at')
+    if not number(at) or not 0 <= now-at <= ttl:
+        return dict(status='unknown', reason='usage collector did not save a fresh quota observation')
+    if eligible(snapshot, now, ttl):
+        return dict(status='checked')
+    exhausted = any(isinstance(snapshot.get(key), dict) and number(snapshot[key].get('used'))
+                    and snapshot[key]['used'] >= 90 for key in ('five_hour', 'weekly'))
+    if exhausted:
+        return dict(status='limited', reason='stored quota reached the allocation usage limit')
+    return dict(status='unknown', reason='stored quota does not satisfy the allocation observation contract')
