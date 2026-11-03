@@ -1020,6 +1020,8 @@ def capacity_available(state, target=None, current_job=None, config=None):
                     included |= any(r.get('terminal') == target.get('terminal')
                                     and r.get('status') not in ('idle', 'done', 'blocked', 'finished')
                                     for r in observation['terminals'])
+                if policy['global_limit'] is None:
+                    return True
                 return snapshot['used'] <= policy['global_limit'] if included else snapshot['available'] > 0
             except Exception:
                 return False

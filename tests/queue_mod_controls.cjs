@@ -34,6 +34,11 @@ function nodes(x){return x?.value?[x,...x.value.kids.flatMap(nodes)]:[]}
 function text(x){return x?.value?x.value.kids.map(text).join(' '):typeof x==='string'?x:''}
 function id(x,key){return nodes(x).find(x=>x.value.props.id?.[0]===key)}
 (async()=>{
+  const capacityView=view('operations');
+  capacityView.data={...data,capacity:{global_limit:null,available:null,used:4}};
+  assert(text(capacityView.render(cx)).includes('상한 없음'),'explicit null global cap renders unlimited');
+  capacityView.data={...data,capacity:{available:null,reason:'observation unavailable'}};
+  assert(!text(capacityView.render(cx)).includes('상한 없음'),'observation error stays unknown');
   const v=view('detail');let tree=v.render(cx);
   assert(id(tree,'queue-organize-done'),'detail must expose card state changes');
   assert(id(tree,'queue-organize-archive'));assert(text(tree).includes('ORIGINAL_REQUEST'));

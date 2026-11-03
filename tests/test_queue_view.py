@@ -23,6 +23,12 @@ class QueueViewTest(unittest.TestCase):
              patch('teamkit.queue_view.view', return_value=payload):
             return board('config','state')
 
+    def test_unlimited_capacity_round_trips_without_becoming_unknown_or_numeric(self):
+        capacity = dict(global_limit=None, available=None, used=4,
+                        profile_limits={'codex/team': 3}, profile_used={'codex/team': 1})
+        result = self.project(dict(id='ONE', product='example', state='pending'), capacity=capacity)
+        self.assertEqual(result['capacity'], capacity)
+
     def test_internal_next_action_is_operational_korean_and_raw_value_is_preserved(self):
         ticket = dict(id='ONE', product='example', state='waiting_approval', next_action='check admission',
                       reason='approval missing or changed', role='investigator', origin_id='ORIGINAL')

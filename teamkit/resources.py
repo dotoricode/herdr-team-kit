@@ -36,14 +36,14 @@ def validate_policy(policy=None):
     limit = policy.get('global_limit', 3)
     ttl = policy.get('observation_ttl_seconds', 15)
     profiles = policy.get('profile_limits', {})
-    if type(limit) is not int or not 1 <= limit <= 1024:
-        raise ValueError('global_limit must be an integer in 1..1024')
+    if limit is not None and (type(limit) is not int or not 1 <= limit <= 1024):
+        raise ValueError('global_limit must be null (unlimited) or an integer in 1..1024')
     if not _number(ttl) or not 0 < ttl <= 300:
         raise ValueError('observation_ttl_seconds must be in 0..300')
     if (not isinstance(profiles, dict) or set(profiles) - set(PROFILES)
             or any(type(value) is not int or not 0 <= value <= 1024 for value in profiles.values())):
         raise ValueError('profile_limits requires known profiles and integer limits in 0..1024')
-    return dict(global_limit=limit, profile_limits={p: profiles.get(p, limit) for p in PROFILES},
+    return dict(global_limit=limit, profile_limits={p: profiles.get(p, 3 if limit is None else limit) for p in PROFILES},
                 observation_ttl_seconds=ttl)
 
 
@@ -250,7 +250,7 @@ class ResourceLedger:
                                          for e in entries.values()) for provider in ('codex', 'claude')}
         used = len(entries)
         return dict(global_limit=policy['global_limit'], used=used,
-                    available=max(0, policy['global_limit'] - used), reserved=len(reservations),
+                    available=None if policy['global_limit'] is None else max(0, policy['global_limit'] - used), reserved=len(reservations),
                     profile_used=counts, profile_limits=policy['profile_limits'],
                     profile_unknown=unknown_profiles, outside_ledger=outside,
                     unknown_slots=sum(e['unknown'] for e in entries.values()),
@@ -282,7 +282,7 @@ class ResourceLedger:
                 raise ResourceUnavailable('attempt_released', 'released attempts cannot be resurrected')
             return old
         snap = self._snapshot(connection, policy, native_observation)
-        if snap['available'] <= 0:
+        if snap['available'] is not None and snap['available'] <= 0:
             raise ResourceUnavailable('global_capacity', 'global execution capacity is exhausted')
         if snap['profile_used'][profile] + snap['profile_unknown'][profile.split('/')[0]] >= snap['profile_limits'][profile]:
             raise ResourceUnavailable('profile_capacity', 'profile execution capacity is exhausted or unknown')

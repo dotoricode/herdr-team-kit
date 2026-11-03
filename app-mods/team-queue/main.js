@@ -107,8 +107,8 @@ export default class TeamQueue extends View {
           .when(!data,el=>el.child(words("운영 정보를 읽고 있습니다")))
           .when(Boolean(data),el=>el
             .child(row("승인·의존성 통과",String(data.policy_ready_count??"미확인")))
-            .child(row("가용 실행 슬롯",String(capacity?.available??"미확인")))
-            .child(row("사용 / 상한",String(capacity?.used??"미확인")+" / "+String(capacity?.global_limit??"미확인")))
+            .child(row("가용 실행 슬롯",capacity?.global_limit===null ? "상한 없음" : String(capacity?.available??"미확인")))
+            .child(row("사용 / 상한",String(capacity?.used??"미확인")+" / "+(capacity?.global_limit===null ? "상한 없음" : String(capacity?.global_limit??"미확인"))))
             .child(row("프로필 / 준비 후보",String(data.account_profiles??"미확인")+" / "+String(data.candidate_slots??"미확인")))
             .children(Object.entries(data.waiting??{}).map(([label,count])=>row(label,String(count)))))
           .when(Boolean(data),el=>el

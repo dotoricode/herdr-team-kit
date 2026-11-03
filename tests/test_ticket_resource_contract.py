@@ -41,6 +41,26 @@ class TicketResourceContractTest(unittest.TestCase):
     def reserve(self,ident):
         return self.queue.reserve(ident,self.actor(ident),{'global_limit':4},dict(observed_at=time.time(),complete=True,terminals=[]))
 
+    def test_unlimited_policy_admits_four_profiles_without_bypassing_ticket_identity(self):
+        from teamkit.admission import configure
+        from teamkit.resources import PROFILES
+        configure(self.queue.db, {'global_limit': None})
+        for number, profile in enumerate(PROFILES):
+            ident = 'UNLIMITED' + str(number)
+            root = self.root / ident
+            root.mkdir()
+            self.queue.enqueue(self.spec(ident, root=root, profiles=[profile]), ident, user_approved=True)
+            provider, account = profile.split('/')
+            actor = dict(provider=provider, account=account, owner='owner-' + ident,
+                         terminal='t' + ident, pid=200 + number)
+            if number == 3:
+                with self.assertRaisesRegex(ValueError, 'identity/profile mismatch'):
+                    self.queue.reserve(ident, {**actor, 'account': 'team'}, None,
+                                       dict(observed_at=time.time(), complete=True, terminals=[]))
+            self.queue.reserve(ident, actor, None,
+                               dict(observed_at=time.time(), complete=True, terminals=[]))
+        self.assertEqual(4, sum(row['execution_reserved'] for row in ResourceLedger._rows(self.queue.db)))
+
     def test_same_worktree_different_file_writers_conflict(self):
         for ident in ('ONE','TWO'):self.queue.enqueue(self.spec(ident),ident,user_approved=True)
         self.reserve('ONE')
