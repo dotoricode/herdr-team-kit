@@ -108,7 +108,9 @@ Receipt waiters record SIGINT/SIGTERM cancellation before exiting. SIGKILL or ho
 
 `queue candidates TICKET`은 배정 불가 직원도 모두 보여 줍니다. 각 후보는 첫 실패에서 멈추지 않고 모든 게이트를 평가한 결과를 `reasons`(코드·`bypassable`·원문 `reason`·`reason_ko`)로 담고, `reason`·`reason_ko`는 그 목록을 합친 문장이며 `override_allowed`는 사유가 모두 우회 가능할 때만 true입니다. 배정 불가 후보에도 사용자가 직접 지정하면 `queue send TICKET --candidate-id ID --expected-ticket DIGEST --client-request-id KEY --override-eligibility --reason "사유"`로 보낼 수 있습니다. `--reason`은 1~300자 필수이고 `--override-eligibility` 없이 쓸 수 없습니다. 같은 `--client-request-id`와 같은 사유로 다시 보내면 새 미리보기 없이 기록된 action을 그대로 돌려주고, 다른 내용이면 거부합니다.
 
-우회하는 것(`bypassable`): 담당 제품·역할·책임 불일치, 역할·모델·provider 정책 밖, 세션 풀 `uncertain` slot의 읽기 전용 증명 실패, 계정 사용량(quota), 계정 동시 실행 용량(전체·계정), 업무에 적힌 계정 목록입니다. 우회 사실·사용자 사유·미리보기 때 원래 사유 전부·실행 시점에 실제로 무시한 사유 전부는 큐 action 기록(`request.override`, `result.override`)과 attempt(`override`)에 남습니다.
+우회하는 것(`bypassable`): 담당 제품·역할·책임 불일치, 역할·모델·provider 정책 밖, 세션 풀 `uncertain` slot의 읽기 전용 증명 실패, 계정 사용량(quota), 계정 동시 실행 용량(전체·계정)입니다. 업무에 적힌 계정 목록과 `--provider/--account` 지정은 우회 대상이 아니라 애초에 배정 가능 여부 판정에 포함되지 않습니다(아래 `지정 계정은 우선순위`). 우회 사실·사용자 사유·미리보기 때 원래 사유 전부·실행 시점에 실제로 무시한 사유 전부는 큐 action 기록(`request.override`, `result.override`)과 attempt(`override`)에 남습니다.
+
+지정 계정은 우선순위: 업무의 `profiles`(계정 목록)와 `execution_constraint`(CLI `--provider/--account`)는 배정 가능 여부 게이트가 아니다. 후보 목록·자동 배정 모두 지정 계정을 먼저 두고, 그 뒤에 기존 순서(요일·사용량)를 따른다. 후보 응답의 `preferred: true`는 지정 계정 일치 표시일 뿐 사유·게이트가 아니며, 앱 상세 창은 해당 직원에 "지정 계정"을 작게 붙인다. 지정되지 않은 계정의 직원도 역할·모델·한도·독립성 등 나머지 게이트를 통과하면 배정 가능하다. 팀 확인 담당(`team_dispatch`)의 개인 Codex 고정과 UI 검증실 고정, 사용자 결정·전문 역할의 모델 고정은 계정 지정과 다른 정책이라 그대로 유지한다.
 
 우회하지 않는 것: 업무 승인·고정 승인 기록, UI 업무, 리뷰 독립성(`exclude_owners`), 직원의 작업 폴더가 업무 경로를 덮는지, 계정 연결(profile binding) 변경, provider 신원 확인, 개인 문서 담당 경계(`docsstaff`: 후보 판정·예약·전송 직전 모두), 전송 시점의 소유자·프로세스 확인과 입력 초안·확인 창 검사, 터미널 foreground 프로세스를 읽을 수 없는 상태(`native`), `pending`이 아닌 업무의 재전송 금지, 이전 선택이 queued·running·uncertain일 때의 재선택 금지, 새로 만들 직원(계획 항목)의 용량 우회, 다른 attempt와의 터미널 세션·쓰기 자원 충돌, 실행 횟수·토큰 예산. 이 중 하나라도 실패하면 `override_allowed`는 false이고, override 요청이 와도 blocked로 끝나며 전송·예약을 하지 않습니다. 소유자·프로세스·초안 검사는 전송 직전에 다시 읽어 입력 중인 내용이 있으면 전송하지 않고 blocked로 보고합니다.
 
@@ -169,7 +171,7 @@ GUI core 배정은 실제 응답에 연결된 statusline 자료와 검증된 공
 
 총괄은 `pool plan --team TEAM`으로 현재 정책의 담당 후보를 확인한다. 최초 연결은 `pool bootstrap --team TEAM`으로 receipt와 대기만 확인한다. 이후 승인된 요청 파일은 `pool assign --team TEAM --message-file FILE`로 전달한다. 같은 팀에 미처리 요청이 있으면 다른 요청을 조용히 덮어쓰지 않는다. 선택된 계정의 준비 세션이 없다는 이유로 후순위 계정을 고르지 않는다.
 
-요청에서 공급자·계정을 지정했다면 `pool assign --team TEAM --message-file FILE --provider codex --account team`처럼 두 값을 함께 전달한다. `pool plan --team TEAM --provider codex --account team`은 그 제약으로 조회만 한다. 요청이 안전한 실행 경계에 도달하면 제약을 고정 팀장 task에 기록하며, 이후 공식 plan·dispatch·tell과 컨텍스트 인계가 같은 값을 사용한다. 지정 계정의 유효한 한도가 없으면 대기하고 다른 계정이나 공급자로 넘어가지 않는다. 실행 중인 다른 담당의 제약을 덮어쓰지 않으며, 수신 가능 상태가 될 때까지 기다린다.
+요청에서 공급자·계정을 지정했다면 `pool assign --team TEAM --message-file FILE --provider codex --account team`처럼 두 값을 함께 전달한다. `pool plan --team TEAM --provider codex --account team`은 그 제약으로 조회만 한다. 요청이 안전한 실행 경계에 도달하면 제약을 고정 팀장 task에 기록하며, 이후 공식 plan·dispatch·tell과 컨텍스트 인계가 같은 값을 우선순위로 사용한다. 지정 계정은 우선순위일 뿐이다. 지정 계정이 배정 가능하면 먼저 쓰고, 한도·세션·상태 때문에 안 되면 같은 역할 정책의 다른 계정 후보로 진행한다. 공급자는 승인된 역할·사용자 결정 정책이 허용하는 범위를 넘지 않는다. 실행 중인 다른 담당의 제약을 덮어쓰지 않으며, 수신 가능 상태가 될 때까지 기다린다.
 
 대기 중인 현재 담당이 새 선택과 다르면, 요청을 보존하고 정책에 따른 인계를 예약한다. 실행 중인 업무·입력 초안·확인 창은 기다린다. 90% 인계도 다음 공급자·계정·모델·세션 세대를 기록하지만, 예약 자체가 새 claim은 아니다. 실제 배정 직전에 사용량·요일·프로필과 native를 다시 확인하고 후보가 바뀌면 변경 이유를 남긴다. 미완료·승인 대기는 공식 체크포인트와 dispatch prompt로 전달한다.
 

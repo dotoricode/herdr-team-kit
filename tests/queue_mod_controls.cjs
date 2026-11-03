@@ -120,6 +120,14 @@ function clickNotifies(x,key,label){const before=notifies;id(x,key).value.handle
   await denied.executeAction(cx,'send',denied.candidates.candidates[0]);
   assert(denied.pendingExecution,'process error without authoritative status remains uncertain');
   assert(denied.executionFailure.includes('gate changed'));
+  // A designated account is only marked, never a reason or a gate.
+  const mark=view('detail');
+  reply=async()=>({code:0,stdout:JSON.stringify({send_allowed:true,expected_ticket:'ticket-mark',candidates:[
+    {id:'designated',alias:'Designated',account:'team',role:'reviewer',eligible:true,preferred:true},
+    {id:'other',alias:'Other',account:'personal',role:'reviewer',eligible:true,preferred:false}]})});
+  await mark.loadCandidates(cx);
+  const markText=text(mark.render(cx));
+  assert.equal(markText.split('지정 계정').length-1,1,'only the designated candidate is marked');
   // Manual priority send: listed with Korean reasons, explicit confirmation, no bypass of delivery guards.
   const force=view('detail');
   calls=[];reply=async()=>({code:0,stdout:JSON.stringify({send_allowed:false,reason:'배정 가능한 직원 없음',expected_ticket:'ticket-force',candidates:[
@@ -129,6 +137,7 @@ function clickNotifies(x,key,label){const before=notifies;id(x,key).value.handle
   let ftree=force.render(cx);
   assert(text(ftree).includes('배정 불가 · 담당 제품·역할이 이 업무와 맞지 않습니다'),'Korean reason is shown for an unassignable candidate');
   assert(id(ftree,'queue-force-mismatch'),'unassignable candidate offers the force button');
+  assert(!text(ftree).includes('지정 계정'),'no designated-account mark without preferred');
   assert(!id(ftree,'queue-send-mismatch'),'normal send stays unavailable');
   assert(!id(ftree,'queue-force-planned'),'a planned new worker cannot be forced');
   assert(text(ftree).includes('새로 만들 직원이라 강제 전송할 수 없습니다'));
