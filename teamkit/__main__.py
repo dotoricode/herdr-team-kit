@@ -293,7 +293,7 @@ def run(args):
             if args.command=='tell' and args.expected_owner is not None and task.get('owner')!=args.expected_owner:
                 raise ValueError('selected task owner changed; inspect before sending')
         if args.command == 'plan':
-            return (select_execution(config, store, task, now) if 'execution_preference' in config or task.get('execution_constraint')
+            return (select_execution(config, store, task, now) if 'execution_preference' in config or 'leader_execution_preference' in config or task.get('execution_constraint')
                     else execution_policy(config, task))
         if args.command == 'authorize':
             decision = json.loads(Path(args.decision_file).read_text())
@@ -339,7 +339,7 @@ def run(args):
             provider, account = role['provider'], role['account']
             pr = profile(config, provider, account, role)
             providers.identity(provider, pr)
-            recheck_config = load(args.config) if 'execution_preference' in config else config
+            recheck_config = load(args.config) if 'execution_preference' in config or 'leader_execution_preference' in config else config
             recheck = select_execution(recheck_config, store, store.get(args.task), time.time())
             keys = ('action', 'provider', 'account', 'model', 'effort')
             if (any(recheck.get(key) != role.get(key) for key in keys)

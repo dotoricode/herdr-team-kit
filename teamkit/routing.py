@@ -26,7 +26,9 @@ def leader_preference(config, task=None):
             or not isinstance(value.get('model'), str) or not value['model'].strip()
             or value.get('effort') not in ('low', 'medium', 'high')):
         raise ValueError('leader_execution_preference requires configured provider, account, model and effort')
-    if task is not None and (task.get('source_role', task.get('role')) != 'leader'
+    # Linked legacy leaders are private design executors using the existing
+    # Codex-only sandbox adapter, separate from persistent product team leaders.
+    if task is not None and (task.get('source_role', task.get('role')) != 'leader' or task.get('work_id')
                              or task.get('user_decision') or task.get('execution_constraint')):
         return None
     return value
