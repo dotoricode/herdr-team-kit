@@ -733,7 +733,14 @@ def _operations_tick(config_path, state):
         return {'enabled':False}
     admission.configure(state, operations.policy(config))
     admission.reconcile_stopped(state)
-    return operations.tick(config_path, state)
+    from .queue_actions import consume
+    actions = consume(config_path, state)
+    # A sync request already performed this consumer's full reconcile/dispatch pass.
+    synced = next((action for action in reversed(actions) if action['kind']=='sync'
+                   and action.get('result') is not None), None)
+    result = dict(synced['result']['dispatch']) if synced else operations.tick(config_path, state)
+    result['actions'] = actions
+    return result
 
 
 def dispatch_status(state):

@@ -388,7 +388,7 @@ def reconcile(queue, runtime, config=None):
             queue.block(ticket['id'], str(error))
 
 
-def tick(config_path, state, runtime=None):
+def tick(config_path, state, runtime=None, *, selection=None):
     config_bytes = Path(config_path).read_bytes()
     config = load(config_path)
     if Path(config_path).read_bytes() != config_bytes:
@@ -400,10 +400,10 @@ def tick(config_path, state, runtime=None):
     try:
         from .intake import capture
         try:
-            intake = capture(config, state)
+            intake = capture(config, state) if selection is None else None
         except (ValueError, OSError, json.JSONDecodeError) as error:
             intake = {'enabled': True, 'reason': str(error)}
-        if config.get('operations',{}).get('intake',{}).get('enabled') is True:
+        if selection is None and config.get('operations',{}).get('intake',{}).get('enabled') is True:
             from . import intake_dispatch
             try:
                 intake['classification'] = intake_dispatch.tick(config_path, state)
@@ -411,10 +411,11 @@ def tick(config_path, state, runtime=None):
                 intake['classification'] = {'reason':str(error)}
         from .admission import configure
         configure(queue.db, policy(config))
-        reconcile(queue, runtime, config)
-        queue.resume_parents()
+        if selection is None:
+            reconcile(queue, runtime, config)
+            queue.resume_parents()
         ui = None
-        if any(t['role']=='ui' and t['state'] not in ('completed','cancelled','backlog') for t in queue.list()):
+        if selection is None and any(t['role']=='ui' and t['state'] not in ('completed','cancelled','backlog') for t in queue.list()):
             from . import ui_jobs
             try:
                 ui = ui_jobs.tick(config_path,state)
@@ -422,11 +423,15 @@ def tick(config_path, state, runtime=None):
                 ui = {'reason':str(error)}
         started = []
         for ticket in queue.ready():
-            if ticket['role']=='ui':
+            if ticket['role']=='ui' or selection is not None and ticket['id'] != selection['ticket']:
                 continue
             reasons = []
             try:
                 candidates = runtime.executors(ticket)
+                if selection is not None:
+                    from .queue_actions import executor_identity
+                    candidates = [candidate for candidate in candidates
+                                  if executor_identity(candidate) == selection['candidate_id']]
             except (ValueError, KeyError, OSError, subprocess.SubprocessError, NativeError) as error:
                 queue.block(ticket['id'], str(error))
                 continue
@@ -439,6 +444,7 @@ def tick(config_path, state, runtime=None):
                     def staff_guard(item, actor):
                         docsstaff.check(config, queue.db, item, actor)
                     attempt = queue.reserve(ticket['id'], executor, policy(config), observation,
+                                            expected_revision=selection['expected_ticket'] if selection else None,
                                             before_reserve=staff_guard)
                 except (ValueError, KeyError, OSError, subprocess.SubprocessError, NativeError) as error:
                     reasons.append(str(error))

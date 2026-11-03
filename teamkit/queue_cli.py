@@ -11,7 +11,7 @@ from .tickets import TicketStore
 def parser(commands):
     item = commands.add_parser('queue')
     item.add_argument('action', choices=('create', 'approve', 'show', 'status', 'submit', 'receipt',
-                                        'wait-children', 'dependencies', 'tick', 'intake', 'classify', 'approval-template', 'organize', 'dismiss'))
+                                        'wait-children', 'dependencies', 'tick', 'intake', 'classify', 'approval-template', 'organize', 'dismiss', 'candidates', 'send', 'sync', 'action-status'))
     item.add_argument('ticket', nargs='?')
     item.add_argument('--ticket-file')
     item.add_argument('--key')
@@ -28,9 +28,19 @@ def parser(commands):
     item.add_argument('--expected-revision')
     item.add_argument('--reason')
     item.add_argument('--expected-digest')
+    item.add_argument('--candidate-id')
+    item.add_argument('--expected-ticket')
 
 
 def handle(args):
+    if args.action in ('candidates', 'send', 'sync', 'action-status'):
+        from . import queue_actions
+        if args.action == 'candidates':
+            return queue_actions.candidates(args.config, args.state, args.ticket)
+        if args.action == 'action-status':
+            return queue_actions.status(args.state, args.client_request_id)
+        return queue_actions.enqueue(args.config, args.state, args.action, args.client_request_id,
+            ticket=args.ticket, candidate_id=args.candidate_id, expected_ticket=args.expected_ticket)
     if args.action == 'status':
         if args.board:
             from .queue_view import board

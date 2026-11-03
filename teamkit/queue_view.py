@@ -112,7 +112,11 @@ def board(config_path, state):
                          task_id=item['id'], task_state=phase, origin_id=item.get('origin_id'),
                          parent_id=item.get('parent_id'), role=item.get('role'),
                          work_completion_confirmed=phase=='completed', requires_user_decision=phase=='waiting_approval',
-                         completion_intent=phase in ('awaiting_review','awaiting_verification')))
+                         completion_intent=phase in ('awaiting_review','awaiting_verification'),
+                         execution_actions=dict(candidates='queue candidates', send='queue send',
+                             ticket=item['id'], requires_candidate_preview=True,
+                             send_allowed=phase=='pending' and item.get('source')!='legacy',
+                             reason='' if phase=='pending' else '이미 전달되었거나 배정 가능한 대기 상태가 아닙니다. 재전송하지 마세요.')))
     for job in jobs:
         job['board_state'] = board_state(state, organization_card(job))
         if job['board_state']['disposition'] == 'archived':
@@ -127,7 +131,8 @@ def board(config_path, state):
                  candidate_slots=payload['candidate_slots'], account_profiles=payload['account_profiles'],
                  policy_ready_count=payload['ready_count'], ready_count_boundary=payload['ready_count_boundary'],
                  waiting=dict(Counter(j['state_label'] for j in jobs if j['category'] not in ('history','deferred','archived'))),
-                 warnings=[])
+                 warnings=[], execution_actions=dict(sync='queue sync', status='queue action-status',
+                     durable=True, wake_is_completion=False))
     # Observation time alone never triggers rebuilding the whole view.
     semantic = dict(value)
     semantic['supervisor'] = {k:v for k,v in value['supervisor'].items() if k not in ('heartbeat_age_seconds','heartbeat')}
