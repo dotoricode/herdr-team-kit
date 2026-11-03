@@ -1,5 +1,6 @@
 """Account coverage is display metadata, not an admission override."""
 import json
+import subprocess
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -131,7 +132,7 @@ class NativeHc:
         elif op=='keys':
             self.received_text=''.join(args[3:-1]) if args[1]=='--json' else ''.join(args[2:-1])
             self.queried=self.received_text=='/usage';value={'status':'idle','turn':0}
-        elif op=='read':return subprocess.CompletedProcess(argv,0,self.screen if self.queried or not self.ready else 'Ready for input','')
+        elif op=='read':return subprocess.CompletedProcess(argv,0,self.screen if self.queried or not self.ready else '❯ ','')
         elif op=='ls':value={'terminals':[{'address':'t9','state':self.state}]} if self.labels and not self.missing else {'terminals':[]}
         elif op=='kill':self.state='finished';value={'ok':True}
         elif op=='rm':self.missing=True;value={'ok':True}
@@ -149,6 +150,88 @@ class NativeUsageTests(UsageFixture):
         launch=next(a for a in native.calls if a[1]=='run');self.assertIn('--safe-mode',launch);self.assertNotIn('-p',launch)
         self.assertEqual(native.received_text,'/usage')
         with StoreContext(self.state) as db:self.assertIsNone(db.quota('claude/personal'))
+
+    def test_initial_missing_status_and_foreground_wait_for_same_native_startup(self):
+        from teamkit.app_usage import refresh_native_usage
+        native=NativeHc()
+        def starting(argv, **opts):
+            result=native(argv, **opts)
+            if argv[1]=='get' and native.gets<=3:
+                value=json.loads(result.stdout);value.update(status=None,foreground=None)
+                return subprocess.CompletedProcess(argv,0,json.dumps(value),'')
+            return result
+        with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=starting),patch('teamkit.app_usage.time.sleep'):
+            value=refresh_native_usage(self.value,self.state,'personal')
+        self.assertEqual(value['weekly'],32)
+        self.assertEqual(sum(a[1]=='run' for a in native.calls),1)
+        self.assertEqual(sum(a[1]=='keys' for a in native.calls),1)
+        self.assertFalse(any(a[1]=='send' for a in native.calls))
+        attempt=json.loads(Path(str(self.state)+'.native-usage-personal.json').read_text())
+        self.assertTrue(attempt['zero_token_usage']);self.assertTrue(native.missing)
+
+    def test_missing_startup_metadata_times_out_without_input_or_relaunch(self):
+        from teamkit.app_usage import refresh_native_usage,UsageUnavailable
+        native=NativeHc();ticks=iter(range(100))
+        def starting(argv, **opts):
+            result=native(argv, **opts)
+            if argv[1]=='get' and native.state=='live':
+                value=json.loads(result.stdout);value.update(status=None,foreground=None)
+                return subprocess.CompletedProcess(argv,0,json.dumps(value),'')
+            return result
+        with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=starting),patch('teamkit.app_usage.time.sleep'),patch('teamkit.app_usage.time.monotonic',side_effect=lambda:next(ticks)):
+            with self.assertRaisesRegex(UsageUnavailable,'native_not_ready'):
+                refresh_native_usage(self.value,self.state,'team')
+        self.assertGreater(native.gets,3)
+        self.assertEqual(sum(a[1]=='run' for a in native.calls),1)
+        self.assertFalse(any(a[1] in ('send','keys') for a in native.calls))
+        self.assertTrue(native.missing)
+
+    def test_idle_metadata_without_an_empty_prompt_never_sends_usage(self):
+        from teamkit.app_usage import refresh_native_usage,UsageUnavailable
+        native=NativeHc();ticks=iter(range(100))
+        def starting(argv, **opts):
+            result=native(argv, **opts)
+            if argv[1]=='read' and not native.queried:
+                return subprocess.CompletedProcess(argv,0,'❯ unfinished draft','')
+            return result
+        with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=starting),patch('teamkit.app_usage.time.sleep'),patch('teamkit.app_usage.time.monotonic',side_effect=lambda:next(ticks)):
+            with self.assertRaisesRegex(UsageUnavailable,'native_not_ready'):
+                refresh_native_usage(self.value,self.state,'team')
+        self.assertFalse(any(a[1] in ('send','keys') for a in native.calls))
+        self.assertTrue(native.missing)
+
+    def test_idle_metadata_waits_for_the_actual_empty_prompt(self):
+        from teamkit.app_usage import refresh_native_usage
+        native=NativeHc();reads=[]
+        def starting(argv, **opts):
+            result=native(argv, **opts)
+            if argv[1]=='read' and not native.queried:
+                reads.append(True)
+                if len(reads)<=3:return subprocess.CompletedProcess(argv,0,'Initializing CLI','')
+            return result
+        with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=starting),patch('teamkit.app_usage.time.sleep'):
+            refresh_native_usage(self.value,self.state,'personal')
+        self.assertEqual(len(reads),4)
+        self.assertEqual(sum(a[1]=='keys' for a in native.calls),1)
+        self.assertTrue(native.missing)
+
+    def test_failed_or_finished_startup_is_rejected_without_waiting_or_input(self):
+        from teamkit.app_usage import refresh_native_usage,UsageUnavailable
+        for state,status in (('live','error'),('live','blocked'),('live','working'),('finished',None)):
+            with self.subTest(state=state,status=status):
+                native=NativeHc()
+                def starting(argv, **opts):
+                    result=native(argv, **opts)
+                    if argv[1]=='get' and native.gets==1:
+                        value=json.loads(result.stdout);value.update(state=state,status={'app':'claude','state':status})
+                        return subprocess.CompletedProcess(argv,0,json.dumps(value),'')
+                    return result
+                with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=starting),patch('teamkit.app_usage.time.sleep') as sleeping:
+                    with self.assertRaisesRegex(UsageUnavailable,'native_not_ready'):
+                        refresh_native_usage(self.value,self.state,'team')
+                sleeping.assert_not_called()
+                self.assertFalse(any(a[1] in ('send','keys') for a in native.calls))
+                self.assertTrue(native.missing)
 
     def test_os_process_name_is_distinct_from_reported_claude_program_id(self):
         from teamkit.app_usage import refresh_native_usage

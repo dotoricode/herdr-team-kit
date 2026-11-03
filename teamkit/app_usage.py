@@ -359,8 +359,8 @@ def _dialog(text):
     return None
 
 
-def _owned_usage(address,labels):
-    native=_hc(['get',address])
+def _owned_usage(address,labels,timeout=15):
+    native=_hc(['get',address],timeout=timeout)
     if native.get('state')=='missing':return native
     if native.get('address')!=address or any(native.get('labels',{}).get(k)!=v for k,v in labels.items()):
         raise UsageUnavailable('native_ownership_changed')
@@ -413,33 +413,40 @@ def refresh_native_usage(config,state,account):
             if not isinstance(address,str) or not re.fullmatch(r't[0-9a-z]+',address):
                 address=None;raise UsageUnavailable('native_outcome_unknown')
             record['terminal']=address;_write(path,record)
-            native=_owned_usage(address,labels)
-            text=_hc(['read','--lines','100',address],plain=True)
-            dialog=_dialog(text)
-            if dialog:raise UsageUnavailable(dialog)
-            if (native.get('status') or {}).get('state')!='idle':
-                _hc(['wait','--json','--timeout','15',address],timeout=20)
-                native=_owned_usage(address,labels)
-            # The program's OSC idle report can arrive before the OS foreground
-            # snapshot. Keep the same newly owned terminal; never relaunch it.
-            foreground_deadline=time.monotonic()+3
-            while (native.get('state')=='live' and (native.get('status') or {}).get('state')=='idle'
-                   and native.get('foreground') is None and time.monotonic()<foreground_deadline):
+            startup_deadline=time.monotonic()+15
+            while True:
+                remaining=startup_deadline-time.monotonic()
+                if remaining<=0:raise UsageUnavailable('native_not_ready')
+                native=_owned_usage(address,labels,timeout=remaining)
+                foreground=native.get('foreground') or {};status=native.get('status') or {}
+                record['native']={'foreground_name':foreground.get('name'),'foreground_pid':foreground.get('pid'),
+                                  'status_app':status.get('app'),'status_state':status.get('state')}
+                if (native.get('state')!='live' or status.get('state') not in (None,'idle')
+                        or status.get('app') not in (None,'claude','claude-code')
+                        or foreground and (foreground.get('name') not in ('claude','claude.exe')
+                                           or type(foreground.get('pid')) is not int or foreground['pid']<=0)):
+                    raise UsageUnavailable('native_not_ready')
+                remaining=startup_deadline-time.monotonic()
+                if remaining<=0:raise UsageUnavailable('native_not_ready')
+                baseline=_hc(['read','--lines','100',address],timeout=remaining,plain=True)
+                dialog=_dialog(baseline)
+                if dialog:raise UsageUnavailable(dialog)
+                if 'Current week (all models)' in baseline:raise UsageUnavailable('native_outcome_unknown')
+                plain=re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]','',baseline)
+                prompts=re.findall(r'(?m)^[^\S\n]*❯([^\n]*)$',plain)
+                empty_prompt=bool(prompts) and not prompts[-1].strip()
+                if (status.get('state')=='idle' and status.get('app') in ('claude','claude-code')
+                        and foreground and empty_prompt):
+                    break
+                if time.monotonic()>=startup_deadline:raise UsageUnavailable('native_not_ready')
                 time.sleep(0.1)
-                native=_owned_usage(address,labels)
-            foreground=native.get('foreground') or {};status=native.get('status') or {}
-            record['native']={'foreground_name':foreground.get('name'),'foreground_pid':foreground.get('pid'),
-                              'status_app':status.get('app'),'status_state':status.get('state')}
-            if (native.get('state')!='live' or status.get('state')!='idle'
-                    or foreground.get('name') not in ('claude','claude.exe')
-                    or type(foreground.get('pid')) is not int or foreground['pid']<=0
-                    or status.get('app') not in ('claude','claude-code')):
-                text=_hc(['read','--lines','100',address],plain=True)
-                raise UsageUnavailable(_dialog(text) or 'native_not_ready')
-            baseline=_hc(['read','--lines','100',address],plain=True)
-            if 'Current week (all models)' in baseline:raise UsageUnavailable('native_outcome_unknown')
-            ready=_owned_usage(address,labels)
-            if (ready.get('status') or {}).get('state')!='idle':raise UsageUnavailable('native_not_ready')
+            remaining=startup_deadline-time.monotonic()
+            if remaining<=0:raise UsageUnavailable('native_not_ready')
+            ready=_owned_usage(address,labels,timeout=remaining)
+            if (time.monotonic()>=startup_deadline or ready.get('state')!='live' or ready.get('foreground')!=native.get('foreground')
+                    or (ready.get('status') or {}).get('state')!='idle'
+                    or (ready.get('status') or {}).get('app') not in ('claude','claude-code')):
+                raise UsageUnavailable('native_not_ready')
             # send adds agent-message attribution inside an hc controller. Named
             # keys preserve the literal builtin command without clearing scope.
             keyed=_hc(['keys','--json',address,'/','u','s','a','g','e','enter'])
