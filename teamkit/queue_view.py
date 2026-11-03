@@ -138,7 +138,7 @@ def board(config_path, state):
     counts['active'] = sum(j['category'] not in ('history','deferred','archived') for j in jobs)
     teams = list(dict.fromkeys([*config['teams'], *config.get('operations',{}).get('departments',{}), *(x['team'] for x in jobs)]))
     lanes = [dict(team=team,label=labels.get(team,team)) for team in teams]
-    value = dict(schema_version=payload['schema_version'], jobs=jobs, counts=dict(counts), lanes=lanes,
+    value = dict(allocation_policy=payload.get('allocation_policy', 'role'), schema_version=payload['schema_version'], jobs=jobs, counts=dict(counts), lanes=lanes,
                  capacity=payload['capacity'], supervisor=payload['supervisor'], profiles=payload['profiles'],
                  candidate_slots=payload['candidate_slots'], account_profiles=payload['account_profiles'],
                  split_worktrees=payload.get('split_worktrees', []),

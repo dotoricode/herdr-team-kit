@@ -881,6 +881,7 @@ def view(config_path, state):
                 split_worktrees.append(dict(ticket=ident, path=path, phase=phase, exists=Path(path).exists()))
         return {'schema_version': SCHEMA_VERSION, 'observed_at': time.time(),
                 'tickets': queue.list() + legacy, 'ready_count': len(queue.ready()),
+                'allocation_policy': config.get('operations', {}).get('allocation_policy', 'role'),
                 'split_worktrees': split_worktrees,
                 'intake_pending': pending(queue.db),
                 'ready_count_boundary':'approval/dependency ready; native/quota/resource admission happens at dispatch',

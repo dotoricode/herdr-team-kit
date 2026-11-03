@@ -258,6 +258,7 @@ export default class TeamQueue extends View {
     const openList=()=>openOverlay({ mod:MOD, props:{ role:"list", local:this.options.local }, kind:"dialog", modal:false, frame:"none", width:0.72, height:0.82 });
     const linkBtn=(id,label,cb)=>div().id(id).flex_none().whitespace_nowrap().px(10).h(24).flex().items_center().border_1().border_color(t.dim).text_size(13).text_color(t.foreground).cursor_pointer()
       .hover(el=>el.bg(t.raised)).on_click((_e,c)=>{c.stop_propagation();cb(c);}).child(label);
+    const headLabel=this.data?.allocation_policy==="usage"?"대기":"다음";
     const CARD_H=68, RING=3, DURATION=650;
     const card=(entry,head,ghost=false)=>{
       const {item}=entry, moving=ghost&&entry.moving, entering=!ghost&&this.entering.has(item.id);
@@ -278,10 +279,10 @@ export default class TeamQueue extends View {
           .child(v_flex().id("queue-lane-content-"+item.id).flex_none().overflow_hidden().w(moving?1:cardWidth).h(moving?1:CARD_H)
             .transition("width",{duration:DURATION,easing:"ease-in"}).transition("height",{duration:DURATION,easing:"ease-in"}).px(12).py(8).gap(4).justify_center().border_1().border_color(alert?t.blocked:head?t.accent:t.border).bg(t.surface)
             .cursor_pointer().hover(el=>el.bg(t.raised)).on_click(()=>this.detail(item)).tooltip(item.title+(item.reason?" · "+item.reason:""))
-            .accessibility_label((head?"다음 배정 · ":"")+item.team_label+" · "+item.title+" · "+age)
+            .accessibility_label((head?headLabel+" · ":"")+item.team_label+" · "+item.title+" · "+age)
             .child(h_flex().min_w(0).items_center().gap(8).text_size(12)
               .when(head,el=>el.child(div().flex_none().whitespace_nowrap().px(6).bg(t.accent).text_color(t.accent_foreground).font_semibold()
-                .loop("opacity",{from:0.55,to:1,period:2200}).child("다음")))
+                .loop("opacity",{from:0.55,to:1,period:2200}).child(headLabel)))
               .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(shortTeam(item.team_label)))
               .child(div().flex_none().whitespace_nowrap().text_color(alert?t.blocked:t.muted).child(age)))
             .child(div().min_w(0).truncate().text_size(moving?8:16).font_semibold().child(item.short_title ?? item.title))))
