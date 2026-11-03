@@ -63,6 +63,9 @@ def actors(config, db, ticket, provider):
 def check(config, db, ticket, executor):
     value = policy(config, ticket)
     if value is None:
+        # UI admission and receipt retain the existing fixed UI-lab registry and screen lease.
+        if ticket['role'] == 'ui':
+            return
         if department(config, ticket['product']):
             raise ValueError('staff department does not support this role; use the existing specialist or UI path')
         return

@@ -139,9 +139,11 @@ class StaffBootstrapTests(unittest.TestCase):
         self.assertEqual(record['actor']['account'], 'personal')
         with self.assertRaisesRegex(ValueError, 'not explicitly configured'):
             self.prepare('qa', 'codex')
-        for role in ('ui', 'reviewer'):
-            with self.assertRaisesRegex(ValueError, 'does not support'):
-                docsstaff.check(self.config, self.store.db, dict(product='qa', role=role), record['actor'])
+        # Existing UI-lab owns UI admission and receipt; staffing must not intercept it.
+        self.assertIsNone(docsstaff.check(self.config, self.store.db, dict(product='qa', role='ui'),
+                                         {'provider': 'codex', 'account': 'personal', 'roles': ['ui']}))
+        with self.assertRaisesRegex(ValueError, 'does not support'):
+            docsstaff.check(self.config, self.store.db, dict(product='qa', role='reviewer'), record['actor'])
         ticket = self.ticket(role='reviewer', kind='review', product='qa')
         self.assertEqual(workers.plans(self.config, self.state, ticket), [])
         self.assertEqual(self.config['operations']['departments']['qa']['roles']['reviewer']['model'], 'specialist-model')
