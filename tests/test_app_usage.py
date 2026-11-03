@@ -181,6 +181,7 @@ class NativeUsageTests(UsageFixture):
         with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=starting),patch('teamkit.app_usage.time.sleep'),patch('teamkit.app_usage.time.monotonic',side_effect=lambda:next(ticks)):
             with self.assertRaisesRegex(UsageUnavailable,'native_not_ready'):
                 refresh_native_usage(self.value,self.state,'team')
+        self.assertGreaterEqual(next(ticks),15)
         self.assertGreater(native.gets,3)
         self.assertEqual(sum(a[1]=='run' for a in native.calls),1)
         self.assertFalse(any(a[1] in ('send','keys') for a in native.calls))
