@@ -139,6 +139,17 @@ class DocumentStaffTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'slot already exists'):
             docsstaff.check(self.config, self.queue.db, ticket, {**candidate, 'owner': 'another-owner'})
 
+    def test_qa_investigator_is_limited_without_expanding_specialist_review(self):
+        self.configure()
+        self.config['operations']['departments']['qa'] = {
+            'root': str(self.root), 'roles': {'leader': {'provider': 'claude', 'model': 'general-model', 'effort': 'medium'}}}
+        self.config['operations']['qa_staff'] = {'department': 'qa', 'roles': ['investigator']}
+        ticket = self.ticket(role='investigator', kind='investigation', product='qa')
+        self.assertEqual(docsstaff.policy(self.config, ticket),
+                         {'department': 'qa', 'profiles': ['claude/personal']})
+        plans = self.plans(ticket)
+        self.assertEqual({(p['provider'], p['account']) for p in plans}, {('claude', 'personal')})
+
     def test_malformed_staff_policy_fails_closed(self):
         ticket = self.configure()
         self.config['operations']['document_staff']['profiles'].append('claude/team')

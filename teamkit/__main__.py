@@ -79,6 +79,8 @@ def parser():
     commands = p.add_subparsers(dest='command', required=True)
     from .queue_cli import parser as queue_parser
     queue_parser(commands)
+    from .staffbootstrap import parser as staff_parser
+    staff_parser(commands)
     service = commands.add_parser('service')
     service.add_argument('action', choices=('install', 'status', 'guard', 'rebind-prepare', 'rebind-complete'))
     service.add_argument('--once', action='store_true')
@@ -189,6 +191,9 @@ def parser():
 
 
 def run(args):
+    if args.command == 'staff':
+        from .staffbootstrap import handle
+        return handle(args)
     if args.command == 'queue':
         from .queue_cli import handle
         return handle(args)

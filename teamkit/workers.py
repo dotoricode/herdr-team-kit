@@ -95,6 +95,8 @@ def plans(config, state, ticket, *, reserved_owner=None):
     from .operations import work_gate
     from . import docsstaff
     staff = docsstaff.policy(config, ticket)
+    if staff is None and docsstaff.department(config, ticket['product']):
+        return []
     work_gate(config, state, ticket)
     from .departments import execution_config
     config = execution_config(config)
@@ -124,7 +126,7 @@ def plans(config, state, ticket, *, reserved_owner=None):
         result = []
         for candidate in candidates:
             provider, account = candidate['provider'], candidate['account']
-            if staff and (provider + '/' + account not in docsstaff.PROFILES
+            if staff and (provider + '/' + account not in staff['profiles']
                           or not docsstaff.available(config, queue.db, ticket, provider, reserved_owner)):
                 continue
             if provider + '/' + account not in ticket['profiles']:

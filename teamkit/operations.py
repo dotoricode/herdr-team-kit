@@ -48,6 +48,8 @@ class NativeRuntime:
                                profile_binding=slot['binding'], task=slot['task'], runtime=runtime,
                                empty_prompt=slot.get('empty_prompt')))
         result.extend(self.config.get('operations', {}).get('executors', []))
+        from .staffbootstrap import executors as staff_executors
+        result.extend(staff_executors(self.state))
         if ticket is not None:
             queue = TicketStore(self.state, read_only=True)
             try:
