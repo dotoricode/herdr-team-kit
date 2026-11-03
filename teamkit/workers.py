@@ -67,7 +67,7 @@ def _policy_task(config, ticket):
         raise ValueError('worker role mapping must name an existing product role')
     if role not in config['teams'][product]['roles']:
         return None
-    task = dict(team=product, role=role, classification=ticket.get('classification', {'kind': 'general', 'risks': []}))
+    task = dict(team=product, role=role, source_role=ticket['role'], classification=ticket.get('classification', {'kind': 'general', 'risks': []}))
     task.update({key: ticket[key] for key in POLICY_FIELDS if key in ticket})
     return task
 

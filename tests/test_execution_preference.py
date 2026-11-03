@@ -232,3 +232,23 @@ class ExecutionPreferenceTests(Fixture):
             with self.subTest(preference=preference):
                 self.value['execution_preference'] = preference; self.save()
                 with self.assertRaises(ValueError): load(self.config)
+
+    def test_leader_priority_dispatches_company_claude_even_on_weekend(self):
+        self.value['leader_execution_preference'] = {'provider':'claude','account':'team',
+            'model':'claude-opus-5-5','effort':'medium'}
+        self.save(); self.make('--role','leader'); self.seed(claude_personal=20)
+        task, _, _ = self.dispatch()
+        self.assertEqual((task['provider'],task['account'],task['model'],task['effort']),
+                         ('claude','team','claude-opus-5-5','medium'))
+
+    def test_leader_priority_still_rejects_blocked_company_quota(self):
+        self.value['leader_execution_preference'] = {'provider':'claude','account':'team',
+            'model':'claude-opus-5-5','effort':'medium'}
+        self.save(); self.make('--role','leader'); self.seed(claude_personal=20)
+        with StoreContext(self.state) as db:
+            value = db.quota('claude/team')
+            value['five_hour']['used'] = 99
+            db.quota('claude/team',value)
+        task, _, _ = self.dispatch()
+        self.assertEqual((task['provider'],task['account'],task['model']),
+                         ('claude','personal','claude-opus-5-5'))

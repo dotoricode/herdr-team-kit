@@ -16,6 +16,22 @@ def classification(role, kind='general', risks=()):
     return {'kind':kind, 'risks':sorted(set(risks))}
 
 
+def leader_preference(config, task=None):
+    value = config.get('leader_execution_preference')
+    if value is None:
+        return None
+    if (not isinstance(value, dict) or set(value) != {'provider', 'account', 'model', 'effort'}
+            or not isinstance(value.get('provider'), str) or value['provider'] not in config['profiles']
+            or value.get('account') not in ('team', 'personal')
+            or not isinstance(value.get('model'), str) or not value['model'].strip()
+            or value.get('effort') not in ('low', 'medium', 'high')):
+        raise ValueError('leader_execution_preference requires configured provider, account, model and effort')
+    if task is not None and (task.get('source_role', task.get('role')) != 'leader'
+                             or task.get('user_decision') or task.get('execution_constraint')):
+        return None
+    return value
+
+
 def execution_policy(config, task):
     role = dict(config['teams'][task['team']]['roles'][task['role']])
     cls = task.get('classification', {'kind':'general', 'risks':[]})
@@ -29,6 +45,9 @@ def execution_policy(config, task):
             role = dict(routes[kind])
         elif kind != 'general':
             raise ValueError('work kind requires an explicit routing policy')
+    preferred = leader_preference(config, task)
+    if preferred:
+        role = {key: preferred[key] for key in ('provider', 'model', 'effort')}
     failures = task.get('failures', [])
     decision = task.get('user_decision')
     if decision:
@@ -78,9 +97,10 @@ def execution_candidates(config, task, role, now):
         return [{**role, **constraint,
                  'model': role['model'] if provider == role['provider'] else config['profiles'][provider][account]['model']}]
     preference = execution_preference(config)
+    preferred = leader_preference(config, task)
     cls = task.get('classification', {'kind': 'general', 'risks': []})
-    if (preference is None or task.get('user_decision') or task['role'] not in ('leader', 'implementer')
-            or cls['kind'] not in ('general', 'small') or cls['risks']):
+    if ((preferred is None and preference is None) or task.get('user_decision') or task['role'] not in ('leader', 'implementer')
+            or (preferred is None and (cls['kind'] not in ('general', 'small') or cls['risks']))):
         return None
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -89,10 +109,13 @@ def execution_candidates(config, task, role, now):
         'weekdays': ['team', 'personal'], 'weekends': ['personal', 'team']})
     weekend = datetime.fromtimestamp(now, ZoneInfo(schedule['timezone'])).weekday() >= 5
     accounts = account_order({'account_selection': schedule}, now)
-    providers = preference['provider_order']
+    providers = preference['provider_order'] if preference else [role['provider']]
     pairs = ([(provider, account) for account in accounts for provider in providers]
-             if weekend and preference['weekend_account_first']
+             if weekend and preference and preference['weekend_account_first']
              else [(provider, account) for provider in providers for account in accounts])
+    if preferred:
+        first = (preferred['provider'], preferred['account'])
+        pairs = [first] + [pair for pair in pairs if pair != first]
     return [{**role, 'provider': provider, 'account': account,
              'model': role['model'] if provider == role['provider'] else config['profiles'][provider][account]['model'],
              'effort': role.get('effort', 'medium')}

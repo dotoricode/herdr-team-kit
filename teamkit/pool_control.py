@@ -309,7 +309,8 @@ def _advance(config_path,state,ident):
                            'Use the exact identities above. Optional outcome is completed or deferred; deferred requires next. '
                            'Never claim independent review from your own flag. Additional plain-text completion conditions remain waiting for an applicable verifier.\n'
                            'Submit before the supplied park command, replacing only the example evidence path:\n'+shlex.join(submission)+'\n')
-                    message.write_text(text+'\n'+job['message'])
+                    from .protocol import leader_guidance
+                    message.write_text(text+leader_guidance('leader')+'\n'+job['message'])
                     message.chmod(0o600)
                     job['delivery_message_sha256']=hashlib.sha256(message.read_bytes()).hexdigest()
                     job['receiver']={'terminal':task['runtime']['terminal'],'owner':route['owner'],
