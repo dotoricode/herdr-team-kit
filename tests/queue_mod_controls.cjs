@@ -42,7 +42,14 @@ function clickNotifies(x,key,label){const before=notifies;id(x,key).value.handle
   assert(text(capacityView.render(cx)).includes('상한 없음'),'explicit null global cap renders unlimited');
   capacityView.data={...data,capacity:{available:null,reason:'observation unavailable'}};
   assert(!text(capacityView.render(cx)).includes('상한 없음'),'observation error stays unknown');
+  capacityView.data={...data,split_worktrees:[{ticket:'T-ONE',path:'/fixture/split',phase:'ready',exists:true}]};
+  assert(text(capacityView.render(cx)).includes('분리 작업 폴더 · 정리 후보'));
+  assert(text(capacityView.render(cx)).includes('/fixture/split'));
   const v=view('detail');let tree=v.render(cx);
+  const isolated=view('detail');isolated.selected={...item,split_worktree:'/fixture/isolated',result_location:'/fixture/isolated/report'};
+  const isolatedText=text(isolated.render(cx));
+  assert(isolatedText.includes('분리 작업 폴더')&&isolatedText.includes('/fixture/isolated'));
+  assert(isolatedText.includes('결과 위치')&&isolatedText.includes('/fixture/isolated/report'));
   assert(id(tree,'queue-organize-done'),'detail must expose card state changes');
   assert(id(tree,'queue-organize-archive'));assert(text(tree).includes('ORIGINAL_REQUEST'));
   reply=async args=>args.includes('organize')?new Promise(r=>resolve=r):{code:0,stdout:JSON.stringify({...data,fingerprint:'saved'})};

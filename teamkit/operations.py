@@ -196,6 +196,10 @@ class NativeRuntime:
         foreground = native['foreground']
         if foreground['pid'] != executor['pid']:
             raise ValueError('registered executor PID changed')
+        if executor.get('execution_root'):
+            observed_cwd = foreground.get('cwd') or native.get('cwd')
+            if not observed_cwd or Path(observed_cwd).resolve() != Path(executor['execution_root']).resolve():
+                raise ValueError('split worker cwd changed or cannot be verified')
         if require_idle:
             from .prompt_state import empty_input
             from .core_runtime import _call
@@ -528,6 +532,10 @@ def followup(queue, ticket, attempt, relation, goal, *, reviewer=False):
     ident = 'child-' + hashlib.sha256(key.encode()).hexdigest()[:24]
     scope = json.loads(json.dumps(ticket['scope']))
     resources = json.loads(json.dumps(ticket['resources']))
+    if attempt.get('worktree_split'):
+        from .split_worktree import mapped_scope
+        scope = mapped_scope(ticket, attempt['worktree_split'])
+        resources = json.loads(json.dumps(attempt['worktree_split']['resources']))
     checks = ticket['checks']
     commands = ticket.get('verification_commands', {})
     if reviewer:
@@ -779,8 +787,16 @@ def view(config_path, state):
         profiles = {key:{**{k:value.get(k) for k in quota_fields if k in (value or {})},
                          'eligible':eligible(value,time.time(),config['quota_ttl_seconds'])} for key,value in quotas.items()}
         from .intake import pending
+        split_worktrees = []
+        has_intents = queue.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='operation_worktree_intents'").fetchone()
+        if has_intents:
+            for ident, body, phase in queue.db.execute('SELECT ticket,body,phase FROM operation_worktree_intents ORDER BY ticket'):
+                intent = json.loads(body)
+                path = intent['worktree']
+                split_worktrees.append(dict(ticket=ident, path=path, phase=phase, exists=Path(path).exists()))
         return {'schema_version': SCHEMA_VERSION, 'observed_at': time.time(),
                 'tickets': queue.list() + legacy, 'ready_count': len(queue.ready()),
+                'split_worktrees': split_worktrees,
                 'intake_pending': pending(queue.db),
                 'ready_count_boundary':'approval/dependency ready; native/quota/resource admission happens at dispatch',
                 'task_actors':tasks, 'profiles':profiles,

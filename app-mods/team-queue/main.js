@@ -361,6 +361,10 @@ export default class TeamQueue extends View {
           .when(Boolean(data),el=>el
             .child(words("장부 밖 HC 실행 "+String(capacity?.outside_ledger??"미확인")+"개를 관측하여 합산합니다. 직접 시작·HC 밖 모델 실행은 통제 범위 밖입니다. 슬롯·프로필·준비 후보는 서로 다른 수치입니다.").text_size(11).text_color(t.muted))
             .child(words("HC 터미널의 foreground 상태 기준입니다. 내부 하위 에이전트·API 모델 호출은 별도 집계하지 못합니다.").text_size(11).text_color(t.muted)))
+          .when(Boolean(data?.split_worktrees?.length),el=>el.child(v_flex().gap(5)
+            .child(div().font_semibold().child("분리 작업 폴더 · 정리 후보"))
+            .child(words("자동 삭제하지 않습니다. 작업과 결과 보존 여부를 확인한 뒤 정리합니다.").text_size(11).text_color(t.muted))
+            .children(data.split_worktrees.map(x=>words(x.ticket+" · "+x.path+" · "+(x.exists?"폴더 확인됨":"폴더 없음")+" · "+(x.phase==="ready"?"생성 확인":"생성 의도"))))))
           .when(Boolean(data?.warnings?.length),el=>el.child(words(data.warnings.map(x=>x.source+": "+x.reason).join("\n")).text_color(t.blocked))));
     }
     if(this.role === "detail") {
@@ -399,6 +403,8 @@ export default class TeamQueue extends View {
             .when(Boolean(this.actionFailure),x=>x.child(words(this.actionFailure).text_size(12).text_color(t.blocked)))))
         .child(v_flex().id("queue-detail-body").flex_1().min_h(0).min_w(0).overflow_y_scrollbar().p(18).gap(20)
           .when(Boolean(item.reason),el => el.child(section("진행 상태",words(item.reason).text_color(item.category === "attention" ? t.blocked : t.foreground).line_height("21px"))))
+          .when(Boolean(item.split_worktree),el=>el.child(section("분리 작업 폴더",words(item.split_worktree).text_size(12))))
+          .when(Boolean(item.result_location),el=>el.child(section("결과 위치",words(item.result_location).text_size(12))))
           .child(section("담당·세션",v_flex().gap(9).child(words(item.team_label+" · "+linkedSession))
             .when(Boolean(item.current_terminal),el => el.child(h_flex().flex_wrap().gap(8).items_center()
               .child(div().text_size(11).text_color(t.muted).child("현재 연결: "+item.current_terminal))

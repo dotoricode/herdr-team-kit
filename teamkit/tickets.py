@@ -64,6 +64,13 @@ def _resource_contract(ticket):
         root=reference.get('root') if isinstance(reference,dict) else None
         if not isinstance(root,str) or not Path(root).is_absolute():
             raise ValueError('workflow resource constraint requires an absolute pinned root')
+        inherited = ticket.get('inherited_worktree')
+        if inherited:
+            source = Path(inherited['source_root']).resolve()
+            path = Path(root).resolve()
+            if not path.is_relative_to(source):
+                raise ValueError('workflow worktree constraint is outside inherited source')
+            root = str(Path(inherited['worktree']) / path.relative_to(source))
         constraints=[dict(kind='named',name='worktree:'+str(Path(root).resolve()),
                           mode='write' if 'write' in ticket['scope']['actions'] else 'read')]
     return constraints,normalize_resources([*ticket['resources'],*constraints])
@@ -174,7 +181,7 @@ class TicketStore:
         if type(user_approved) is not bool:
             raise ValueError('user_approved must be explicit boolean')
         spec = json.loads(json.dumps(spec))
-        if 'resource_constraints' in spec or 'worktree_split' in spec:
+        if any(k in spec for k in ('resource_constraints', 'worktree_split', 'inherited_worktree')):
             raise ValueError('resource constraints and worktree splits are host-derived, not caller permissions')
         ident = spec.get('id', '')
         if not IDENT.fullmatch(ident) or not isinstance(registration_key, str) or not registration_key:
@@ -232,8 +239,12 @@ class TicketStore:
             if parent:
                 if parent['state'] in FINAL:
                     raise ValueError('closed parent requires a new instruction')
-                narrowed = (all(set(scope[name]).issubset(parent['scope'][name]) for name in ('actions', 'data'))
-                            and all(within(x, parent['scope']['paths']) for x in scope['paths'])
+                parent_scope = parent['scope']
+                if parent.get('worktree_split'):
+                    from .split_worktree import mapped_scope
+                    parent_scope = mapped_scope(parent, parent['worktree_split'])
+                narrowed = (all(set(scope[name]).issubset(parent_scope[name]) for name in ('actions', 'data'))
+                            and all(within(x, parent_scope['paths']) for x in scope['paths'])
                             and set(spec['profiles']).issubset(parent['profiles'])
                             and spec['product'] == parent['product'])
                 same_verifiers = spec.get('verification_commands', {}) == parent.get('verification_commands', {})
@@ -259,6 +270,8 @@ class TicketStore:
                 if spec.get('approval', {}).get('reference') not in (None, parent['approval'].get('reference')):
                     raise ValueError('child approval must be explicitly granted as a new instruction')
                 origin = parent['origin_id']
+                if parent.get('worktree_split') and narrowed:
+                    spec['inherited_worktree'] = parent['worktree_split']
             else:
                 approval = spec.get('approval', {'state': 'pending'})
                 if not user_approved:

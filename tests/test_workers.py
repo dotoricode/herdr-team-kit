@@ -213,6 +213,56 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(create.call_count, 1)
         self.assertEqual(len(self.store.list()), 1)
 
+    def test_split_worker_launches_in_the_separate_directory(self):
+        from teamkit.tickets import execution_resources
+        ticket = self.ticket('reviewer', 'review')
+        self.attempt = self.reserve(ticket)
+        executor = self.attempt['executor']
+        target = self.root/'isolated'
+        target.mkdir()
+        split = dict(source_root=str(self.root), worktree=str(target),
+                     resources=[dict(kind='path', name=str(target), mode='read')])
+        self.attempt['worktree_split'] = split
+        self.queue._save_attempt(self.attempt)
+        lease = ResourceLedger._rows(self.queue.db)[0]
+        lease['resources'] = execution_resources(ticket, self.attempt)
+        ResourceLedger._write(self.queue.db, lease)
+        native = self.native(executor)
+        native['foreground']['cwd'] = str(target)
+        with patch.object(workers.providers, 'identity'), \
+             patch.object(workers, 'require_managed', return_value='t1'), \
+             patch.object(workers.CoreRuntime, 'launch', side_effect=self.fake_launch) as launch, \
+             patch.object(workers.CoreRuntime, '_native', return_value=native), \
+             patch.object(workers, '_call', return_value={'complete': True, 'text': '❯ \n──────'}):
+            ready = workers.launch(self.config_path, self.state, ticket, self.attempt)
+        self.assertEqual(str(target), launch.call_args.args[0]['root'])
+        self.assertEqual(str(target), ready['execution_root'])
+
+    def test_split_worker_wrong_native_cwd_is_not_ready_or_relaunched(self):
+        from teamkit.tickets import execution_resources
+        ticket = self.ticket('reviewer', 'review')
+        self.attempt = self.reserve(ticket)
+        executor = self.attempt['executor']
+        target = self.root/'isolated'
+        target.mkdir()
+        self.attempt['worktree_split'] = dict(source_root=str(self.root), worktree=str(target),
+            resources=[dict(kind='path', name=str(target), mode='read')])
+        self.queue._save_attempt(self.attempt)
+        lease = ResourceLedger._rows(self.queue.db)[0]
+        lease['resources'] = execution_resources(ticket, self.attempt)
+        ResourceLedger._write(self.queue.db, lease)
+        native = self.native(executor)
+        native['foreground']['cwd'] = str(self.root)
+        with patch.object(workers.providers, 'identity'), \
+             patch.object(workers, 'require_managed', return_value='t1'), \
+             patch.object(workers.CoreRuntime, 'launch', side_effect=self.fake_launch) as launch, \
+             patch.object(workers.CoreRuntime, '_native', return_value=native):
+            with self.assertRaisesRegex(ValueError, 'did not start in the split worktree'):
+                workers.launch(self.config_path, self.state, ticket, self.attempt)
+            with self.assertRaisesRegex(ValueError, 'already attempted'):
+                workers.launch(self.config_path, self.state, ticket, self.attempt)
+        self.assertEqual(1, launch.call_count)
+
     def test_changed_approval_blocks_launch_before_native_creation(self):
         ticket = self.ticket()
         self.attempt = self.reserve(ticket)

@@ -107,7 +107,9 @@ class DocumentStaffTests(unittest.TestCase):
         codex = next(p for p in self.plans(second) if p['provider'] == 'codex')
         claude = next(p for p in self.plans(third) if p['provider'] == 'claude')
         self.reserve_staff(second, codex)
-        with self.assertRaisesRegex(ValueError, 'resource|conflict'):
+        # This fixture is deliberately not a Git checkout, so separation cannot apply.
+        with patch('teamkit.split_worktree.plan', side_effect=ValueError('git 저장소가 아니라 분리 불가')), \
+             self.assertRaisesRegex(ValueError, 'git 저장소'):
             self.reserve_staff(third, claude)
         self.assertEqual(self.queue.get(third['id'])['attempt_count'], 0)
 

@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from teamkit.resources import ResourceLedger
 from teamkit.tickets import TicketStore
@@ -94,6 +95,24 @@ class ReviewWorktreeSplitTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'review or document'):
             self.queue.record_split_intent('TWO')
 
+    def test_git_created_before_db_commit_is_recovered_without_deletion(self):
+        from teamkit.split_worktree import create
+        self.register('ONE', 'implementer', 'code')
+        self.register('TWO', 'reviewer', 'review')
+        self.reserve('ONE')
+        intent = self.queue.record_split_intent('TWO')
+        def interrupted(value):
+            create(value)
+            (Path(value['worktree'])/'keep').write_text('preserve')
+            raise RuntimeError('fixture interruption before commit')
+        with patch('teamkit.split_worktree.create', side_effect=interrupted):
+            with self.assertRaisesRegex(RuntimeError, 'fixture interruption'):
+                self.queue.materialize_split_intent('TWO')
+        phase = self.queue.db.execute('SELECT phase FROM operation_worktree_intents WHERE ticket=?', ('TWO',)).fetchone()[0]
+        self.assertEqual('planned', phase)
+        self.assertEqual(intent, self.queue.materialize_split_intent('TWO'))
+        self.assertEqual('preserve', (Path(intent['worktree'])/'keep').read_text())
+
     def test_conflicting_code_still_waits(self):
         self.register('ONE', 'implementer', 'code')
         self.register('TWO', 'implementer', 'code')
@@ -128,6 +147,22 @@ class ReviewWorktreeSplitTest(unittest.TestCase):
         self.assertFalse(Path(attempt['worktree_split']['worktree']).exists())
         self.assertEqual('pending', self.queue.get('TWO')['state'])
 
+    def test_existing_executor_without_split_boundary_is_not_sent_or_created(self):
+        self.register('ONE', 'implementer', 'code')
+        self.register('TWO', 'reviewer', 'review')
+        self.reserve('ONE')
+        with self.assertRaisesRegex(ValueError, 'working boundary'):
+            self.queue.reserve('TWO', dict(provider='codex', account='personal', owner='owner-TWO',
+                terminal='tTWO', pid=103, root=str(self.repo)), {'global_limit': 8},
+                dict(observed_at=time.time(), complete=True, terminals=[]))
+        self.assertEqual('pending', self.queue.get('TWO')['state'])
+        self.assertFalse((self.root/'operation-worktrees').exists())
+
+    def test_caller_cannot_invent_inherited_worktree_authority(self):
+        with self.assertRaisesRegex(ValueError, 'host-derived'):
+            self.queue.enqueue(dict(id='FAKE', product='fixture', role='reviewer', kind='review',
+                inherited_worktree={'worktree':str(self.root/'outside')}), 'FAKE', user_approved=True)
+
     def test_submission_is_limited_to_split_scope_and_verifier_runs_there(self):
         from teamkit.operations import verify
         self.register('ONE', 'implementer', 'code')
@@ -150,6 +185,23 @@ class ReviewWorktreeSplitTest(unittest.TestCase):
             'import pathlib,sys;sys.exit(pathlib.Path.cwd() != pathlib.Path(sys.argv[1]).parent)', '{artifact}']}
         proof = verify(ticket, self.queue.attempt(attempt['id']))
         self.assertEqual({'report':True}, proof['checks'])
+
+    def test_followup_inherits_only_mapped_parent_scope(self):
+        from teamkit.operations import followup
+        self.register('ONE', 'implementer', 'code')
+        self.register('TWO', 'reviewer', 'review')
+        self.reserve('ONE')
+        attempt = self.reserve('TWO')
+        actor = attempt['executor']
+        self.queue.receipt('TWO', attempt['id'], actor['owner'], actor['terminal'], dict(actor, status='idle'))
+        report = Path(attempt['worktree_split']['worktree'])/'report'
+        report.write_text('result')
+        self.queue.submit('TWO', attempt['id'], actor['owner'], dict(artifact=str(report), writer_stopped=True))
+        child = followup(self.queue, self.queue.get('TWO'), self.queue.attempt(attempt['id']), 'defect', 'correct result')
+        self.assertEqual('pending', child['state'])
+        self.assertEqual(attempt['worktree_split'], child['inherited_worktree'])
+        self.assertEqual([attempt['worktree_split']['worktree']], child['scope']['paths'])
+        self.assertEqual(str(report), child['resources'][0]['name'])
 
 
 if __name__ == '__main__':

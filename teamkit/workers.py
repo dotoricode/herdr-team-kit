@@ -88,7 +88,7 @@ def _policy_task(config, ticket):
     return task
 
 
-def _roots(config, ticket):
+def _roots(config, ticket, queue=None):
     roots = [Path(path).resolve() for path in ticket['scope']['paths'] if Path(path).is_dir()]
     if not roots:
         raise ValueError('worker requires an existing approved directory')
@@ -98,7 +98,14 @@ def _roots(config, ticket):
     team_root = Path(config['teams'][ticket['product']]['root']).resolve()
     allowed = [str(team_root), *config.get('shared_roots', [])]
     if not within(str(root), allowed):
-        raise ValueError('worker root is outside configured product/shared roots')
+        inherited = ticket.get('inherited_worktree')
+        if not inherited or queue is None or not ticket.get('parent_id'):
+            raise ValueError('worker root is outside configured product/shared roots')
+        parent = queue.get(ticket['parent_id'])
+        if parent.get('worktree_split') != inherited or not within(str(root), [inherited['worktree']]):
+            raise ValueError('worker root is outside its parent split worktree')
+        from .split_worktree import _check_existing
+        _check_existing(inherited)
     reference = ticket.get('workflow_ref')
     actor_root = Path(reference['root']).resolve() if reference else root
     return str(root), str(actor_root)
@@ -126,7 +133,7 @@ def plans(config, state, ticket, *, reserved_owner=None):
         task = _policy_task(config, ticket)
         if task is None:
             return []
-        root, actor_root = _roots(config, ticket)
+        root, actor_root = _roots(config, ticket, queue)
         role = execution_policy(config, task)
         if role['action'] != 'dispatch':
             return []
