@@ -47,6 +47,19 @@ const fifo = (a, b) => {
   const x = arrival(a) ?? Infinity, y = arrival(b) ?? Infinity;
   return x === y ? String(a.id).localeCompare(String(b.id)) : x < y ? -1 : 1;
 };
+// Reserve a small chip before visible cards and retain the oldest FIFO head.
+const LANE_SLOT=352, LANE_CHIP=44;
+const laneLayout = (queued, width) => {
+  const w=Math.max(0,width || 0), total=queued.length;
+  if (!total || !w) return {cards:[], hidden:total, chipWidth:0};
+  const overflow=total>1 && total*LANE_SLOT>w;
+  const chipWidth=overflow ? Math.min(LANE_CHIP, Math.max(0,w-1)) : 0;
+  const available=w-chipWidth;
+  const count=Math.min(total,Math.max(1,Math.floor(available/LANE_SLOT)));
+  const slotWidth=Math.min(LANE_SLOT,available/count);
+  const cards=queued.slice(0,count).reverse().map((item,i)=>({item,left:chipWidth+i*slotWidth,slotWidth}));
+  return {cards,hidden:total-count,chipWidth};
+};
 const needsAttention = item => item.requires_user_decision === true || item.category === "attention";
 const splitLane = jobs => ({
   queued: jobs.filter(isQueued).sort(fifo),
@@ -70,7 +83,7 @@ export default class TeamQueue extends View {
     this.filter = "active"; this.selected = this.options.item ?? null;
     this.revealed = this.role !== "detail";
     this.entering = new Set(); this.leaving = new Map(); this.minute = 0; this.again = false;
-    this.requestOpen = false; this.takenFlash = false;
+    this.requestOpen = false; this.takenFlash = false; this.trackWidth = 0;
     cx.spawn(async cx => {
       try {
         const local = this.options.local ?? appHome() + "/mods/" + MOD + "/local.json";
@@ -112,16 +125,25 @@ export default class TeamQueue extends View {
     try { for(;;) { await watchFolder(dir); await this.refresh(cx); } }
     catch(_error) { /* no watch: the 5s poll keeps the strip current */ }
   }
-  // New lane cards fade in; cards that left (taken) fade out before they are dropped.
+  // Keep departing cards at their last measured position, then move them to the intake.
   trackLane(cx, before, after) {
     if(!before) return;
     const was=splitLane(before.jobs).queued, now=splitLane(after.jobs).queued;
     const nowIds=new Set(now.map(x=>x.id)), wasIds=new Set(was.map(x=>x.id));
-    const fresh=now.filter(x=>!wasIds.has(x.id)), gone=was.filter(x=>!nowIds.has(x.id));
+    const fresh=now.filter(x=>!wasIds.has(x.id));
+    const visible=laneLayout(was,this.trackWidth).cards;
+    const gone=visible.filter(x=>!nowIds.has(x.item.id));
     for(const x of fresh) { this.entering.add(x.id); this.leaving.delete(x.id); }
-    for(const x of gone) this.leaving.set(x.id, x);
-    if(fresh.length) cx.timer.after(32, cx => { this.entering.clear(); cx.notify(); });
-    if(gone.length) cx.timer.after(420, cx => { for(const x of gone) this.leaving.delete(x.id); cx.notify(); });
+    for(const x of gone) this.leaving.set(x.item.id,{...x, moving:false});
+    if(fresh.length || gone.length) cx.timer.after(32, cx => {
+      for(const x of fresh) this.entering.delete(x.id);
+      for(const x of gone) { const ghost=this.leaving.get(x.item.id); if(ghost?.item===x.item) ghost.moving=true; }
+      cx.notify();
+    });
+    if(gone.length) cx.timer.after(700, cx => {
+      for(const x of gone) { const ghost=this.leaving.get(x.item.id); if(ghost?.item===x.item) this.leaving.delete(x.item.id); }
+      cx.notify();
+    });
     if(splitLane(before.jobs).taken.length !== splitLane(after.jobs).taken.length) {
       this.takenFlash=true;
       cx.timer.after(450, cx => { this.takenFlash=false; cx.notify(); });
@@ -231,44 +253,49 @@ export default class TeamQueue extends View {
     const {queued,taken}=splitLane(this.data?.jobs??[]);
     const attention=taken.filter(needsAttention).length;
     const queuedIds=new Set(queued.map(x=>x.id));
-    // lane: oldest (head) first, as splitLane defines it. Rendering reverses it: newest at the left entrance, head at the right exit.
-    const lane=[...queued,...[...this.leaving.values()].filter(x=>!queuedIds.has(x.id))].sort(fifo);
+    const layout=laneLayout(queued,this.trackWidth);
     const status=this.stripStatus();
     const openList=()=>openOverlay({ mod:MOD, props:{ role:"list", local:this.options.local }, kind:"dialog", modal:false, frame:"none", width:0.72, height:0.82 });
     const linkBtn=(id,label,cb)=>div().id(id).flex_none().whitespace_nowrap().px(10).h(24).flex().items_center().border_1().border_color(t.dim).text_size(13).text_color(t.foreground).cursor_pointer()
       .hover(el=>el.bg(t.raised)).on_click((_e,c)=>{c.stop_propagation();cb(c);}).child(label);
-    // Motion is native only: width/left/opacity transitions and loops run without this script.
-    const CARD_W=320, RING=3, ARROW_W=26, SLOT_W=CARD_W+RING*2+ARROW_W, CARD_H=68;
-    const card=(item,head)=>{
-      const leaving=!queuedIds.has(item.id), entering=this.entering.has(item.id), hidden=leaving||entering;
+    const CARD_H=68, RING=3, DURATION=650;
+    const card=(entry,head,ghost=false)=>{
+      const {item}=entry, moving=ghost&&entry.moving, entering=!ghost&&this.entering.has(item.id);
+      const left=moving ? Math.max(entry.left,(this.trackWidth||0)-4) : entry.left+(entering?-60:0);
+      const width=Math.max(1,entry.slotWidth), cardWidth=Math.max(1,width-32);
       const alert=needsAttention(item), ts=arrival(item);
       const age=ts==null?"":elapsed(Math.max(0,now-ts))+" 대기";
-      return h_flex().id("queue-lane-"+item.id).flex_none().items_center().overflow_hidden()
-        .w(hidden?0:SLOT_W).opacity(hidden?0:1)
-        .transition("width",{duration:340,easing:"ease-out"}).transition("opacity",{duration:260,easing:"ease-out"})
-        .child(h_flex().relative().flex_none().items_center().w(SLOT_W).left(leaving?60:entering?-60:0)
-          .transition("left",{duration:340,easing:"ease-out"})
-          .child(v_flex().relative().flex_none().w(CARD_W+RING*2).h(CARD_H+RING*2).p(RING)
-            .when(head&&!alert,el=>el.child(div().absolute().left(0).top(0).right(0).bottom(0).border_2().border_color(t.accent)
-              .loop("opacity",{from:0.2,to:1,period:2200})))
-            .child(v_flex().flex_none().w(CARD_W).h(CARD_H).px(12).py(8).gap(4).justify_center().border_1().border_color(alert?t.blocked:head?t.accent:t.border).bg(t.surface)
-              .cursor_pointer().hover(el=>el.bg(t.raised)).on_click(()=>this.detail(item)).tooltip(item.title+(item.reason?" · "+item.reason:""))
-              .accessibility_label((head?"다음 배정 · ":"")+item.team_label+" · "+item.title+" · "+age)
-              .child(h_flex().min_w(0).items_center().gap(8).text_size(12)
-                .when(head,el=>el.child(div().flex_none().whitespace_nowrap().px(6).bg(t.accent).text_color(t.accent_foreground).font_semibold()
-                  .loop("opacity",{from:0.55,to:1,period:2200}).child("다음")))
-                .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(shortTeam(item.team_label)))
-                .child(div().flex_none().whitespace_nowrap().text_color(alert?t.blocked:t.muted).child(age)))
-              .child(div().min_w(0).truncate().text_size(16).font_semibold().child(item.short_title ?? item.title))))
-          .child(div().w(ARROW_W).flex_none().flex().justify_center().text_size(20).text_color(t.dim)
-            .loop("opacity",{from:0.25,to:1,period:2400}).child("›")));
+      return h_flex().id("queue-lane-"+item.id).absolute().left(left).top(moving?41:4).items_center().overflow_hidden()
+        .w(moving?1:width).h(moving?1:CARD_H+RING*2).opacity(moving||entering?0:1)
+        .transition("left",{duration:ghost?DURATION:340,easing:ghost?"ease-in":"ease-out"})
+        .transition("top",{duration:DURATION,easing:"ease-in"})
+        .transition("width",{duration:DURATION,easing:"ease-in"}).transition("height",{duration:DURATION,easing:"ease-in"})
+        .transition("opacity",{duration:ghost?DURATION:260,easing:ghost?"ease-in":"ease-out"})
+        .child(v_flex().id("queue-lane-frame-"+item.id).relative().flex_none().overflow_hidden().w(moving?1:cardWidth+RING*2).h(moving?1:CARD_H+RING*2).p(RING)
+          .transition("width",{duration:DURATION,easing:"ease-in"}).transition("height",{duration:DURATION,easing:"ease-in"})
+          .when(head&&!alert,el=>el.child(div().absolute().left(0).top(0).right(0).bottom(0).border_2().border_color(t.accent)
+            .loop("opacity",{from:0.2,to:1,period:2200})))
+          .child(v_flex().id("queue-lane-content-"+item.id).flex_none().overflow_hidden().w(moving?1:cardWidth).h(moving?1:CARD_H)
+            .transition("width",{duration:DURATION,easing:"ease-in"}).transition("height",{duration:DURATION,easing:"ease-in"}).px(12).py(8).gap(4).justify_center().border_1().border_color(alert?t.blocked:head?t.accent:t.border).bg(t.surface)
+            .cursor_pointer().hover(el=>el.bg(t.raised)).on_click(()=>this.detail(item)).tooltip(item.title+(item.reason?" · "+item.reason:""))
+            .accessibility_label((head?"다음 배정 · ":"")+item.team_label+" · "+item.title+" · "+age)
+            .child(h_flex().min_w(0).items_center().gap(8).text_size(12)
+              .when(head,el=>el.child(div().flex_none().whitespace_nowrap().px(6).bg(t.accent).text_color(t.accent_foreground).font_semibold()
+                .loop("opacity",{from:0.55,to:1,period:2200}).child("다음")))
+              .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(shortTeam(item.team_label)))
+              .child(div().flex_none().whitespace_nowrap().text_color(alert?t.blocked:t.muted).child(age)))
+            .child(div().min_w(0).truncate().text_size(moving?8:16).font_semibold().child(item.short_title ?? item.title))))
+        .child(div().w(26).flex_none().flex().justify_center().text_size(20).text_color(t.dim)
+          .loop("opacity",{from:0.25,to:1,period:2400}).child("›"));
     };
-    const live=lane.filter(x=>queuedIds.has(x.id));
+    const measure=(size,c)=>{ if(Math.abs((this.trackWidth||0)-size.width)>0.5) { this.trackWidth=size.width; c.notify(); } };
     const body=!this.data ? words(this.failure ? "최신 조회 확인 필요 · "+this.failure : "업무를 읽고 있습니다").text_size(14).text_color(this.failure?t.blocked:t.muted)
-      : !lane.length ? h_flex().flex_1().min_w(0).justify_center().child(h_flex().id("queue-lane-empty").flex_none().items_center().gap(10).h(CARD_H).px(16).border_1().border_color(t.border).bg(t.background).text_size(14).text_color(t.muted)
+      : !queued.length && !this.leaving.size ? h_flex().flex_1().min_w(0).justify_center().child(h_flex().id("queue-lane-empty").flex_none().items_center().gap(10).h(CARD_H).px(16).border_1().border_color(t.border).bg(t.background).text_size(14).text_color(t.muted)
           .loop("opacity",{from:0.55,to:1,period:3200}).child(div().text_color(t.dim).child("—")).child("대기 중인 업무 없음 · 들어오면 자동 배정됩니다"))
-      : // justify_end + overflow_hidden: when full, the newest (left) cards are clipped so the head at the right stays visible.
-          h_flex().id("queue-lane-track").flex_1().min_w(0).items_center().justify_end().overflow_hidden().children([...lane].reverse().map(x=>card(x,x.id===live[0]?.id)));
+      : h_flex().id("queue-lane-track").relative().flex_1().min_w(0).h(CARD_H+RING*2+8).overflow_hidden().on_size_change(measure)
+          .when(layout.hidden>0 && layout.chipWidth>0,el=>el.child(div().id("queue-lane-overflow").absolute().left(0).top(22).w(layout.chipWidth).h(28).flex().items_center().justify_center().bg(t.background).text_color(t.accent).cursor_pointer().on_click(()=>openList()).child("+"+layout.hidden)))
+          .children(layout.cards.map(x=>card(x,x.item.id===queued[0]?.id)))
+          .children([...this.leaving.values()].filter(x=>!queuedIds.has(x.item.id)).map(x=>card(x,false,true)));
     const end=(id,label,w)=>div().id(id).flex_none().whitespace_nowrap().text_size(14).text_color(t.muted).bg(t.background).px(3).child(label);
     // Rail: a 2px line at the lane's vertical centre behind entry, cards and exit (all opaque), with dots shifted rightwards by native text frames.
     // loop() only swings there-and-back (gpui-kit.d.ts LoopPolicy), so one-way flow uses fine native text frames: 4px steps every 64ms, 40-step cycle = 2.56s.
@@ -294,7 +321,9 @@ export default class TeamQueue extends View {
         .child(rail)
         .child(end("queue-lane-entry","입구 ›").frames(["입구 ›","입구 ››","입구 ›››"],700))
         .child(body)
-        .child(end("queue-lane-exit","배정 ▶")));
+        .child(h_flex().id("queue-lane-exit").flex_none().items_center().bg(t.background).gap(4)
+          .child(div().id("queue-lane-exit-intake").w(12).h(12).rounded_full().border_2().border_color(t.accent).loop("opacity",{from:0.45,to:1,period:1800}))
+          .child(end("queue-lane-exit-label","배정 ▶"))));
   }
   render(cx) {
     const t=theme();
