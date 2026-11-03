@@ -33,6 +33,8 @@ export default class TeamQueue extends View {
     this.role = this.options.role ?? "list";
     this.data = null; this.failure = null; this.inFlight = false;
     this.actionFlight = false; this.actionFailure = null; this.pendingAction = null;
+    this.executionFlight=false; this.executionFailure=null; this.executionResult=null; this.pendingExecution=null;
+    this.candidates=null; this.candidateFlight=false; this.candidateFailure=null;
     this.filter = "active"; this.selected = this.options.item ?? null;
     this.revealed = this.role !== "detail";
     cx.spawn(async cx => {
@@ -42,7 +44,7 @@ export default class TeamQueue extends View {
         await this.refresh(cx);
       } catch(error) { this.failure = String(error); cx.notify(); }
     });
-    cx.timer.every(5000,cx => { if(this.config) cx.spawn(async cx => this.refresh(cx)); });
+    cx.timer.every(5000,cx => { if(this.config) cx.spawn(async cx => { await this.refresh(cx); if(this.pendingExecution) await this.pollAction(cx); }); });
     if(this.role === "detail") cx.timer.after(32,cx => { this.revealed = true; cx.notify(); });
   }
   async refresh(cx) {
@@ -63,7 +65,7 @@ export default class TeamQueue extends View {
     } finally { this.inFlight=false; }
   }
   async organize(cx, action) {
-    if(this.actionFlight || !this.config || !this.selected?.board_state) return;
+    if(this.actionFlight || this.executionFlight || this.pendingExecution || !this.config || !this.selected?.board_state) return;
     if(this.pendingAction && action !== null) return;
     if(!this.pendingAction) this.pendingAction = {
       id:this.selected.id, action, revision:this.selected.board_state.revision,
@@ -83,6 +85,63 @@ export default class TeamQueue extends View {
     } catch(error) {
       this.actionFailure=String(error)+(this.pendingAction ? " · 결과 불명: 재확인은 같은 요청 ID를 사용합니다" : "");
     } finally { this.actionFlight=false; cx.notify(); }
+  }
+  async queueCall(args) {
+    const c=this.config;
+    const result=await exec(c.python,[c.cli,"--config",c.config,"--state",c.state,"queue",...args]);
+    if(result.code !== 0) throw new Error(result.stderr || "업무 동작의 결과를 확인할 수 없습니다");
+    return JSON.parse(result.stdout);
+  }
+  async loadCandidates(cx) {
+    if(this.candidateFlight || this.pendingExecution || !this.config || !this.selected) return;
+    this.candidateFlight=true; this.candidateFailure=null; cx.notify();
+    try {
+      const result=await this.queueCall(["candidates",this.selected.id]);
+      if(!Array.isArray(result.candidates)) throw new Error("담당자 후보 자료 형식을 확인하세요");
+      this.candidates=result;
+    } catch(error) { this.candidates=null; this.candidateFailure=String(error); }
+    finally { this.candidateFlight=false; cx.notify(); }
+  }
+  async executeAction(cx,kind,candidate) {
+    if(this.executionFlight || this.pendingExecution || this.actionFlight || this.pendingAction || !this.config) return;
+    if(kind === "send" && (!this.selected || this.candidates?.send_allowed !== true ||
+      !this.candidates.expected_ticket || candidate?.eligible !== true ||
+      !this.candidates.candidates.some(x=>x.id===candidate.id && x.eligible===true))) return;
+    const pending={kind,request:"queue-action-ui-"+Date.now().toString(36)+"-"+Math.random().toString(36).slice(2)};
+    this.pendingExecution=pending; this.executionFlight=true; this.executionFailure=null; this.executionResult=null; cx.notify();
+    try {
+      const args=kind === "send" ? ["send",this.selected.id,"--candidate-id",candidate.id,
+        "--expected-ticket",this.candidates.expected_ticket] : ["sync"];
+      this.acceptAction(await this.queueCall([...args,"--client-request-id",pending.request]));
+      if(!this.pendingExecution) await this.refresh(cx);
+    } catch(error) { this.executionFailure=String(error)+" · 결과 확인 필요: 같은 요청 ID로 조회합니다"; }
+    finally { this.executionFlight=false; cx.notify(); }
+  }
+  acceptAction(result) {
+    if(result.id !== this.pendingExecution?.request || !["queued","running","completed","blocked","uncertain","failed"].includes(result.status))
+      throw new Error("업무 동작 응답의 요청 ID·상태를 확인하세요");
+    this.executionResult=result; this.executionFailure=null;
+    if(["completed","blocked","failed"].includes(result.status)) { this.pendingExecution=null; this.candidates=null; }
+  }
+  async pollAction(cx) {
+    if(this.executionFlight || !this.pendingExecution || !this.config) return;
+    this.executionFlight=true;
+    try {
+      this.acceptAction(await this.queueCall(["action-status","--client-request-id",this.pendingExecution.request]));
+      if(!this.pendingExecution) await this.refresh(cx);
+    } catch(error) { this.executionFailure=String(error)+" · 결과 확인 필요: 새 전송 없이 조회만 합니다"; }
+    finally { this.executionFlight=false; cx.notify(); }
+  }
+  actionStatus(t) {
+    const result=this.executionResult;
+    const sync=result?.kind === "sync" && result?.status === "completed" ? result.result : null;
+    const label=({queued:"처리 접수 · 결과 확인 대기",running:"업무 상태 확인·처리 중",completed:"요청 처리 확인",blocked:"처리 불가",uncertain:"결과 불명 · 재전송 금지",failed:"처리 실패"})[result?.status];
+    return v_flex().gap(5)
+      .when(Boolean(this.pendingExecution)&&!result,el=>el.child(words("요청 결과 확인 중")))
+      .when(Boolean(label),el=>el.child(words(label+(result.reason?" · "+result.reason:""))))
+      .when(Boolean(sync),el=>el.child(words("확인 업무 "+String(sync.observed_count??"미확인")+" · 새 배정 "+String(sync.dispatch?.started?.length??"미확인")+" · 검증 종결 "+String(sync.completed?.length??"미확인"))))
+      .when(Boolean(this.executionFailure),el=>el.child(words(this.executionFailure).text_color(t.blocked)))
+      .when(Boolean(this.pendingExecution),el=>el.child(button("queue-action-recheck",this.executionFlight?"확인 중…":"동작 결과 재확인",cx=>cx.spawn(async cx=>this.pollAction(cx)),t)));
   }
   detail(item) {
     openOverlay({ mod:MOD, props:{ role:"detail", item, local:this.options.local }, kind:"dialog", modal:false, frame:"none", width:0.72, height:0.82 });
@@ -165,6 +224,17 @@ export default class TeamQueue extends View {
               .when(Boolean(current),x => x.child(button("queue-focus-session","담당 대화 열기",()=>{closeOverlay(this.options.overlay);run("agent.focus",{terminal:item.current_terminal});},t)))))
             .when(Boolean(item.receiver_terminal),el => el.child(words("원 요청의 수신 기록: "+item.receiver_terminal+(item.session_changed ? " · 현재 실행자와 다른 세션" : "")).text_size(11).text_color(t.muted)))
             .child(words("연결된 작업: "+(item.task_id ?? "미등록")+" · "+(item.task_state ?? "상태 미확인")).text_size(11).text_color(t.muted))))
+          .child(section("담당자에게 전송",v_flex().gap(8)
+            .child(button("queue-send-candidates",this.candidateFlight?"담당자 확인 중…":"담당자에게 전송",cx=>cx.spawn(async cx=>this.loadCandidates(cx)),t))
+            .when(Boolean(this.candidateFailure),el=>el.child(words(this.candidateFailure).text_color(t.blocked)))
+            .when(Boolean(this.candidates),el=>el
+              .when(this.candidates?.send_allowed!==true,x=>x.child(words(this.candidates?.reason||"현재 전송 불가 · 승인·수신 상태 확인 필요").text_color(t.blocked)))
+              .when(!this.candidates?.candidates.length,x=>x.child(words("선택 가능한 담당자가 없습니다")))
+              .children((this.candidates?.candidates??[]).map(candidate=>v_flex().gap(4)
+                .child(words((candidate.alias||"별명 미확인")+" ("+({personal:"개인",team:"팀"}[candidate.account]||"계정 미확인")+") · "+(candidate.role||"역할 미확인")))
+                .when(candidate.eligible!==true,x=>x.child(words(candidate.reason||"현재 배정 불가").text_color(t.blocked)))
+                .when(this.candidates?.send_allowed===true&&candidate.eligible===true&&!this.pendingExecution,x=>x.child(button("queue-send-"+candidate.id,"이 담당자에게 전송",cx=>cx.spawn(async cx=>this.executeAction(cx,"send",candidate)),t))))))
+            .child(this.actionStatus(t))))
           .child(section("요청 내용",words(item.request || "저장된 요청 본문 없음").line_height("21px")))
           .child(section("책임·연결",v_flex().gap(5).child(words("책임 조직: "+item.team_label+" · 실행 역할: "+(item.role??"기존 요청"))).child(words("원 지시: "+(item.origin_id??item.id)+" · 부모: "+(item.parent_id??"없음"))).child(words("다음 행동: "+(item.next_action??"담당자 확인")))))
           .when(Boolean(item.handoff),el => el.child(section("인계 상태",words((item.handoff?.phase ?? "미확인")+" · "+(item.handoff?.reason ?? "기록된 이유 없음")).text_size(12))))
@@ -202,8 +272,10 @@ export default class TeamQueue extends View {
             .bg(this.filter===id?t.raised:t.background).text_color(this.filter===id?t.foreground:t.muted)
             .cursor_pointer().on_click((_event,cx)=>{this.filter=id;cx.notify();}).child(label)))
           .child(button("queue-operations",data&&!healthy?"운영 확인":"운영 정보",()=>this.operations(),t))
+          .child(button("queue-sync",this.executionFlight?"동기화 확인 중…":"업무 동기화",cx=>cx.spawn(async cx=>this.executeAction(cx,"sync")),t))
           .child(button("queue-refresh","새로고침",cx=>cx.spawn(async cx=>this.refresh(cx)),t))))
       .child(v_flex().id("queue-content").flex_1().min_h(0).min_w(0).overflow_y_scrollbar().p(14).pt(0).gap(8)
+        .child(this.actionStatus(t))
         .when(Boolean(this.failure),el=>el.child(fail()))
         .when(Boolean(data?.warnings?.length),el=>el.child(words("일부 기록 확인 필요 · 운영 정보에서 확인하세요").text_size(11).text_color(t.blocked)))
         .when(!data&&!this.failure,el=>el.child(words("업무를 읽고 있습니다").text_color(t.muted)))
