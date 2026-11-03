@@ -157,6 +157,12 @@ class CoreRuntime:
                 '--label', 'teamkit.name='+name]
         # An empty CLAUDE_CONFIG_DIR makes Claude store its home in the working directory.
         env = dict(spec['env'])
+        # hc presents a color-capable PTY even when its caller is a dumb pipe.
+        term = env.get('TERM', os.environ.get('TERM', ''))
+        env['TERM'] = term if term and term != 'dumb' else 'xterm-256color'
+        env['COLORTERM'] = env.get('COLORTERM', os.environ.get('COLORTERM', '')) or 'truecolor'
+        if 'NO_COLOR' not in env and 'NO_COLOR' in os.environ:
+            env['NO_COLOR'] = os.environ['NO_COLOR']
         unset = ['-u', 'CLAUDE_CONFIG_DIR'] if env.get('CLAUDE_CONFIG_DIR') == '' else []
         if unset:
             del env['CLAUDE_CONFIG_DIR']

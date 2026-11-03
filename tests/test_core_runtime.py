@@ -86,6 +86,39 @@ class CoreTests(unittest.TestCase):
         CoreRuntime().launch(self.task,spec,'tk-owner')
         argv=next(a for a,_ in self.hc.calls if a[:2]==['hc','run'])
         return argv[argv.index('--')+1:]
+    def test_launch_repairs_dumb_terminal_environment_at_hc_boundary(self):
+        with patch.dict(os.environ, {'TERM':'dumb','COLORTERM':''}, clear=True):
+            with patch('teamkit.core_runtime.require_managed'):
+                argv=self.launched_env({})
+        self.assertIn('TERM=xterm-256color',argv)
+        self.assertIn('COLORTERM=truecolor',argv)
+
+    def test_launch_preserves_explicit_terminal_capabilities_and_no_color(self):
+        with patch.dict(os.environ, {'TERM':'dumb','COLORTERM':''}, clear=True):
+            with patch('teamkit.core_runtime.require_managed'):
+                argv=self.launched_env({'TERM':'screen-256color','COLORTERM':'24bit','NO_COLOR':''})
+        self.assertIn('TERM=screen-256color',argv)
+        self.assertIn('COLORTERM=24bit',argv)
+        self.assertIn('NO_COLOR=',argv)
+        self.assertNotIn('FORCE_COLOR=1',argv)
+
+    def test_launch_forwards_normal_parent_terminal_and_no_color(self):
+        with patch.dict(os.environ, {'TERM':'tmux-256color','COLORTERM':'24bit','NO_COLOR':'1'}, clear=True):
+            with patch('teamkit.core_runtime.require_managed'):
+                argv=self.launched_env({})
+        self.assertIn('TERM=tmux-256color',argv)
+        self.assertIn('COLORTERM=24bit',argv)
+        self.assertIn('NO_COLOR=1',argv)
+
+    def test_launch_color_fallback_handles_missing_and_explicit_dumb_values(self):
+        for env in ({}, {'TERM':'dumb','COLORTERM':''}, {'TERM':''}):
+            with self.subTest(env=env),patch.dict(os.environ,{},clear=True):
+                self.hc.calls.clear()
+                with patch('teamkit.core_runtime.require_managed'):
+                    argv=self.launched_env(env)
+                self.assertIn('TERM=xterm-256color',argv)
+                self.assertIn('COLORTERM=truecolor',argv)
+
     def test_default_claude_home_is_unset_not_empty(self):
         argv=self.launched_env({'ANTHROPIC_API_KEY':'','CLAUDE_CONFIG_DIR':''})
         self.assertEqual(argv[:3],['env','-u','CLAUDE_CONFIG_DIR'])
