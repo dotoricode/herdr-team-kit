@@ -353,7 +353,7 @@ class TicketStore:
         self.db.execute('INSERT OR REPLACE INTO operation_attempts VALUES (?,?,?)',
                         (attempt['id'], attempt['ticket'], json.dumps(attempt)))
 
-    def reserve(self, ident, executor, policy, observation, expected_revision=None, *, before_reserve=None):
+    def reserve(self, ident, executor, policy, observation, expected_revision=None, manual_action=None, *, before_reserve=None):
         from .resources import ResourceLedger
         ledger = ResourceLedger(self.db)
         with self.transaction():
@@ -370,6 +370,8 @@ class TicketStore:
             if (profile not in item['profiles'] or not executor.get('owner')
                     or not planned and type(executor.get('pid')) is not int):
                 raise ValueError('executor identity/profile mismatch')
+            from .queue_actions import reserve_selection
+            reserve_selection(self.db, ident, executor, manual_action)
             budget = self._budget(item['origin_id'])
             estimate = item.get('estimated_tokens', 4096)
             if (budget['attempts'] >= budget['limits']['attempts'] or item['attempt_count'] >= 3

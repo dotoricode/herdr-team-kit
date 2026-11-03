@@ -427,6 +427,9 @@ def tick(config_path, state, runtime=None, *, selection=None):
         for ticket in queue.ready():
             if ticket['role']=='ui' or selection is not None and ticket['id'] != selection['ticket']:
                 continue
+            from .queue_actions import selection_hold
+            if selection is None and selection_hold(queue.db, ticket['id']) is not None:
+                continue  # Manual selection survives blocked actions and later syncs.
             reasons = []
             try:
                 candidates = runtime.executors(ticket)
@@ -447,6 +450,7 @@ def tick(config_path, state, runtime=None, *, selection=None):
                         docsstaff.check(config, queue.db, item, actor)
                     attempt = queue.reserve(ticket['id'], executor, policy(config), observation,
                                             expected_revision=selection['expected_ticket'] if selection else None,
+                                            manual_action=selection['action_id'] if selection else None,
                                             before_reserve=staff_guard)
                 except (ValueError, KeyError, OSError, subprocess.SubprocessError, NativeError) as error:
                     reasons.append(str(error))

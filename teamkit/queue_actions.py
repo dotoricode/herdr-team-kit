@@ -16,6 +16,8 @@ from .tickets import TicketStore, digest
 def schema(db):
     db.execute('''CREATE TABLE IF NOT EXISTS queue_actions
                   (id TEXT PRIMARY KEY, body TEXT NOT NULL)''')
+    db.execute('''CREATE TABLE IF NOT EXISTS queue_action_holds
+                  (ticket TEXT PRIMARY KEY, action TEXT NOT NULL, candidate TEXT NOT NULL)''')
 
 
 def executor_identity(executor):
@@ -24,6 +26,40 @@ def executor_identity(executor):
         return digest({key: executor.get(key) for key in ('new', *PLAN_FIELDS)})
     # Display aliases never participate in identity.
     return digest(executor)
+
+
+def selection_hold(db, ticket):
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='queue_action_holds'").fetchone():
+        row = db.execute('SELECT action,candidate FROM queue_action_holds WHERE ticket=?', (ticket,)).fetchone()
+        if row:
+            return dict(action=row[0], candidate=row[1])
+    # Earlier durable send records also express a manual selection. Upgrading
+    # must not turn an existing blocked/queued action back into automatic work.
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='queue_actions'").fetchone():
+        for row in db.execute('SELECT body FROM queue_actions ORDER BY rowid DESC'):
+            action = json.loads(row[0])
+            if action['kind'] == 'send' and action['request']['ticket'] == ticket:
+                return dict(action=action['id'], candidate=action['request']['candidate_id'])
+    return None
+
+
+def reserve_selection(db, ticket, executor, action_id=None):
+    """Called inside the official reserve transaction, including automatic ticks."""
+    hold = selection_hold(db, ticket)
+    if hold is None:
+        if action_id is not None:
+            raise ValueError('manual selection hold missing; no input sent')
+        return
+    if (hold['action'] != action_id or hold['candidate'] != executor_identity(executor)
+            or _read(db, hold['action'])['status'] != 'running'):
+        raise ValueError('manual executor selection held; explicit fresh selection required, no fallback')
+
+
+def _previous_selection_reason(db, ticket):
+    hold = selection_hold(db, ticket)
+    if hold and _read(db, hold['action'])['status'] in ('queued', 'running', 'uncertain'):
+        return 'previous selected action is queued, running or uncertain; inspect original outcome before reselection'
+    return None
 
 
 def _send_reason(queue, ticket, config):
@@ -42,7 +78,7 @@ def candidates(config_path, state, ident, runtime=None):
     queue = TicketStore(state, read_only=True)
     try:
         ticket = queue.get(ident)
-        reason = _send_reason(queue, ticket, config)
+        reason = _send_reason(queue, ticket, config) or _previous_selection_reason(queue.db, ident)
         rows = []
         if reason:
             return dict(ticket=ident, expected_ticket=digest(ticket), candidates=[], send_allowed=False, reason=reason)
@@ -61,6 +97,10 @@ def candidates(config_path, state, ident, runtime=None):
                 preview.path, preview.clock = queue.path, time.time
                 try:
                     queue.db.backup(preview.db)
+                    # Candidate previews may offer a fresh explicit reselection;
+                    # only the real reserve transaction enforces a current hold.
+                    preview.db.execute('DROP TABLE IF EXISTS queue_action_holds')
+                    preview.db.execute('DROP TABLE IF EXISTS queue_actions')
                     from .admission import configure
                     configure(preview.db, policy(config))
                     preview.reserve(ident, executor, policy(config), runtime.observation(), expected_revision=digest(ticket))
@@ -124,6 +164,21 @@ def enqueue(config_path, state, kind, client_request_id, *, ticket=None, candida
                 return result
             result = dict(id=client_request_id, kind=kind, request=request, status='queued',
                           reason='durable request recorded; waiting for dispatch consumer', created_at=time.time(), result=None)
+            if kind == 'send':
+                current = queue.get(ticket)
+                previous = _previous_selection_reason(queue.db, ticket)
+                problem = (_send_reason(queue, current, load(config_path)) or previous)
+                if digest(current) != expected_ticket:
+                    problem = 'ticket changed before manual selection; refresh candidates'
+                if current.get('attempt'):
+                    problem = 'existing execution attempt requires original outcome inspection; never resend'
+                # Even a stale preview expresses a manual selection. Preserve
+                # that intent on pending work, but never replace a live action.
+                if current['state']=='pending' and not current.get('attempt') and not previous:
+                    queue.db.execute('INSERT OR REPLACE INTO queue_action_holds VALUES (?,?,?)',
+                                     (ticket, client_request_id, candidate_id))
+                if problem:
+                    result.update(status='blocked', reason=problem, finished_at=time.time())
             _save(queue.db, result)
         from .wake import notify
         # Do not hold SQLite while waking the existing consumer.
@@ -157,7 +212,7 @@ def consume(config_path, state, runtime=None):
                         problem = 'ticket changed since candidate preview; refresh candidates'
                     if problem:
                         raise ValueError(problem)
-                    dispatch = tick(config_path, state, runtime=runtime, selection=request)
+                    dispatch = tick(config_path, state, runtime=runtime, selection={**request, 'action_id':action['id']})
                 else:
                     dispatch = tick(config_path, state, runtime=runtime)
                 after = {x['id']: x for x in queue.list()}

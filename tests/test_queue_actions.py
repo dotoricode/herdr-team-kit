@@ -33,24 +33,84 @@ class QueueActionsTest(unittest.TestCase):
         self.assertEqual('completed', actions.status(self.state, 'click-one')['status'])
         self.assertEqual('completed', click(None)['status'])
 
-    def test_distinct_clicks_and_consumers_cannot_send_same_ticket_twice(self):
+    def test_distinct_clicks_cannot_replace_unfinished_selection(self):
         self.enqueue('ONE')
         choices=actions.candidates(self.config,self.state,'ONE',runtime=self.runtime)
         for key in ('click-a','click-b'):
-            actions.enqueue(self.config,self.state,'send',key,ticket='ONE',
-                candidate_id=choices['candidates'][0]['id'],expected_ticket=choices['expected_ticket'])
-        barrier=threading.Barrier(2)
-        original=self.runtime.admit
-        def simultaneous(ticket,candidate):
-            barrier.wait(timeout=5)
-            return original(ticket,candidate)
-        self.runtime.admit=simultaneous
+            if key == 'click-b':
+                rejected=actions.enqueue(self.config,self.state,'send',key,ticket='ONE',
+                    candidate_id=choices['candidates'][0]['id'],expected_ticket=choices['expected_ticket'])
+                self.assertEqual('blocked',rejected['status'])
+                self.assertIn('previous selected action',rejected['reason'])
+            else:
+                actions.enqueue(self.config,self.state,'send',key,ticket='ONE',
+                    candidate_id=choices['candidates'][0]['id'],expected_ticket=choices['expected_ticket'])
         with concurrent.futures.ThreadPoolExecutor(2) as pool:
             list(pool.map(lambda _:actions.consume(self.config,self.state,runtime=self.runtime),range(2)))
         self.assertEqual(1,len(self.runtime.sent))
         q=TicketStore(self.state)
         try:self.assertEqual(1,len(list(q.db.execute('SELECT * FROM operation_attempts'))))
         finally:q.close()
+
+    def test_manual_hold_committed_during_automatic_admission_blocks_reserve(self):
+        from teamkit.operations import tick
+        self.enqueue('ONE')
+        choice=actions.candidates(self.config,self.state,'ONE',runtime=self.runtime)
+        admitted=threading.Event()
+        released=threading.Event()
+        original=self.runtime.admit
+        def paused(ticket,candidate):
+            admitted.set()
+            self.assertTrue(released.wait(timeout=5))
+            return original(ticket,candidate)
+        self.runtime.admit=paused
+        with concurrent.futures.ThreadPoolExecutor(1) as pool:
+            future=pool.submit(tick,self.config,self.state,self.runtime)
+            self.assertTrue(admitted.wait(timeout=5))
+            actions.enqueue(self.config,self.state,'send','racing-manual',ticket='ONE',
+                candidate_id=choice['candidates'][0]['id'],expected_ticket=choice['expected_ticket'])
+            released.set()
+            future.result(timeout=5)
+        q=TicketStore(self.state)
+        try:
+            self.assertEqual('pending',q.get('ONE')['state'])
+            self.assertEqual([],list(q.db.execute('SELECT * FROM operation_attempts')))
+        finally:q.close()
+        self.assertEqual([],self.runtime.sent)
+        # The automatic gate's diagnostic changed the preview revision, so the
+        # original manual action also blocks instead of silently relaxing CAS.
+        actions.consume(self.config,self.state,runtime=self.runtime)
+        self.assertEqual('blocked',actions.status(self.state,'racing-manual')['status'])
+        tick(self.config,self.state,self.runtime)
+        self.assertEqual([],self.runtime.sent)
+
+    def test_existing_durable_selection_is_held_without_new_metadata(self):
+        from teamkit.operations import tick
+        self.enqueue('ONE')
+        choice=actions.candidates(self.config,self.state,'ONE',runtime=self.runtime)
+        actions.enqueue(self.config,self.state,'send','old-send',ticket='ONE',
+            candidate_id=choice['candidates'][0]['id'],expected_ticket=choice['expected_ticket'])
+        q=TicketStore(self.state)
+        try:q.db.execute('DROP TABLE queue_action_holds')
+        finally:q.close()
+        tick(self.config,self.state,self.runtime)
+        self.assertEqual([],self.runtime.sent)
+        actions.consume(self.config,self.state,runtime=self.runtime)
+        self.assertEqual(1,len(self.runtime.sent))
+
+    def test_stale_enqueue_is_durably_blocked_and_keeps_manual_intent(self):
+        from teamkit.operations import tick
+        self.enqueue('ONE')
+        choice=actions.candidates(self.config,self.state,'ONE',runtime=self.runtime)
+        q=TicketStore(self.state)
+        try:q.block('ONE','fixture reason changed')
+        finally:q.close()
+        result=actions.enqueue(self.config,self.state,'send','stale-enqueue',ticket='ONE',
+            candidate_id=choice['candidates'][0]['id'],expected_ticket=choice['expected_ticket'])
+        self.assertEqual('blocked',result['status'])
+        self.assertEqual('blocked',actions.status(self.state,'stale-enqueue')['status'])
+        tick(self.config,self.state,self.runtime)
+        self.assertEqual([],self.runtime.sent)
 
     def test_no_approval_and_quota_resources_remain_candidate_gates(self):
         self.enqueue('ONE')
@@ -61,6 +121,50 @@ class QueueActionsTest(unittest.TestCase):
         self.approval.write_text('Changed approval')
         self.assertFalse(actions.candidates(self.config,self.state,'ONE',runtime=self.runtime)['send_allowed'])
         self.assertEqual([],self.runtime.sent)
+
+    def test_supervisor_and_sync_preserve_failed_manual_selection_hold(self):
+        from teamkit import context_handoff
+        self.enqueue('ONE')
+        self.enqueue('TWO')
+        choices=actions.candidates(self.config,self.state,'ONE',runtime=self.runtime)
+        actions.enqueue(self.config,self.state,'send','held-send',ticket='ONE',
+            candidate_id=choices['candidates'][0]['id'],expected_ticket=choices['expected_ticket'])
+        self.runtime.executor=dict(self.runtime.executor,owner='different-owner',terminal='t2',pid=43)
+        delivered=[]
+        def send(executor,text):
+            delivered.append(text)
+            return {'accepted':True}
+        self.runtime.send=send
+        from teamkit import operations
+        actual_tick=operations.tick
+        with patch.object(context_handoff,'settings',side_effect=lambda config:{'enabled':config.get('_consumer_fixture') is True}), \
+             patch.object(context_handoff,'load',return_value={'_consumer_fixture':True,'runtime_backend':'core','operations':{'enabled':True}}), \
+             patch('teamkit.admission.reconcile_stopped'), \
+             patch.object(actions,'NativeRuntime',return_value=self.runtime), \
+             patch.object(operations,'tick',side_effect=lambda config,state,**kw:actual_tick(config,state,
+                 **dict(kw,runtime=self.runtime))):
+            context_handoff._operations_tick(self.config,self.state)
+            self.assertEqual('blocked',actions.status(self.state,'held-send')['status'])
+            q=TicketStore(self.state)
+            try:
+                self.assertEqual('pending',q.get('ONE')['state'])
+                self.assertEqual('received',q.get('TWO')['state'])
+            finally:q.close()
+            context_handoff._operations_tick(self.config,self.state)
+            actions.enqueue(self.config,self.state,'sync','held-sync')
+            context_handoff._operations_tick(self.config,self.state)
+        self.assertEqual(1,len(delivered))
+        self.assertIn('"id": "TWO"',delivered[0])
+        # Fresh preview and a new action explicitly replace the failed selection.
+        self.runtime.executor=dict(self.runtime.executor,owner='fresh-owner',terminal='t3',pid=44)
+        choice=actions.candidates(self.config,self.state,'ONE',runtime=self.runtime)
+        self.assertTrue(choice['send_allowed'])
+        actions.enqueue(self.config,self.state,'send','reselected',ticket='ONE',
+            candidate_id=choice['candidates'][0]['id'],expected_ticket=choice['expected_ticket'])
+        self.assertEqual('queued',actions.status(self.state,'reselected')['status'])
+        actions.consume(self.config,self.state,runtime=self.runtime)
+        self.assertEqual('completed',actions.status(self.state,'reselected')['status'])
+        self.assertEqual(2,len(delivered))
 
     def test_stale_ticket_or_executor_never_falls_back(self):
         for changed in ('ticket', 'executor'):
