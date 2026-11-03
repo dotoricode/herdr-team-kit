@@ -90,7 +90,8 @@ def _session(session):
 
 
 def _conflict(left, right):
-    if left['kind'] != right['kind'] or 'write' not in (left['mode'], right['mode']):
+    # Only two writes can conflict. A read neither blocks nor is blocked by any other resource.
+    if left['kind'] != right['kind'] or not (left['mode'] == right['mode'] == 'write'):
         return False
     if left['kind'] == 'named':
         return left['name'] == right['name']

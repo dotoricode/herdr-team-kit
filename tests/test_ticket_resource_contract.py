@@ -94,15 +94,22 @@ class TicketResourceContractTest(unittest.TestCase):
         self.assertEqual([dict(kind='named',name='worktree:'+str(self.work),mode='read')],review['resource_constraints'])
         self.assertEqual(self.queue.get('ONE')['workflow_ref'],saved['workflow_ref'])
         self.queue.enqueue(self.spec('TWO'),'two',user_approved=True)
-        with self.assertRaisesRegex(ValueError,'conflicting resource'):self.reserve('TWO')
+        # The review's read constraint does not block a writer of the same worktree.
+        self.assertEqual('TWO',self.reserve('TWO')['ticket'])
 
     def test_required_child_wait_checks_the_derived_worktree_constraint(self):
         self.queue.enqueue(self.spec(),'one',user_approved=True);attempt=self.reserve('ONE');actor=self.actor('ONE')
         self.queue.receipt('ONE',attempt['id'],actor['owner'],actor['terminal'],dict(actor,status='idle'))
-        self.queue.enqueue(self.spec('CHILD',mode='read',parent_id='ONE',relation='required'),'child')
+        self.queue.enqueue(self.spec('CHILD',mode='write',parent_id='ONE',relation='required'),'child')
         with self.assertRaisesRegex(ValueError,'CHILD.*--release-writes'):
             self.queue.request_children_wait('ONE',attempt['id'],actor['owner'])
         self.assertEqual('running',self.queue.get('ONE')['state'])
+
+    def test_required_read_child_wait_is_not_blocked_by_the_parent_worktree_write(self):
+        self.queue.enqueue(self.spec(),'one',user_approved=True);attempt=self.reserve('ONE');actor=self.actor('ONE')
+        self.queue.receipt('ONE',attempt['id'],actor['owner'],actor['terminal'],dict(actor,status='idle'))
+        self.queue.enqueue(self.spec('CHILD',mode='read',parent_id='ONE',relation='required'),'child')
+        self.queue.request_children_wait('ONE',attempt['id'],actor['owner'])
 
     def test_prompt_exposes_original_contract_and_separate_host_constraints(self):
         original=self.spec();self.queue.enqueue(original,'one',user_approved=True);attempt=self.reserve('ONE')

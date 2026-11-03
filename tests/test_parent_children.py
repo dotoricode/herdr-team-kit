@@ -63,15 +63,16 @@ class ParentChildrenTest(unittest.TestCase):
         self.queue.enqueue(child, 'child')
         return executor, attempt
 
-    def test_required_read_child_cannot_wait_behind_retained_parent_write(self):
+    def test_required_read_child_waits_beside_retained_parent_write(self):
+        # A read never conflicts with a write, so the parent keeps its write lease while a reading child runs.
         executor, attempt = self.parent_and_child('read')
-        before = self.queue.get('PARENT')
-        with self.assertRaisesRegex(ValueError, 'CHILD.*--release-writes'):
-            self.queue.wait_children('PARENT', attempt['id'], executor['owner'], True)
-        self.assertEqual(before, self.queue.get('PARENT'))
+        self.queue.request_children_wait('PARENT', attempt['id'], executor['owner'])
+        self.queue.wait_children('PARENT', attempt['id'], executor['owner'], True)
         row = ResourceLedger._rows(self.queue.db)[0]
-        self.assertTrue(row['execution_reserved'])
+        self.assertFalse(row['execution_reserved'])
         self.assertTrue(row['writes_held'])
+        child = self.queue.reserve('CHILD', executor, {}, self.observation())
+        self.assertEqual('CHILD', child['ticket'])
 
     def test_required_write_child_is_rejected_before_stop_request_transition(self):
         executor, attempt = self.parent_and_child('write')
