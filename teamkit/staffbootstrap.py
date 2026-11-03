@@ -262,6 +262,7 @@ def prepare(config_path, state, department, provider, resume=None):
                 raise ValueError('another staff seat already reserved this original session')
             if Path(config_path).read_bytes() != config_bytes:
                 raise ValueError('staff configuration changed before launch')
+            admission.configure(store.db, config['operations'].get('resource_policy'))
             admission.reserve_in_transaction(store.db, attempt, ident, provider + '/personal', [],
                 config['operations'].get('resource_policy'), observation)
             staged.update(state='staff_preparing', staff_actor=True, owner=owner, provider=provider,

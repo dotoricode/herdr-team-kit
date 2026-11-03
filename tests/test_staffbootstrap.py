@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import test_workers
-from teamkit import docsstaff, staffbootstrap as staff, operations, workers
+from teamkit import admission, docsstaff, staffbootstrap as staff, workers
 from teamkit.config import binding
 
 
@@ -227,6 +227,13 @@ class StaffBootstrapTests(unittest.TestCase):
         self.assertEqual(record['session'], 'fixture-session')
         self.assertEqual(self.launched[0][1]['args'][:2], ['--resume', 'fixture-session'])
         self.assertEqual(journal.read_bytes(), before)
+
+    def test_explicit_prepare_uses_current_config_instead_of_stale_stored_admission_policy(self):
+        self.configure(); self.fake_boundaries()
+        admission.configure(self.store.db, {'global_limit': 1})
+        record = self.prepare()
+        self.assertEqual(record['phase'], 'awaiting_receipt')
+        self.assertEqual(admission.policy_for(None, self.store.db)[1]['global_limit'], 3)
 
     def test_resume_without_official_proof_never_launches(self):
         self.configure(); self.fake_boundaries()
