@@ -16,9 +16,25 @@ class TeamPullEntryTests(unittest.TestCase):
     def test_manual_personal_selection_cannot_bypass_company_first(self):
         self.enqueue('ONE')
         runtime = self.runtime_for(operations={'allocation_policy':'usage'})
+        from teamkit.store import Store
+        from teamkit.config import binding, profile, load
+        loaded=load(self.config)
+        personal=runtime.executors()[0]
+        company=dict(personal,account='team',terminal='t2',pid=43,owner='company-owner',
+                     profile_binding=binding(profile(loaded,'codex','team')))
+        runtime.executors=lambda ticket=None:[personal,company]
+        runtime.native=lambda e,require_idle=True:dict(terminal=e['terminal'],pid=e['pid'],owner=e['owner'],status='idle',turn=0)
+        store=Store(self.state)
+        try:
+            for account in ('team','personal'):
+                store.quota('codex/'+account,dict(source='codex-native-quota',binding=binding(profile(loaded,'codex',account)),
+                    observed_at=time.time(),five_hour={'used':10,'resets_at':time.time()+300},weekly={'used':10,'resets_at':time.time()+300}))
+        finally:
+            store.close()
         with patch('teamkit.core_runtime._call', side_effect=self.native_call), patch('teamkit.providers.identity'):
             choices = actions.candidates(self.config, self.state, 'ONE', runtime=runtime)
-            candidate = choices['candidates'][0]
+            self.assertTrue(next(c for c in choices['candidates'] if c['account']=='team')['eligible'])
+            candidate = next(c for c in choices['candidates'] if c['account']=='personal')
             action = actions.enqueue(self.config,self.state,'send','plain',ticket='ONE',candidate_id=candidate['id'],expected_ticket=choices['expected_ticket'],runtime=runtime)
             actions.consume(self.config,self.state,runtime=runtime)
         self.assertEqual('blocked', actions.status(self.state,'plain')['status'])
