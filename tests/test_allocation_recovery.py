@@ -63,3 +63,44 @@ class RecoveryTest(unittest.TestCase):
         result=q.attempt(attempt)['submission'].copy();result.pop('artifact_digest')
         q.submit('LATE',attempt,self.runtime.executor['owner'],result)
         self.assertNotIn('intervention',q.get('LATE'))
+
+    def received_without_submission(self):
+        self.enqueue('OBSERVE')
+        self.runtime.executor.update(task='fixture',runtime={'name':'fixture'})
+        def send(executor,text):
+            q=TicketStore(self.state)
+            item=q.get('OBSERVE')
+            q.receipt(item['id'],item['attempt'],executor['owner'],'t1',dict(self.runtime.native(executor),turn=1))
+            q.close()
+            return {'accepted':True}
+        self.runtime.send=send
+        tick(self.config,self.state,self.runtime)
+        q=TicketStore(self.state);self.addCleanup(q.close)
+        from teamkit.operations import NativeRuntime
+        import json
+        return q,NativeRuntime(json.loads(self.config.read_text()),self.state)
+
+    def test_owner_process_observation_failure_is_durable_intervention(self):
+        q,runtime=self.received_without_submission()
+        before=q.get('OBSERVE')['attempt']
+        from unittest.mock import patch
+        from teamkit.resources import ResourceLedger
+        with patch('teamkit.core_runtime.CoreRuntime._native',side_effect=ValueError('Core terminal owner/process changed')):
+            reconcile(q,runtime,{})
+        ticket=q.get('OBSERVE')
+        self.assertEqual('observation_failed',ticket['intervention']['kind'])
+        self.assertIn('owner/process changed',ticket['reason'])
+        self.assertEqual(before,ticket['attempt'])
+        self.assertEqual('running',ticket['state'])
+        self.assertTrue(next(x for x in ResourceLedger._rows(q.db) if x['attempt']==before)['execution_reserved'])
+
+    def test_normal_working_is_observed_without_idle_requirement(self):
+        q,runtime=self.received_without_submission()
+        from unittest.mock import patch
+        native=dict(foreground={'pid':42},status={'state':'working'},turn=1)
+        with patch('teamkit.core_runtime.CoreRuntime._native',return_value=native) as observed, \
+             patch('teamkit.core_runtime._call',side_effect=AssertionError('idle screen must not be read')):
+            reconcile(q,runtime,{})
+        self.assertFalse(observed.call_args.kwargs['ready'])
+        self.assertNotIn('intervention',q.get('OBSERVE'))
+        self.assertEqual('',q.get('OBSERVE')['reason'])

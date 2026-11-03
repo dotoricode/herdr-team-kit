@@ -866,6 +866,9 @@ class TicketStore:
             intervention = dict(attempt=attempt_id, kind=kind, reason=reason,
                 question='담당자가 작업을 마쳤지만 완료 결과가 없습니다. 쓰기 중단을 확인하고 다른 담당자에게 이어 맡길까요?',
                 next_action='운영본부가 기존 실행·쓰기 중단을 확인한 뒤 queue recover로 원 업무를 재배정합니다')
+            if kind == 'observation_failed':
+                intervention.update(question='담당자의 현재 실행 상태를 확인하지 못했습니다. 실행자 연결과 기존 작업 상태를 확인해 주세요.',
+                    next_action='운영본부가 원 시도·실행자 신원·현재 프로세스를 대조하고, 쓰기 중단이 확인되면 같은 업무를 복구합니다')
             if kind == 'child_blocked':
                 intervention.update(question='하위 작업이 멈춰 원 업무가 대기 중입니다. 하위 작업의 종료 확인과 재배정이 필요합니다.',
                     next_action='운영본부가 표시된 하위 작업의 기존 실행·쓰기 중단을 확인하고 해당 하위 작업을 복구합니다')

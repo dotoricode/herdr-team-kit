@@ -599,15 +599,17 @@ def reconcile(queue, runtime, config=None):
             attempt = queue.attempt(ticket['attempt'])
             if not attempt.get('submission') and attempt.get('actor_receipt'):
                 try:
-                    native = runtime.native(attempt['executor'])
+                    native = (runtime.native(attempt['executor'], require_idle=False)
+                              if isinstance(runtime, NativeRuntime) else runtime.native(attempt['executor']))
                     receipt = attempt['actor_receipt']
                     if (native.get('status') in ('idle','done')
                             and type(native.get('turn')) is int and type(receipt.get('turn')) is int
                             and native['turn'] > receipt['turn']):
                         queue.request_intervention(ticket['id'], attempt['id'], 'missing_result',
                             '실행 턴이 끝났지만 결과 제출이 없습니다. 기존 쓰기 중단 확인과 재배정이 필요합니다')
-                except (ValueError, OSError, NativeError):
-                    pass
+                except (ValueError, KeyError, OSError, subprocess.SubprocessError, NativeError) as error:
+                    queue.request_intervention(ticket['id'], attempt['id'], 'observation_failed',
+                        '실행자 상태를 확인하지 못했습니다. 원 시도와 실행자 연결을 확인해야 합니다: ' + str(error))
             continue
         if ticket['state'] == 'waiting_children_stop':
             attempt = queue.attempt(ticket['attempt'])
