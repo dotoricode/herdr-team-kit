@@ -3,13 +3,14 @@ import { h_flex, v_flex } from "gpui-base";
 import { appHome, readTextFile, exec, theme, terminals, run, props as modProps, openOverlay, closeOverlay } from "herdr";
 
 const MOD = "team-queue";
-const GROUPS = [["active", "현재"], ["records", "이전·보류"], ["all", "전체"]];
+const GROUPS = [["active", "현재"], ["records", "이전·보류"], ["archived", "보관함"], ["all", "전체"]];
 const provider = x => ({ codex: "Codex", claude: "Claude" })[x] ?? "미확인";
 const account = x => ({ personal: "개인", team: "회사" })[x] ?? "계정 미확인";
 const clock = x => x == null ? "—" : new Date(x * 1000).toLocaleString();
 const percent = x => x == null ? "미제공" : typeof x === "number" && Number.isFinite(x) ? String(x)+"%" : "미확인";
 const periodUsage = (value,key) => value.not_applicable?.includes(key) ? "해당 없음" : percent(value[key]?.used);
 const clean = x => String(x ?? "").replaceAll("장부", "작업 기록");
+const manualState = item => ({waiting:"대기 표시",progress:"진행 표시",complete:"완료 표시"})[item.board_state?.manual_status] ?? null;
 const categoryColor = (category, t) => ({ attention: t.blocked, waiting: t.idle, progress: t.working, history: t.muted })[category] ?? t.muted;
 // Each word is its own unbroken native text item; long paths wrap only at separators.
 const textTokens = value => clean(value).split(/\s+/).filter(Boolean).flatMap(word => word.length > 48 ? word.replace(/([/._:\-])/g, "$1\u200b").split("\u200b") : [word]);
@@ -31,6 +32,7 @@ export default class TeamQueue extends View {
     this.options = props ?? modProps() ?? {};
     this.role = this.options.role ?? "list";
     this.data = null; this.failure = null; this.inFlight = false;
+    this.actionFlight = false; this.actionFailure = null; this.pendingAction = null;
     this.filter = "active"; this.selected = this.options.item ?? null;
     this.revealed = this.role !== "detail";
     cx.spawn(async cx => {
@@ -59,6 +61,28 @@ export default class TeamQueue extends View {
       const message=String(error);
       if(this.failure !== message) { this.failure=message; cx.notify(); }
     } finally { this.inFlight=false; }
+  }
+  async organize(cx, action) {
+    if(this.actionFlight || !this.config || !this.selected?.board_state) return;
+    if(this.pendingAction && action !== null) return;
+    if(!this.pendingAction) this.pendingAction = {
+      id:this.selected.id, action, revision:this.selected.board_state.revision,
+      request:"queue-ui-"+Date.now().toString(36)+"-"+Math.random().toString(36).slice(2)
+    };
+    const pending=this.pendingAction, c=this.config;
+    this.actionFlight=true; this.actionFailure=null; cx.notify();
+    try {
+      const result=await exec(c.python,[c.cli,"--config",c.config,"--state",c.state,"queue","organize",pending.id,
+        "--board-action",pending.action,"--client-request-id",pending.request,"--expected-revision",pending.revision]);
+      if(result.code !== 0) {
+        this.pendingAction=null;
+        throw new Error(result.stderr || "카드 변경을 저장하지 못했습니다. 최신 상태를 확인하세요");
+      }
+      this.pendingAction=null;
+      await this.refresh(cx);
+    } catch(error) {
+      this.actionFailure=String(error)+(this.pendingAction ? " · 결과 불명: 재확인은 같은 요청 ID를 사용합니다" : "");
+    } finally { this.actionFlight=false; cx.notify(); }
   }
   detail(item) {
     openOverlay({ mod:MOD, props:{ role:"detail", item, local:this.options.local }, kind:"dialog", modal:false, frame:"none", width:0.72, height:0.82 });
@@ -122,8 +146,17 @@ export default class TeamQueue extends View {
           .child(h_flex().min_w(0).items_start().gap(12)
             .child(words(item.title).flex_1().text_size(19).font_semibold().line_height("25px"))
             .child(button("queue-detail-close","닫기",()=>closeOverlay(this.options.overlay),t)))
-          .child(h_flex().flex_wrap().items_center().gap(7).child(badge(item.team_label,t.foreground,t)).child(badge(displayState,categoryColor(item.category,t),t)))
-          .when(Boolean(this.failure),el => el.child(fail())))
+          .child(h_flex().flex_wrap().items_center().gap(7).child(badge(item.team_label,t.foreground,t)).child(badge(displayState,categoryColor(item.category,t),t))
+            .when(Boolean(manualState(item)),el=>el.child(badge(manualState(item),t.muted,t)))
+            .when(item.category==="archived",el=>el.child(badge("보관됨",t.muted,t))))
+          .when(Boolean(this.failure),el => el.child(fail()))
+          .when(Boolean(item.board_state),el=>el
+            .child(div().text_size(11).text_color(t.muted).child("카드 정리 · 실행·승인·검증 상태는 별도로 유지됩니다"))
+            .child(h_flex().flex_wrap().gap(6)
+              .children((item.category==="archived" ? [["restore","복원"]] : [["restore","자동"],["waiting","대기 표시"],["progress","진행 표시"],["done","완료 표시"],["archive","카드 제거 (보관)"]]).map(([action,label])=>
+                button("queue-organize-"+action,this.actionFlight?"저장 중…":label,cx=>cx.spawn(async cx=>this.organize(cx,action)),t))))
+            .when(Boolean(this.pendingAction)&&!this.actionFlight,x=>x.child(button("queue-organize-reconcile","변경 결과 재확인",cx=>cx.spawn(async cx=>this.organize(cx,null)),t)))
+            .when(Boolean(this.actionFailure),x=>x.child(words(this.actionFailure).text_size(12).text_color(t.blocked)))))
         .child(v_flex().id("queue-detail-body").flex_1().min_h(0).min_w(0).overflow_y_scrollbar().p(18).gap(20)
           .when(Boolean(item.reason),el => el.child(section("진행 상태",words(item.reason).text_color(item.category === "attention" ? t.blocked : t.foreground).line_height("21px"))))
           .child(section("담당·세션",v_flex().gap(9).child(words(item.team_label+" · "+linkedSession))
@@ -146,11 +179,11 @@ export default class TeamQueue extends View {
     }
     const data=this.data;
     const jobs=(data?.jobs??[]).filter(item=>this.filter==="all" ||
-      (this.filter==="records" ? ["history","deferred"].includes(item.category) : !["history","deferred"].includes(item.category)));
+      (this.filter==="archived" ? item.category==="archived" : this.filter==="records" ? ["history","deferred"].includes(item.category) : !["history","deferred","archived"].includes(item.category)));
     const nativeTerminals=terminals();
     const verifiedWorking=item=>item.phase==="running" && item.verified_working===true && !item.completion_intent && !item.work_completion_confirmed && item.receiver_matches_current===true &&
       (nativeTerminals.find(x=>x.address===item.receiver_terminal)?.status?.state??nativeTerminals.find(x=>x.address===item.receiver_terminal)?.status)==="working";
-    const itemState=item=>item.work_completion_confirmed ? "업무 완료" : verifiedWorking(item) ? "진행 중" : item.phase==="running" ? "결과 제출 대기" : item.phase==="received" ? "전달됨 · 수신 대기" : item.state_label;
+    const itemState=item=>item.category==="archived" ? "보관됨" : manualState(item) ?? (item.work_completion_confirmed ? "업무 완료" : verifiedWorking(item) ? "진행 중" : item.phase==="running" ? "결과 제출 대기" : item.phase==="received" ? "전달됨 · 수신 대기" : item.state_label);
     const itemColor=item=>item.requires_user_decision ? t.blocked : verifiedWorking(item) ? t.working : item.phase==="received" ? t.muted : categoryColor(item.category,t);
     const card=item=>v_flex().id("queue-card-"+item.id).min_w(0).flex_none().p(12).gap(8)
       .border_1().border_color(verifiedWorking(item)?t.working:t.border).bg(t.surface)

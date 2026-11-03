@@ -357,6 +357,10 @@ class SessionPoolTests(Fixture):
         labels = [args for args in self.fake.calls if args[0] == 'label']
         self.assertEqual(len(labels), 16)
         self.assertTrue(all(any(value.startswith('herdr.space=space-') for value in args) for args in labels))
+        self.assertTrue(all(any(value.startswith('ui.display-name=') for value in args) for args in labels))
+        renames = [json.loads(args[-1]) for args in self.fake.commands if args[:3] == ['herdr-app', 'do', 'tab.rename']]
+        self.assertTrue(all(value['name'].endswith((' (팀)', ' (개인)')) for value in renames))
+        self.assertFalse(any('후보' in value['name'] or '등록' in value['name'] or ' · ' in value['name'] for value in renames))
 
     def test_disabled_status_is_readonly_and_does_not_create_manifest(self):
         self.value.pop('session_pool')

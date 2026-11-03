@@ -168,10 +168,10 @@ class NativeRuntime:
         from .core_runtime import _call
         spaces = self.config.get('operations', {}).get('spaces', {})
         destination = 'qa' if ticket['role'] in ('reviewer','ui') else 'docs' if ticket['role']=='documenter' else ticket['product']
-        roles={'leader':'팀장','implementer':'구현','reviewer':'독립리뷰','investigator':'조사',
-               'documenter':'문서·편집','ui':'UI 검증','integrator':'통합'}
-        team=self.config.get('operations',{}).get('product_labels',{}).get(ticket['product'],ticket['product'])
-        display=team+' · '+roles[ticket['role']]+' · '+{'team':'회사','personal':'개인'}[executor['account']]+' '+{'codex':'Codex','claude':'Claude'}[executor['provider']]
+        from .staff import display_name
+        display=display_name(executor['provider'], executor['account'], product=ticket['product'],
+                             role=ticket['role'], owner=executor['owner'],
+                             aliases=self.config.get('operations', {}).get('staff_aliases'))
         labels = ['operations.ticket='+ticket['id'], 'ui.display-name='+display]
         if destination in spaces:
             labels.append('herdr.space='+spaces[destination])

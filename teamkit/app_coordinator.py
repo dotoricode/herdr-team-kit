@@ -21,6 +21,7 @@ from .policy import account_order, choose_account
 from .runtime import launch_spec, RuntimeError as KitError
 from .store import Store
 from . import providers
+from .staff import display_name
 
 
 def record_path(state):
@@ -496,7 +497,8 @@ def run_job(request):
         save(record_path(state),record)
         args=['run','--json','--bg','--keep','--no-parent','--no-notify','--name',name,'--cwd',str(root)]
         labels={'herdr.space':sp,'herdr.tab':tab,'teamkit.app-scope':scope(state),'teamkit.kind':'coordinator',
-                'teamkit.task':'GUI-COORDINATOR','teamkit.owner':packet['nonce'],'teamkit.name':name}
+                'teamkit.task':'GUI-COORDINATOR','teamkit.owner':packet['nonce'],'teamkit.name':name,
+                'ui.display-name':display_name('codex',account,role='coordinator',aliases=config.get('operations',{}).get('staff_aliases'))}
         for key,value in labels.items():args+=['--label',key+'='+value]
         if hashlib.sha256(Path(packet['config']).read_bytes()).hexdigest()!=packet['config_digest']:
             raise ValueError('총괄 실행 설정이 신원 확인 중 바뀌었습니다.')
@@ -530,7 +532,7 @@ def run_job(request):
         record['native_pid']=pid
         save(record_path(state),record)
         if new_destination:
-            for command,values in [('space.rename',{'id':sp,'name':'GUI 총괄'}),('tab.rename',{'id':tab,'name':'총괄'})]:
+            for command,values in [('space.rename',{'id':sp,'name':'GUI 총괄'}),('tab.rename',{'id':tab,'name':display_name('codex',account,role='coordinator',aliases=config.get('operations',{}).get('staff_aliases'))})]:
                 subprocess.run(['herdr-app','do',command,json.dumps(values)],capture_output=True,text=True,timeout=5)
         # Read the checkpoint; this is initialization, never a product resume.
         prompt=('GUI 독립 운영 총괄의 복구 확인입니다. '+str(checkpoint)+'와 '+str(inventory)+
