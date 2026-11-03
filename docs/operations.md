@@ -106,11 +106,11 @@ Receipt waiters record SIGINT/SIGTERM cancellation before exiting. SIGKILL or ho
 
 ## 담당자 우선 전송
 
-`queue candidates TICKET`은 배정 불가 직원도 모두 보여 주며 각 후보에 원문 `reason`, 한국어 `reason_ko`, `override_allowed`를 담습니다. 배정 불가 후보에도 사용자가 직접 지정하면 `queue send TICKET --candidate-id ID --expected-ticket DIGEST --client-request-id KEY --override-eligibility --reason "사유"`로 보낼 수 있습니다. `--reason`은 1~300자 필수이고 `--override-eligibility` 없이 쓸 수 없습니다.
+`queue candidates TICKET`은 배정 불가 직원도 모두 보여 줍니다. 각 후보는 첫 실패에서 멈추지 않고 모든 게이트를 평가한 결과를 `reasons`(코드·`bypassable`·원문 `reason`·`reason_ko`)로 담고, `reason`·`reason_ko`는 그 목록을 합친 문장이며 `override_allowed`는 사유가 모두 우회 가능할 때만 true입니다. 배정 불가 후보에도 사용자가 직접 지정하면 `queue send TICKET --candidate-id ID --expected-ticket DIGEST --client-request-id KEY --override-eligibility --reason "사유"`로 보낼 수 있습니다. `--reason`은 1~300자 필수이고 `--override-eligibility` 없이 쓸 수 없습니다. 같은 `--client-request-id`와 같은 사유로 다시 보내면 새 미리보기 없이 기록된 action을 그대로 돌려주고, 다른 내용이면 거부합니다.
 
-우회하는 것은 역할·책임·모델 정책, 계정 용량(전체·계정), 사용량, 업무에 적힌 계정 목록입니다. 우회 사실·사용자 사유·미리보기 때 원래 사유·실행 시점에 실제로 무시한 사유는 큐 action 기록(`request.override`, `result.override`)과 attempt(`override`)에 남습니다.
+우회하는 것(`bypassable`): 담당 제품·역할·책임 불일치, 역할·모델·provider 정책 밖, 세션 풀 `uncertain` slot의 읽기 전용 증명 실패, 계정 사용량(quota), 계정 동시 실행 용량(전체·계정), 업무에 적힌 계정 목록입니다. 우회 사실·사용자 사유·미리보기 때 원래 사유 전부·실행 시점에 실제로 무시한 사유 전부는 큐 action 기록(`request.override`, `result.override`)과 attempt(`override`)에 남습니다.
 
-우회하지 않는 것: 업무 승인·고정 승인 기록, `pending`이 아닌 업무의 재전송 금지, 이전 선택이 queued·running·uncertain일 때의 재선택 금지, UI 업무, 새로 만들 직원(계획 항목)의 용량 우회, 다른 attempt와의 터미널 세션·쓰기 자원 충돌, 전송 시점의 소유자·프로세스 확인과 입력 초안·확인 창 검사. 마지막 둘은 전송 직전에 다시 읽어 입력 중인 내용이 있으면 전송하지 않고 blocked로 보고합니다.
+우회하지 않는 것: 업무 승인·고정 승인 기록, UI 업무, 리뷰 독립성(`exclude_owners`), 직원의 작업 폴더가 업무 경로를 덮는지, 계정 연결(profile binding) 변경, provider 신원 확인, 개인 문서 담당 경계(`docsstaff`: 후보 판정·예약·전송 직전 모두), 전송 시점의 소유자·프로세스 확인과 입력 초안·확인 창 검사, `pending`이 아닌 업무의 재전송 금지, 이전 선택이 queued·running·uncertain일 때의 재선택 금지, 새로 만들 직원(계획 항목)의 용량 우회, 다른 attempt와의 터미널 세션·쓰기 자원 충돌, 실행 횟수·토큰 예산. 이 중 하나라도 실패하면 `override_allowed`는 false이고, override 요청이 와도 blocked로 끝나며 전송·예약을 하지 않습니다. 소유자·프로세스·초안 검사는 전송 직전에 다시 읽어 입력 중인 내용이 있으면 전송하지 않고 blocked로 보고합니다.
 
 전송 후보는 업무 제품의 팀 스페이스 직원을 기본으로 하고 이름은 사이드바와 같은 터미널 `ui.display-name` 라벨을 씁니다. 다른 팀·임시(background) 직원은 `other_team`/`hidden_by_default`로 표시해 "다른 팀·임시 직원 보기"에서만 보이고, 종료된 터미널은 `excluded`에 사유와 함께 기록합니다. 팀 스페이스에 있어도 직원으로 등록되지 않은 터미널은 전송할 수 없는 후보로만 표시합니다. 세션 풀의 `uncertain` slot은 읽기 전용 증명(같은 터미널·PID·작업 폴더·시작 인자, 재기동 시 붙는 `resume <세션>` 한 쌍만 허용)이 모두 맞을 때만 후보 판정을 이어가며, 하나라도 다르면 "이전 시작 결과 불명"으로 배정 불가+강제 전송 가능입니다. 판정은 slot 파일을 바꾸지 않으며 공식 복구는 `pool recheck`입니다.
 

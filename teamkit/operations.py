@@ -55,6 +55,30 @@ def prove_uncertain_slot(executor):
         raise unknown
 
 
+class AdmitError(ValueError):
+    """admit() failure that carries every gate that failed: [{code, bypassable, reason}]."""
+    def __init__(self, issues):
+        self.issues = issues
+        super().__init__('; '.join(dict.fromkeys(x['reason'] for x in issues)))
+
+
+def gate_issues(runtime, ticket, executor):
+    """All failed admission gates of one executor; [] when it is assignable.
+
+    A runtime without admit_report (a test double) reports its single admit() failure as bypassable.
+    """
+    report = getattr(runtime, 'admit_report', None)
+    if report is not None:
+        return report(ticket, executor)
+    try:
+        runtime.admit(ticket, executor)
+    except AdmitError as error:
+        return error.issues
+    except (ValueError, KeyError, OSError, subprocess.SubprocessError, NativeError) as error:
+        return [dict(code='unclassified', bypassable=True, reason=str(error))]
+    return []
+
+
 class NativeRuntime:
     def __init__(self, config, state):
         self.config, self.state = config, Path(state)
@@ -170,74 +194,132 @@ class NativeRuntime:
                     status=(native.get('status') or {}).get('state'), turn=native.get('turn'))
 
     def admit(self, ticket, executor):
-        work_gate(self.config, self.state, ticket)
+        issues = self.admit_report(ticket, executor)
+        if issues:
+            raise AdmitError(issues)
+        return executor
+
+    def admit_report(self, ticket, executor):
+        """Evaluate every admission gate and return all failures as [{code, bypassable, reason}].
+
+        Bypassable gates may be waived by an explicit manual priority send: role/responsibility,
+        role and provider policy, uncertain-slot proof, account usage. Capacity and the ticket
+        account list are waived at reservation. Every other gate is never waived: work approval,
+        UI work, review independence, working folder, profile binding, provider identity,
+        personal document staff, and the live owner/PID/draft check.
+        """
+        issues = []
+
+        def gate(code, bypassable, check):
+            try:
+                check()
+                return True
+            except (ValueError, KeyError, OSError, subprocess.SubprocessError, NativeError) as error:
+                issues.append(dict(code=code, bypassable=bypassable, reason=str(error)))
+                return False
+
         from . import docsstaff
-        queue = TicketStore(self.state, read_only=True)
-        try:
-            docsstaff.check(self.config, queue.db, ticket, executor)
-        finally:
-            queue.close()
+
+        def staff():
+            queue = TicketStore(self.state, read_only=True)
+            try:
+                docsstaff.check(self.config, queue.db, ticket, executor)
+            finally:
+                queue.close()
+
+        # An unapproved ticket or an executor outside the document-staff boundary is out of scope:
+        # report it without touching the terminal or the provider account.
+        if not (gate('work_approval', False, lambda: work_gate(self.config, self.state, ticket))
+                and gate('docs_staff', False, staff)):
+            return issues
         if ticket['role'] == 'ui':
-            raise ValueError('UI work requires the existing personal Codex UI lab, test host and exclusive screen lease')
+            issues.append(dict(code='ui', bypassable=False, reason=(
+                'UI work requires the existing personal Codex UI lab, test host and exclusive screen lease')))
+            return issues
         if executor.get('new') is True:
-            from .workers import plans, PLAN_FIELDS
-            if not any(all(candidate.get(key)==executor.get(key) for key in PLAN_FIELDS)
-                       for candidate in plans(self.config,self.state,ticket)):
-                raise ValueError('planned role/profile/quota no longer eligible')
-            return executor
-        if executor['product'] not in (ticket['product'], '*') or ticket['role'] not in executor['roles']:
-            raise ValueError('executor responsibility or role mismatch')
+            def planned():
+                from .workers import plans, PLAN_FIELDS
+                if not any(all(candidate.get(key) == executor.get(key) for key in PLAN_FIELDS)
+                           for candidate in plans(self.config, self.state, ticket)):
+                    raise ValueError('planned role/profile/quota no longer eligible')
+            gate('plan', False, planned)
+            return issues
+
+        def responsibility():
+            if executor['product'] not in (ticket['product'], '*') or ticket['role'] not in executor['roles']:
+                raise ValueError('executor responsibility or role mismatch')
+        gate('role', True, responsibility)
         if executor.get('pool_phase') == 'uncertain':
-            prove_uncertain_slot(executor)
+            gate('uncertain', True, lambda: prove_uncertain_slot(executor))
         from .core_runtime import _model_effort
         from .workers import _policy_task
         from .departments import execution_config
-        effective = execution_config(self.config)
-        task = _policy_task(effective, ticket)
-        if task is None:
-            raise ValueError('no explicit responsibility/role policy for this ticket')
-        from .routing import execution_policy
-        role = execution_policy(effective, task)
-        if role.get('action') != 'dispatch':
-            raise ValueError('role policy requires a user decision')
-        if role:
-            self.native(executor)
-            from .routing import execution_candidates
-            staff = docsstaff.policy(self.config, ticket)
-            if staff:
-                effective = docsstaff.routing_config(effective, role)
-            choices = execution_candidates(effective, task, role, time.time())
-            expected = next((c for c in choices or [] if c['provider']==executor['provider']
-                             and c['account']==executor['account']), None)
-            if choices is None and executor['provider']==role['provider']:
-                expected = role
-            if expected is None:
-                raise ValueError('executor provider is outside the existing role policy')
-            from .core_runtime import _call
-            observed = _call('get', executor['terminal'])['foreground']['argv']
-            if _model_effort(executor['provider'], observed) != (expected['model'], expected.get('effort','medium')):
-                raise ValueError('executor model/effort differs from existing role policy')
-        pr = profile(self.config, executor['provider'], executor['account'])
-        if binding(pr) != executor['profile_binding']:
-            raise ValueError('executor profile binding changed')
-        if any(not within(r['name'], [executor['root']]) for r in ticket['resources'] if r['kind'] == 'path'):
-            raise ValueError('executor working boundary does not cover ticket resources')
-        if ticket['role'] == 'reviewer' and ticket.get('exclude_owners'):
-            if executor['owner'] in ticket['exclude_owners']:
-                raise ValueError('review executor must be independent')
-        self.native(executor)
-        from .providers import identity
-        identity(executor['provider'], pr)
-        store = Store(self.state)
-        try:
-            observed = cached_quota(self.config, store, executor['provider'], executor['account'])
-        finally:
-            store.close()
-        if not eligible(observed, time.time(), self.config['quota_ttl_seconds']):
-            raise ValueError('profile quota unavailable, expired or limited')
-        # Identity/quota calls can race a human input or process replacement.
-        self.native(executor)
-        return executor
+        from .routing import execution_policy, execution_candidates
+        resolved = {}
+
+        def resolve():
+            effective = execution_config(self.config)
+            task = _policy_task(effective, ticket)
+            if task is None:
+                raise ValueError('no explicit responsibility/role policy for this ticket')
+            role = execution_policy(effective, task)
+            if role.get('action') != 'dispatch':
+                raise ValueError('role policy requires a user decision')
+            resolved.update(effective=effective, task=task, role=role)
+        if gate('policy', True, resolve) and resolved['role']:
+            def provider_policy():
+                effective, task, role = resolved['effective'], resolved['task'], resolved['role']
+                if docsstaff.policy(self.config, ticket):
+                    effective = docsstaff.routing_config(effective, role)
+                choices = execution_candidates(effective, task, role, time.time())
+                expected = next((c for c in choices or [] if c['provider'] == executor['provider']
+                                 and c['account'] == executor['account']), None)
+                if choices is None and executor['provider'] == role['provider']:
+                    expected = role
+                if expected is None:
+                    raise ValueError('executor provider is outside the existing role policy')
+                from .core_runtime import _call
+                observed = _call('get', executor['terminal'])['foreground']['argv']
+                if _model_effort(executor['provider'], observed) != (expected['model'], expected.get('effort', 'medium')):
+                    raise ValueError('executor model/effort differs from existing role policy')
+            gate('policy', True, provider_policy)
+        profiles = []
+
+        def bound():
+            found = profile(self.config, executor['provider'], executor['account'])
+            profiles.append(found)
+            if binding(found) != executor['profile_binding']:
+                raise ValueError('executor profile binding changed')
+        gate('profile_binding', False, bound)
+
+        def folder():
+            if any(not within(r['name'], [executor['root']]) for r in ticket['resources'] if r['kind'] == 'path'):
+                raise ValueError('executor working boundary does not cover ticket resources')
+        gate('working_boundary', False, folder)
+
+        def independent():
+            if ticket['role'] == 'reviewer' and ticket.get('exclude_owners'):
+                if executor['owner'] in ticket['exclude_owners']:
+                    raise ValueError('review executor must be independent')
+        gate('review_independence', False, independent)
+        native_ok = gate('native', False, lambda: self.native(executor))
+        if profiles:
+            from .providers import identity
+            gate('identity', False, lambda: identity(executor['provider'], profiles[0]))
+
+            def usage():
+                store = Store(self.state)
+                try:
+                    observed = cached_quota(self.config, store, executor['provider'], executor['account'])
+                finally:
+                    store.close()
+                if not eligible(observed, time.time(), self.config['quota_ttl_seconds']):
+                    raise ValueError('profile quota unavailable, expired or limited')
+            gate('quota', True, usage)
+        if native_ok and not issues:
+            # Identity/quota calls can race a human input or process replacement.
+            gate('native', False, lambda: self.native(executor))
+        return issues
 
     def send(self, executor, text, before_send=None):
         from .core_runtime import CoreRuntime
@@ -522,15 +604,18 @@ def tick(config_path, state, runtime=None, *, selection=None):
                 bypassed = []
                 try:
                     if override:
-                        # Explicit manual priority send: role, responsibility, capacity and usage
-                        # gates are recorded and waived. Approval, plan creation and the live
-                        # owner/PID/draft checks below are never waived.
+                        # Explicit manual priority send. Every gate is evaluated; only the bypassable
+                        # ones (role/responsibility/policy, uncertain proof, usage; capacity and the
+                        # ticket account list at reservation) are waived and recorded. Approval, UI,
+                        # review independence, working folder, profile binding, provider identity,
+                        # personal document staff and the live owner/PID/draft check are never waived.
                         if candidate.get('new') is True:
                             raise ValueError('planned worker cannot be sent by manual priority; no input sent')
-                        try:
-                            runtime.admit(ticket, candidate)
-                        except (ValueError, KeyError, OSError, subprocess.SubprocessError, NativeError) as error:
-                            bypassed.append(str(error))
+                        issues = gate_issues(runtime, ticket, candidate)
+                        kept = [x['reason'] for x in issues if not x['bypassable']]
+                        if kept:
+                            raise ValueError('; '.join(dict.fromkeys(kept)))
+                        bypassed = list(dict.fromkeys(x['reason'] for x in issues))
                         work_gate(config, state, ticket)
                         runtime.native(candidate)
                         executor = candidate
@@ -540,8 +625,7 @@ def tick(config_path, state, runtime=None, *, selection=None):
                     observation = runtime.observation()
                     from . import docsstaff
                     def staff_guard(item, actor):
-                        if not override:
-                            docsstaff.check(config, queue.db, item, actor)
+                        docsstaff.check(config, queue.db, item, actor)
                     attempt = queue.reserve(ticket['id'], executor, policy(config), observation,
                                             expected_revision=selection['expected_ticket'] if selection else None,
                                             manual_action=selection['action_id'] if selection else None,
@@ -567,8 +651,7 @@ def tick(config_path, state, runtime=None, *, selection=None):
                                 or reserved['executor'] != executor or queue.gate(current['id'])):
                             raise ValueError('approval or attempt changed after reservation; no input sent')
                         work_gate(config,state,current)
-                        if not override:
-                            docsstaff.check(config, queue.db, current, executor)
+                        docsstaff.check(config, queue.db, current, executor)
                         store=Store(state)
                         try:
                             quota=cached_quota(config,store,executor['provider'],executor['account'])

@@ -5,6 +5,7 @@ import unittest
 
 import test_operations as operation_fixtures
 from teamkit import queue_actions as actions
+from teamkit.operations import NativeRuntime
 from teamkit.tickets import TicketStore
 
 
@@ -228,6 +229,129 @@ class QueueOverrideTest(unittest.TestCase):
         choices = actions.candidates(self.config, self.state, 'ONE', runtime=self.runtime)
         self.assertEqual([], choices['candidates'])
         self.assertFalse(choices['send_allowed'])
+
+
+class RealAdmitOverrideTest(unittest.TestCase):
+    """R1-2: manual priority against the real NativeRuntime.admit.
+
+    Replaced boundaries: HC `_call`, `native` (owner/PID/draft read), provider `identity`
+    (a live login probe), `observation`, and `send`. Every gate in admit() is the real code.
+    """
+    setUp = operation_fixtures.OperationsTest.setUp
+    enqueue = operation_fixtures.OperationsTest.enqueue
+
+    def runtime_for(self, executor_changes=None, operations=None):
+        from teamkit.config import binding, load, profile
+        config = json.loads(self.config.read_text())
+        config['operations'].update(operations or {})
+        self.config.write_text(json.dumps(config))
+        loaded = load(self.config)
+        runtime = NativeRuntime(loaded, self.state)
+        executor = dict(terminal='t1', pid=42, owner='fixture-owner', provider='codex', account='personal',
+                        product='example', roles=['investigator'], root=str(self.root),
+                        profile_binding=binding(profile(loaded, 'codex', 'personal')),
+                        task='POOL-LEADER-EXAMPLE', runtime=dict(name='tk-fixture'), empty_prompt=None)
+        executor.update(executor_changes or {})
+        runtime.executors = lambda ticket=None: [executor]
+        runtime.native = lambda item, require_idle=True: dict(terminal='t1', pid=42, owner='fixture-owner',
+                                                              status='idle', turn=0)
+        runtime.observation = lambda: dict(observed_at=time.time(), complete=True, terminals=[])
+        runtime.sent = []
+        def send(item, text, before_send=None):
+            if before_send:
+                before_send()
+            runtime.sent.append(text)
+            return {'accepted': True}
+        runtime.send = send
+        return runtime
+
+    def native_call(self, args, *rest, **kw):
+        if args == 'get':
+            return dict(state='live', labels={}, foreground=dict(pid=42, cwd=str(self.root), argv=[
+                'codex', '--model', 'fixture', '-c', 'model_reasoning_effort="medium"', '--no-daemon']))
+        return {}
+
+    def run_override(self, runtime, key='force'):
+        from unittest.mock import patch
+        with patch('teamkit.core_runtime._call', side_effect=self.native_call), \
+             patch('teamkit.providers.identity', return_value=None):
+            choices = actions.candidates(self.config, self.state, 'ONE', runtime=runtime)
+            row = choices['candidates'][0]
+            queued = actions.enqueue(self.config, self.state, 'send', key, ticket='ONE', candidate_id=row['id'],
+                                     expected_ticket=choices['expected_ticket'], override=True,
+                                     override_reason='사용자가 직접 지정', runtime=runtime)
+            actions.consume(self.config, self.state, runtime=runtime)
+        return row, queued, actions.status(self.state, key)
+
+    def assert_blocked_by(self, runtime, needle, code):
+        row, _, done = self.run_override(runtime)
+        self.assertFalse(row['override_allowed'], row['reason'])
+        self.assertIn(needle, row['reason'])
+        self.assertIn(code, [reason['code'] for reason in row['reasons']])
+        self.assertEqual('blocked', done['status'])
+        self.assertIn(needle, done['reason'])
+        self.assertEqual([], runtime.sent)
+        store = TicketStore(self.state)
+        try:
+            self.assertEqual('pending', store.get('ONE')['state'])
+            self.assertEqual([], list(store.db.execute('SELECT * FROM operation_attempts')))
+        finally:
+            store.close()
+        return row
+
+    def test_role_mismatch_does_not_hide_review_independence(self):
+        self.enqueue('ONE', role='reviewer', kind='review', exclude_owners=['fixture-owner'])
+        runtime = self.runtime_for(dict(roles=['investigator']))
+        row = self.assert_blocked_by(runtime, 'review executor must be independent', 'review_independence')
+        self.assertIn('executor responsibility or role mismatch', row['reason'])
+        self.assertIn('리뷰는 구현 담당과 다른 직원', row['reason_ko'])
+
+    def test_working_folder_outside_ticket_resources_is_never_overridden(self):
+        self.enqueue('ONE')
+        runtime = self.runtime_for(dict(root='/elsewhere/not-covering'))
+        self.assert_blocked_by(runtime, 'executor working boundary does not cover ticket resources', 'working_boundary')
+
+    def test_changed_profile_binding_is_never_overridden(self):
+        self.enqueue('ONE')
+        runtime = self.runtime_for(dict(profile_binding='stale-binding'))
+        self.assert_blocked_by(runtime, 'executor profile binding changed', 'profile_binding')
+
+    def test_personal_document_staff_boundary_is_never_overridden(self):
+        departments = {'docs': {'root': str(self.root), 'roles': {
+            'implementer': {'provider': 'claude', 'model': 'writing-model', 'effort': 'medium'}}}}
+        self.enqueue('ONE', product='docs', role='documenter', kind='document')
+        runtime = self.runtime_for(dict(product='example', roles=['documenter']), dict(
+            enabled=True, departments=departments, worker_roles={'documenter': 'implementer'},
+            document_staff={'department': 'docs', 'profiles': ['codex/personal', 'claude/personal']}))
+        self.assert_blocked_by(runtime, 'executor is outside personal document staff', 'docs_staff')
+
+    def test_role_mismatch_and_capacity_are_both_recorded_as_bypassed(self):
+        self.enqueue('ONE')
+        runtime = self.runtime_for(dict(roles=['implementer']))
+        runtime.observation = lambda: dict(observed_at=time.time(), complete=True, terminals=[
+            dict(terminal='x%d' % n, pid=900 + n, provider='codex', account=None, status='working',
+                 owner=None, attempt=None) for n in range(3)])
+        row, queued, done = self.run_override(runtime)
+        self.assertTrue(row['override_allowed'])
+        codes = [reason['code'] for reason in row['reasons']]
+        self.assertIn('role', codes)
+        self.assertIn('capacity', codes)
+        self.assertIn('역할', row['reason_ko'])
+        self.assertIn('용량', row['reason_ko'])
+        self.assertEqual('completed', done['status'], done['reason'])
+        self.assertEqual(1, len(runtime.sent))
+        bypassed = done['result']['override']['bypassed']
+        self.assertIn('executor responsibility or role mismatch', bypassed)
+        self.assertTrue(any('execution capacity' in text for text in bypassed), bypassed)
+        recorded = queued['request']['override']['original_reasons']
+        self.assertIn('executor responsibility or role mismatch', recorded)
+        self.assertTrue(any('execution capacity' in text for text in recorded), recorded)
+        store = TicketStore(self.state)
+        try:
+            attempt = store.attempt(store.get('ONE')['attempt'])
+            self.assertEqual(bypassed, attempt['override']['bypassed'])
+        finally:
+            store.close()
 
 
 class ReasonTranslationTest(unittest.TestCase):

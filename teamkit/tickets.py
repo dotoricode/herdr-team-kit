@@ -370,6 +370,8 @@ class TicketStore:
                        and executor.get('terminal') is None)
             # An explicit manual priority send waives only the ticket's account
             # list; the executor must still be a concrete observed identity.
+            if profile not in item['profiles'] and override:
+                override.setdefault('bypassed', []).append('executor account is outside the ticket account list')
             if ((profile not in item['profiles'] and not override) or not executor.get('owner')
                     or not planned and type(executor.get('pid')) is not int):
                 raise ValueError('executor identity/profile mismatch')
@@ -392,7 +394,8 @@ class TicketStore:
             reserve_in_transaction(self.db, attempt['id'], ident, profile,
                                    resources, policy, observation,
                                    session=None if planned else {k: executor[k] for k in ('terminal', 'pid', 'owner')},
-                                   override_capacity=bool(override))
+                                   override_capacity=bool(override),
+                                   waived=override.setdefault('bypassed', []) if override else None)
             budget['attempts'] += 1
             budget['tokens_reserved'] += estimate
             self._save_budget(item['origin_id'], budget)

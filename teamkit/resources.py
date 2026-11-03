@@ -266,7 +266,7 @@ class ResourceLedger:
                                                policy, native_observation, session=session)
 
     def reserve_in_transaction(self, connection, attempt, ticket, profile, resources,
-                               policy, native_observation, session=None, override_capacity=False):
+                               policy, native_observation, session=None, override_capacity=False, waived=None):
         if not connection.in_transaction:
             raise ValueError('reservation requires caller-owned active transaction')
         if not isinstance(attempt, str) or not IDENTITY.fullmatch(attempt) or not isinstance(ticket, str) or not IDENTITY.fullmatch(ticket):
@@ -284,11 +284,24 @@ class ResourceLedger:
         snap = self._snapshot(connection, policy, native_observation)
         # Only an explicit manual priority send skips the two capacity counters.
         # Session and write-lease conflicts below always remain enforced.
-        if override_capacity is not True and snap['available'] is not None and snap['available'] <= 0:
-            raise ResourceUnavailable('global_capacity', 'global execution capacity is exhausted')
-        if (override_capacity is not True
-                and snap['profile_used'][profile] + snap['profile_unknown'][profile.split('/')[0]] >= snap['profile_limits'][profile]):
-            raise ResourceUnavailable('profile_capacity', 'profile execution capacity is exhausted or unknown')
+        # A waived counter is appended to `waived` so the caller can record what was actually ignored.
+        for code, full, message in (
+                ('global_capacity', lambda: snap['available'] is not None and snap['available'] <= 0,
+                 'global execution capacity is exhausted'),
+                ('profile_capacity', lambda: snap['profile_used'][profile] + snap['profile_unknown'][profile.split('/')[0]]
+                 >= snap['profile_limits'][profile], 'profile execution capacity is exhausted or unknown')):
+            if override_capacity is True and waived is None:
+                continue
+            try:
+                hit = full()
+            except KeyError:
+                if override_capacity is not True:
+                    raise
+                continue
+            if hit and override_capacity is not True:
+                raise ResourceUnavailable(code, message)
+            if hit:
+                waived.append(message)
         self._session_available(connection, attempt, session)
         for existing in self._rows(connection):
             if existing['writes_held'] and any(_conflict(a, b) for a in resources for b in existing['resources']):

@@ -9,7 +9,7 @@ import sqlite3
 import time
 
 from .config import load
-from .operations import NativeRuntime, enabled, policy, tick
+from .operations import NativeRuntime, enabled, gate_issues, policy, tick
 from .tickets import TicketStore, digest
 
 
@@ -75,6 +75,7 @@ def _send_reason(queue, ticket, config):
 # Known gate messages -> short Korean phrases. Unknown text keeps its original wording.
 REASON_KO = (
     ('executor responsibility or role mismatch', '담당 제품·역할이 이 업무와 맞지 않습니다'),
+    ('outside the ticket account list', '업무에 적힌 계정 목록에 없는 계정입니다'),
     ('executor draft, dialog or incomplete screen', '화면에 입력 중인 내용이나 확인 창이 있습니다'),
     ('global execution capacity is exhausted', '전체 동시 실행 용량이 가득 찼습니다'),
     ('profile execution capacity is exhausted or unknown', '계정 동시 실행 용량이 가득 찼거나 확인되지 않았습니다'),
@@ -127,6 +128,47 @@ def _clean_override_reason(value):
     return value.strip()
 
 
+def _reserve_issues(queue, config, runtime, ticket, executor, observation):
+    """Official reservation gates against a private SQLite copy, as [{code, bypassable, reason}].
+
+    The preview cannot hold resources, spend budget or alter a ticket. A planned (new) worker is
+    judged strictly; an existing terminal is previewed as a manual priority send so the waivable
+    reservation gates (capacity, ticket account list) are listed instead of stopping at the first.
+    """
+    manual = executor.get('new') is not True
+    override = dict(action='preview', reason='preview', original_reasons=[], bypassed=[]) if manual else None
+    issues = []
+    preview = object.__new__(TicketStore)
+    preview.db = sqlite3.connect(':memory:', isolation_level=None)
+    preview.path, preview.clock = queue.path, time.time
+    try:
+        queue.db.backup(preview.db)
+        # Candidate previews may offer a fresh explicit reselection;
+        # only the real reserve transaction enforces a current hold.
+        preview.db.execute('DROP TABLE IF EXISTS queue_action_holds')
+        preview.db.execute('DROP TABLE IF EXISTS queue_actions')
+        from .admission import configure
+        configure(preview.db, policy(config))
+        preview.reserve(ticket['id'], executor, policy(config), observation(), expected_revision=digest(ticket),
+                        override=override)
+    except Exception as error:
+        issues.append(dict(code='reservation', bypassable=False, reason=str(error)))
+    finally:
+        preview.close()
+    waived = [dict(code='account_list' if 'account list' in text else 'capacity', bypassable=True, reason=text)
+              for text in (override or {}).get('bypassed', [])]
+    return waived + issues
+
+
+def _with_korean(issues):
+    seen, result = set(), []
+    for issue in issues:
+        if issue['reason'] not in seen:
+            seen.add(issue['reason'])
+            result.append(dict(issue, reason_ko=reason_ko(issue['reason'])))
+    return result
+
+
 def candidates(config_path, state, ident, runtime=None):
     config = load(config_path)
     runtime = runtime or NativeRuntime(config, state)
@@ -144,6 +186,12 @@ def candidates(config_path, state, ident, runtime=None):
         roster = getattr(runtime, 'roster', None)
         view = roster(ticket, executors) if roster else dict(info={}, unregistered=[])
         info, excluded = view.get('info', {}), []
+        observed = []
+
+        def cached_observation():
+            if not observed:
+                observed.append(runtime.observation())
+            return observed[0]
         for executor in executors:
             seen = info.get(executor.get('terminal'), {})
             if executor.get('new') is not True and seen.get('state') not in (None, 'live'):
@@ -151,27 +199,14 @@ def candidates(config_path, state, ident, runtime=None):
                 excluded.append(dict(terminal=executor['terminal'], label=seen.get('label'), state=seen['state'],
                                      reason_ko='터미널이 종료되었거나 사라져 후보에서 제외했습니다'))
                 continue
-            problem = None
+            # Evaluate every gate, not just the first failure, so the user sees what a manual
+            # priority send would ignore and which gates can never be ignored.
             try:
-                runtime.admit(ticket, executor)
-                # Run the official reservation gates against a private SQLite copy.
-                # This preview cannot hold resources, spend budget or alter a ticket.
-                preview = object.__new__(TicketStore)
-                preview.db = sqlite3.connect(':memory:', isolation_level=None)
-                preview.path, preview.clock = queue.path, time.time
-                try:
-                    queue.db.backup(preview.db)
-                    # Candidate previews may offer a fresh explicit reselection;
-                    # only the real reserve transaction enforces a current hold.
-                    preview.db.execute('DROP TABLE IF EXISTS queue_action_holds')
-                    preview.db.execute('DROP TABLE IF EXISTS queue_actions')
-                    from .admission import configure
-                    configure(preview.db, policy(config))
-                    preview.reserve(ident, executor, policy(config), runtime.observation(), expected_revision=digest(ticket))
-                finally:
-                    preview.close()
+                issues = gate_issues(runtime, ticket, executor)
+                issues += _reserve_issues(queue, config, runtime, ticket, executor, cached_observation)
             except Exception as error:
-                problem = str(error)
+                issues = [dict(code='unclassified', bypassable=False, reason=str(error))]
+            issues = _with_korean(issues)
             from .staff import display_name
             generated = display_name(executor['provider'], executor['account'], product=ticket['product'],
                     role=ticket['role'], owner=None if executor.get('new') else executor.get('owner'),
@@ -185,9 +220,12 @@ def candidates(config_path, state, ident, runtime=None):
                 hidden_by_default=(executor.get('new') is not True and executor.get('product') not in (ticket['product'], '*'))
                     or seen.get('background') is True,
                 account=executor['account'], provider=executor['provider'], role=ticket['role'],
-                eligible=problem is None, reason=problem or '', reason_ko=reason_ko(problem),
-                # Manual priority never creates a worker beyond capacity; only an existing terminal can be forced.
-                override_allowed=problem is not None and executor.get('new') is not True,
+                eligible=not issues, reason='; '.join(x['reason'] for x in issues),
+                reason_ko=' / '.join(x['reason_ko'] for x in issues), reasons=issues,
+                # Manual priority never creates a worker beyond capacity; only an existing terminal can be forced,
+                # and never past a gate that is not bypassable.
+                override_allowed=bool(issues) and executor.get('new') is not True
+                    and all(x['bypassable'] for x in issues),
                 planned=executor.get('new') is True))
         for item in view.get('unregistered', []):
             rows.append(dict(id=digest(dict(unregistered=item['terminal'], ticket=ident)),
@@ -195,6 +233,8 @@ def candidates(config_path, state, ident, runtime=None):
                 terminal=item['terminal'], other_team=False, hidden_by_default=False, account=None, provider=None, role=ticket['role'],
                 eligible=False, reason='unregistered terminal in team space',
                 reason_ko=reason_ko('unregistered terminal in team space'), override_allowed=False,
+                reasons=[dict(code='unregistered', bypassable=False, reason='unregistered terminal in team space',
+                              reason_ko=reason_ko('unregistered terminal in team space'))],
                 planned=False, unregistered=True))
         return dict(ticket=ident, expected_ticket=digest(ticket), candidates=rows, excluded=excluded,
                     send_allowed=any(row['eligible'] for row in rows),
@@ -274,7 +314,7 @@ def enqueue(config_path, state, kind, client_request_id, *, ticket=None, candida
                        if row['id'] == candidate_id), None)
         if chosen is not None and chosen.get('planned'):
             raise ValueError('planned worker cannot be sent by manual priority')
-        request['override']['original_reasons'] = [chosen['reason']] if chosen and chosen['reason'] else []
+        request['override']['original_reasons'] = [x['reason'] for x in chosen.get('reasons', [])] if chosen else []
     queue = TicketStore(state)
     try:
         schema(queue.db)

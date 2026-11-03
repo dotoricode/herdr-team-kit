@@ -123,7 +123,7 @@ function clickNotifies(x,key,label){const before=notifies;id(x,key).value.handle
   // Manual priority send: listed with Korean reasons, explicit confirmation, no bypass of delivery guards.
   const force=view('detail');
   calls=[];reply=async()=>({code:0,stdout:JSON.stringify({send_allowed:false,reason:'배정 가능한 직원 없음',expected_ticket:'ticket-force',candidates:[
-    {id:'mismatch',alias:'Other team',account:'team',role:'leader',eligible:false,reason:'executor responsibility or role mismatch',reason_ko:'담당 제품·역할이 이 업무와 맞지 않습니다',override_allowed:true,planned:false},
+    {id:'mismatch',alias:'Other team',account:'team',role:'leader',eligible:false,reason:'executor responsibility or role mismatch',reason_ko:'담당 제품·역할이 이 업무와 맞지 않습니다 / 계정 동시 실행 용량이 가득 찼습니다',reasons:[{code:'role',bypassable:true,reason:'executor responsibility or role mismatch',reason_ko:'담당 제품·역할이 이 업무와 맞지 않습니다'},{code:'capacity',bypassable:true,reason:'profile execution capacity is exhausted or unknown',reason_ko:'계정 동시 실행 용량이 가득 찼습니다'}],override_allowed:true,planned:false},
     {id:'planned',alias:'New worker',account:'team',role:'leader',eligible:false,reason:'profile execution capacity is exhausted or unknown',reason_ko:'계정 동시 실행 용량이 가득 찼습니다',override_allowed:false,planned:true}]})});
   await force.loadCandidates(cx);
   let ftree=force.render(cx);
@@ -138,6 +138,7 @@ function clickNotifies(x,key,label){const before=notifies;id(x,key).value.handle
   ftree=force.render(cx);
   assert(id(ftree,'queue-force-confirm-mismatch')&&id(ftree,'queue-force-cancel-mismatch'),'confirmation step has confirm and cancel');
   assert(text(ftree).includes('닫기·Esc·바깥 클릭은 전송하지 않고 닫습니다'));
+  assert(text(ftree).includes('· 담당 제품·역할이 이 업무와 맞지 않습니다')&&text(ftree).includes('· 계정 동시 실행 용량이 가득 찼습니다'),'confirmation lists every reason the send will ignore');
   assert.equal(calls.length,0,'opening the confirmation sends nothing');
   clickNotifies(ftree,'queue-force-cancel-mismatch','취소');
   ftree=force.render(cx);assert(!id(ftree,'queue-force-confirm-mismatch'));assert(id(ftree,'queue-force-mismatch'));assert.equal(calls.length,0);
