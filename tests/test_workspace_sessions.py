@@ -187,3 +187,11 @@ class WorkspaceTests(Fixture):
         self.assertEqual(result[0]['task'],'L1');self.assertEqual(result[0]['phase'],'received',result[0])
         self.assertEqual(result[0]['receiver']['task'],record['actor']['task'])
         self.assertEqual(result[0]['receiver']['owner'],record['actor']['owner'])
+
+    def test_discovery_failure_has_safe_specific_code_and_redacts_unknown_provider_error(self):
+        self.native['status']['state']='working'
+        result=ws.discover(self.c,self.state,'alpha')[0]
+        self.assertEqual(result['reason_code'],'working')
+        result=ws.discovery_failure(ValueError('provider credential=private-value'))
+        self.assertEqual(result['reason_code'],'observation_failed')
+        self.assertNotIn('private-value',json.dumps(result))

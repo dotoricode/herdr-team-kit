@@ -95,6 +95,27 @@ def observe(config, state, team, terminal):
                 turn=native['turn'])
 
 
+DISCOVERY_REASONS = {
+    'session is not live in the requested team workspace': ('workspace', '해당 팀 워크스페이스의 열린 세션으로 확인되지 않았습니다.'),
+    'workspace process/provider is unverified': ('process', '실제 프로세스와 실행 도구를 확인하지 못했습니다.'),
+    'workspace session is working or its turn is unknown': ('working', '현재 작업 중이거나 턴 종료 여부를 확인하지 못했습니다.'),
+    'workspace session has a draft, dialog or incomplete screen': ('input', '입력 초안·확인 창이 있거나 화면 조회가 불완전합니다.'),
+    'workspace session working root differs from team root': ('root', '현재 작업 폴더가 팀의 승인 경로와 다릅니다.'),
+    'workspace session authentication namespace is unverified': ('authentication', '실행 중인 세션의 인증 경로를 확인하지 못했습니다.'),
+    'workspace session profile/account is ambiguous': ('profile', '세션의 프로필·계정을 하나로 확인하지 못했습니다.'),
+    'workspace session quota is missing, expired or limited': ('quota', '최신 사용량이 없거나 만료됐거나 사용 한도에 도달했습니다.'),
+    'workspace session has an existing active task owner': ('active_task', '기존 업무의 실행 소유권을 먼저 확인해야 합니다.'),
+    'workspace session has an active execution reservation': ('active_reservation', '이 세션에 기존 실행 예약이 남아 있습니다.'),
+    'workspace session changed during verification': ('changed', '확인 도중 세션·프로세스·입력 상태가 바뀌었습니다.'),
+}
+
+
+def discovery_failure(error):
+    code, reason = DISCOVERY_REASONS.get(str(error),
+        ('observation_failed', '공식 신원·실행 관측을 확인하지 못했습니다. 운영본부의 재확인이 필요합니다.'))
+    return dict(reason_code=code, reason=reason, error_type=type(error).__name__)
+
+
 def discover(config, state, team):
     workspace = space(config, team)
     terminals = _call('ls').get('terminals', [])
@@ -110,8 +131,7 @@ def discover(config, state, team):
             result.append(dict(observe(config, state, team, address), registration_required=True))
         except (ValueError, RuntimeError, NativeError, OSError) as error:
             # Fixed categories only: provider errors may contain credentials or paths.
-            result.append(dict(terminal=address, registration_required=True,
-                               reason='workspace validation failed', error_type=type(error).__name__))
+            result.append(dict(terminal=address, registration_required=True, **discovery_failure(error)))
     return result
 
 
