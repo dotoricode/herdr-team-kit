@@ -368,12 +368,9 @@ class TicketStore:
             profile = executor['provider'] + '/' + executor['account']
             planned = (executor.get('new') is True and executor.get('pid') is None
                        and executor.get('terminal') is None)
-            # An explicit manual priority send waives only the ticket's account
-            # list; the executor must still be a concrete observed identity.
-            if profile not in item['profiles'] and override:
-                override.setdefault('bypassed', []).append('executor account is outside the ticket account list')
-            if ((profile not in item['profiles'] and not override) or not executor.get('owner')
-                    or not planned and type(executor.get('pid')) is not int):
+            # The ticket's account list only orders candidates; the executor must still be a
+            # concrete observed identity.
+            if not executor.get('owner') or not planned and type(executor.get('pid')) is not int:
                 raise ValueError('executor identity/profile mismatch')
             from .queue_actions import reserve_selection
             reserve_selection(self.db, ident, executor, manual_action)

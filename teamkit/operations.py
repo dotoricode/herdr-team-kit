@@ -145,8 +145,12 @@ class NativeRuntime:
                 task, role = policy_task, execution_policy(effective, policy_task)
         ordered = execution_candidates(self.config, task, role, time.time()) if role.get('action','dispatch') == 'dispatch' else []
         pairs = [(x['provider'], x['account']) for x in ordered] if ordered else []
-        return sorted(result, key=lambda e: pairs.index((e['provider'], e['account']))
-                      if (e['provider'], e['account']) in pairs else len(pairs))
+        by_order = sorted(result, key=lambda e: pairs.index((e['provider'], e['account']))
+                          if (e['provider'], e['account']) in pairs else len(pairs))
+        if ticket is None:
+            return by_order
+        from .workers import prefer_designated
+        return prefer_designated(ticket, by_order, lambda e: (e['provider'], e['account']))
 
     def roster(self, ticket, executors):
         """Read-only view of the product team's real terminals (same label source as the sidebar)."""
@@ -215,8 +219,9 @@ class NativeRuntime:
         the first failure.
 
         Bypassable gates may be waived by an explicit manual priority send: role/responsibility,
-        role and provider policy, uncertain-slot proof, account usage. Capacity and the ticket
-        account list are waived at reservation. Every other gate is never waived: work approval,
+        role and provider policy, uncertain-slot proof, account usage. Capacity is waived at
+        reservation. The ticket's designated account is a candidate-order priority, not a gate.
+        Every other gate is never waived: work approval,
         UI work, review independence, working folder, profile binding, provider identity,
         personal document staff, and the live owner/PID/draft check.
         """
@@ -650,8 +655,8 @@ def tick(config_path, state, runtime=None, *, selection=None):
                 try:
                     if override:
                         # Explicit manual priority send. Every gate is evaluated; only the bypassable
-                        # ones (role/responsibility/policy, uncertain proof, usage; capacity and the
-                        # ticket account list at reservation) are waived and recorded. Approval, UI,
+                        # ones (role/responsibility/policy, uncertain proof, usage; capacity at
+                        # reservation) are waived and recorded. Approval, UI,
                         # review independence, working folder, profile binding, provider identity,
                         # personal document staff and the live owner/PID/draft check are never waived.
                         if candidate.get('new') is True:

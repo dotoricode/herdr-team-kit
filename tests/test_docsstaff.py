@@ -67,8 +67,9 @@ class DocumentStaffTests(unittest.TestCase):
             user_decision={'provider': 'claude', 'model': 'fixed-review-model', 'effort': 'high', 'failure_count': 0},
             execution_constraint={'provider': 'claude', 'account': 'team'})
         plans = self.plans(ticket)
-        self.assertEqual({(p['provider'], p['account'], p['model']) for p in plans},
-                         {('claude', 'team', 'fixed-review-model')})
+        # The designated account is first; the approved provider and model never change.
+        self.assertEqual(('claude', 'team'), (plans[0]['provider'], plans[0]['account']))
+        self.assertEqual({('claude', 'fixed-review-model')}, {(p['provider'], p['model']) for p in plans})
 
     def another_ticket(self, original, ident, path):
         spec = {key: original[key] for key in (

@@ -41,7 +41,7 @@ class TicketResourceContractTest(unittest.TestCase):
     def reserve(self,ident):
         return self.queue.reserve(ident,self.actor(ident),{'global_limit':4},dict(observed_at=time.time(),complete=True,terminals=[]))
 
-    def test_unlimited_policy_admits_four_profiles_without_bypassing_ticket_identity(self):
+    def test_unlimited_policy_admits_four_profiles_with_each_designated_account(self):
         from teamkit.admission import configure
         from teamkit.resources import PROFILES
         configure(self.queue.db, {'global_limit': None})
@@ -55,7 +55,7 @@ class TicketResourceContractTest(unittest.TestCase):
                          terminal='t' + ident, pid=200 + number)
             if number == 3:
                 with self.assertRaisesRegex(ValueError, 'identity/profile mismatch'):
-                    self.queue.reserve(ident, {**actor, 'account': 'team'}, None,
+                    self.queue.reserve(ident, {**actor, 'owner': None}, None,
                                        dict(observed_at=time.time(), complete=True, terminals=[]))
             self.queue.reserve(ident, actor, None,
                                dict(observed_at=time.time(), complete=True, terminals=[]))

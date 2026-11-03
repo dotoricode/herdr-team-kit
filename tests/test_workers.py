@@ -123,13 +123,14 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(workers.plans(self.config, self.state, ticket), [])
         identity.assert_not_called()
 
-    def test_request_constraint_cannot_replace_user_approved_provider(self):
+    def test_designation_cannot_replace_user_approved_provider_but_does_not_empty_the_plans(self):
         ticket = self.ticket(user_decision={'provider': 'codex', 'model': 'user-fixed-model',
                                            'effort': 'high', 'failure_count': 0},
                              execution_constraint={'provider': 'claude', 'account': 'personal'})
-        with patch.object(workers.providers, 'identity') as identity:
-            self.assertEqual(workers.plans(self.config, self.state, ticket), [])
-        identity.assert_not_called()
+        with patch.object(workers.providers, 'identity'):
+            plans = workers.plans(self.config, self.state, ticket)
+        self.assertTrue(plans)
+        self.assertEqual({(p['provider'], p['model']) for p in plans}, {('codex', 'user-fixed-model')})
 
     def test_new_user_decision_only_resets_failure_evidence_already_reviewed(self):
         ticket = self.ticket(user_decision={'provider': 'codex', 'model': 'user-fixed-model',

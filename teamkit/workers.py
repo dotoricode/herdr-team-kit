@@ -55,6 +55,22 @@ def _atlassian_registered(provider, pr):
     return isinstance(entry, dict) and entry.get('enabled', True) is not False and bool(entry.get('url') or entry.get('command'))
 
 
+def preferred(ticket, provider, account):
+    """True when the ticket designates this account (account list or execution constraint).
+
+    A designation only orders candidates; it never decides whether one is eligible.
+    """
+    constraint = ticket.get('execution_constraint')
+    if isinstance(constraint, dict) and (constraint.get('provider'), constraint.get('account')) == (provider, account):
+        return True
+    return provider + '/' + account in (ticket.get('profiles') or [])
+
+
+def prefer_designated(ticket, items, key=lambda item: item):
+    """Stable partition: designated accounts first, the existing order inside each group."""
+    return sorted(items, key=lambda item: not preferred(ticket, *key(item)))
+
+
 def _policy_task(config, ticket):
     product = ticket['product']
     if product not in config['teams']:
@@ -129,8 +145,6 @@ def plans(config, state, ticket, *, reserved_owner=None):
             if staff and (provider + '/' + account not in staff['profiles']
                           or not docsstaff.available(config, queue.db, ticket, provider, reserved_owner)):
                 continue
-            if provider + '/' + account not in ticket['profiles']:
-                continue
             pr = profile(config, provider, account, candidate)
             if (not eligible(cached_quota(config, store, provider, account), time.time(), config['quota_ttl_seconds'])
                     or not _atlassian_registered(provider, pr)):
@@ -150,7 +164,7 @@ def plans(config, state, ticket, *, reserved_owner=None):
                                new=True, pid=None, terminal=None, runtime={}, empty_prompt=None,
                                operation_actor=True, profile_binding=binding(pr),
                                ticket_signature=_ticket_signature(ticket), base=base, basis_kind=basis_kind))
-        return result
+        return prefer_designated(ticket, result, lambda plan: (plan['provider'], plan['account']))
     finally:
         store.close()
         queue.close()

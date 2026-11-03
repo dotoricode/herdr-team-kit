@@ -91,13 +91,26 @@ def execution_candidates(config, task, role, now):
                 or constraint.get('account') not in ('team', 'personal')):
             raise ValueError('execution constraint requires a configured provider and account')
         provider, account = constraint['provider'], constraint['account']
+        if task.get('team_dispatch_team'):
+            # The team observer is a fixed personal-Codex role, not a designation.
+            return [{**role, **constraint, 'model': config['profiles'][provider][account]['model']
+                     if provider != role['provider'] else role['model']}]
+        # A designated account is only a priority: it goes first when the approved model policy
+        # allows its provider, and every other candidate of the same policy follows.
+        rest = execution_candidates(config, {k: v for k, v in task.items() if k != 'execution_constraint'},
+                                    role, now)
+        if rest is None:
+            from .policy import account_order
+            rest = [{**role, 'account': item, 'effort': role.get('effort', 'medium')}
+                    for item in account_order(config, now)]
         cls = task.get('classification', {'kind': 'general', 'risks': []})
         fixed = (task.get('user_decision') or task['role'] not in ('leader', 'implementer')
                  or cls['kind'] not in ('general', 'small') or cls['risks'])
         if fixed and provider != role['provider']:
-            return []  # A request pin cannot replace an approved or specialized model policy.
-        return [{**role, **constraint,
-                 'model': role['model'] if provider == role['provider'] else config['profiles'][provider][account]['model']}]
+            return rest  # A designation cannot replace an approved or specialized model policy.
+        first = {**role, **constraint,
+                 'model': role['model'] if provider == role['provider'] else config['profiles'][provider][account]['model']}
+        return [first] + [c for c in rest if (c['provider'], c['account']) != (provider, account)]
     preference = execution_preference(config)
     preferred = leader_preference(config, task)
     cls = task.get('classification', {'kind': 'general', 'risks': []})

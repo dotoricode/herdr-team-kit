@@ -560,7 +560,7 @@ class PoolControlTests(Fixture):
                 list(workers.map(lambda ident:control.advance(self.config,self.state,ident),[first['id'],second['id'],first['id'],second['id']]))
             self.assertEqual(sent.call_count,1)
 
-    def test_request_constraint_waits_instead_of_using_another_eligible_account(self):
+    def test_request_constraint_is_a_priority_and_falls_back_to_the_other_eligible_account(self):
         from teamkit.__main__ import select_execution
         self.prepare()
         task = self.call('show', 'L1')
@@ -570,9 +570,10 @@ class PoolControlTests(Fixture):
             selected = select_execution(load(self.config), store, task, time.time())
         finally:
             store.close()
-        self.assertEqual(selected['action'], 'wait')
+        # codex/personal has no fresh quota: the designation does not block the eligible codex/team.
+        self.assertEqual((selected['action'], selected['provider'], selected['account']), ('dispatch', 'codex', 'team'))
 
-    def test_cli_pinned_assignment_waits_without_fallback_and_records_constraint(self):
+    def test_cli_pinned_assignment_records_the_priority_and_plans_the_eligible_account(self):
         self.prepare()
         message = self.root / 'pin-request.txt'
         message.write_text('Inspect the approved SDK scope only.')
@@ -582,10 +583,13 @@ class PoolControlTests(Fixture):
             control.advance(self.config, self.state, request['id'])
         self.assertEqual(request['execution_constraint'], {'provider': 'claude', 'account': 'team'})
         self.assertEqual(self.call('show', 'L1')['execution_constraint'], request['execution_constraint'])
-        self.assertEqual(self.call('pool', 'plan', '--team', 'alpha')['action'], 'wait')
-        self.assertEqual(self.call('plan', 'L1')['action'], 'wait')
-        self.assertEqual(control.requests(self.state)[0]['phase'], 'pending')
-        self.assertEqual(self.call('show', 'L1')['state'], 'queued')
+        planned = self.call('pool', 'plan', '--team', 'alpha')
+        self.assertEqual((planned['action'], planned['selection']['provider'], planned['selection']['account']),
+                         ('dispatch', 'codex', 'team'))
+        self.assertEqual(self.call('plan', 'L1')['account'], 'team')
+        # The request is no longer parked waiting for the designated account; delivery itself
+        # is not mocked here, so only the absence of that wait is asserted.
+        self.assertNotEqual(control.requests(self.state)[0]['phase'], 'pending')
 
     def test_requested_provider_account_survives_official_handoff_and_dispatch(self):
         previous = self.dispatched('claude')

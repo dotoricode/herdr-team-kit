@@ -75,7 +75,8 @@ def _send_reason(queue, ticket, config):
 # Known gate messages -> short Korean phrases. Unknown text keeps its original wording.
 REASON_KO = (
     ('executor responsibility or role mismatch', '담당 제품·역할이 이 업무와 맞지 않습니다'),
-    ('outside the ticket account list', '업무에 적힌 계정 목록에 없는 계정입니다'),
+    # Account designation is a priority, no longer a gate; kept so older stored action records still read.
+    ('outside the ticket account list', '업무에 적힌 계정 목록에 없는 계정입니다(이전 기록)'),
     ('executor draft, dialog or incomplete screen', '화면에 입력 중인 내용이나 확인 창이 있습니다'),
     ('global execution capacity is exhausted', '전체 동시 실행 용량이 가득 찼습니다'),
     ('profile execution capacity is exhausted or unknown', '계정 동시 실행 용량이 가득 찼거나 확인되지 않았습니다'),
@@ -133,7 +134,7 @@ def _reserve_issues(queue, config, runtime, ticket, executor, observation):
 
     The preview cannot hold resources, spend budget or alter a ticket. A planned (new) worker is
     judged strictly; an existing terminal is previewed as a manual priority send so the waivable
-    reservation gates (capacity, ticket account list) are listed instead of stopping at the first.
+    reservation gate (capacity) is listed instead of stopping at the first.
     """
     manual = executor.get('new') is not True
     override = dict(action='preview', reason='preview', original_reasons=[], bypassed=[]) if manual else None
@@ -155,7 +156,7 @@ def _reserve_issues(queue, config, runtime, ticket, executor, observation):
         issues.append(dict(code='reservation', bypassable=False, reason=str(error)))
     finally:
         preview.close()
-    waived = [dict(code='account_list' if 'account list' in text else 'capacity', bypassable=True, reason=text)
+    waived = [dict(code='capacity', bypassable=True, reason=text)
               for text in (override or {}).get('bypassed', [])]
     return waived + issues
 
@@ -183,6 +184,8 @@ def candidates(config_path, state, ident, runtime=None):
             executors = runtime.executors(ticket)
         except Exception as error:
             return dict(ticket=ident, expected_ticket=digest(ticket), candidates=[], send_allowed=False, reason=str(error))
+        from .workers import prefer_designated, preferred
+        executors = prefer_designated(ticket, executors, lambda item: (item['provider'], item['account']))
         roster = getattr(runtime, 'roster', None)
         view = roster(ticket, executors) if roster else dict(info={}, unregistered=[])
         info, excluded = view.get('info', {}), []
@@ -220,6 +223,8 @@ def candidates(config_path, state, ident, runtime=None):
                 hidden_by_default=(executor.get('new') is not True and executor.get('product') not in (ticket['product'], '*'))
                     or seen.get('background') is True,
                 account=executor['account'], provider=executor['provider'], role=ticket['role'],
+                # The ticket's designated account is only listed first; it never changes eligibility.
+                preferred=preferred(ticket, executor['provider'], executor['account']),
                 eligible=not issues, reason='; '.join(x['reason'] for x in issues),
                 reason_ko=' / '.join(x['reason_ko'] for x in issues), reasons=issues,
                 # Manual priority never creates a worker beyond capacity; only an existing terminal can be forced,
@@ -230,7 +235,7 @@ def candidates(config_path, state, ident, runtime=None):
         for item in view.get('unregistered', []):
             rows.append(dict(id=digest(dict(unregistered=item['terminal'], ticket=ident)),
                 alias=item.get('label') or '이름 미확인', name_source='label' if item.get('label') else 'generated',
-                terminal=item['terminal'], other_team=False, hidden_by_default=False, account=None, provider=None, role=ticket['role'],
+                terminal=item['terminal'], other_team=False, hidden_by_default=False, account=None, provider=None, role=ticket['role'], preferred=False,
                 eligible=False, reason='unregistered terminal in team space',
                 reason_ko=reason_ko('unregistered terminal in team space'), override_allowed=False,
                 reasons=[dict(code='unregistered', bypassable=False, reason='unregistered terminal in team space',
