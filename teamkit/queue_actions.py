@@ -224,6 +224,30 @@ def _save(db, action):
     db.execute('INSERT OR REPLACE INTO queue_actions VALUES (?,?)', (action['id'], json.dumps(action)))
 
 
+def _identity_request(request):
+    """What a client-request-id binds. The preview-time reasons are a record, not part of the request."""
+    override = request.get('override')
+    if not isinstance(override, dict):
+        return request
+    return {**request, 'override': {key: value for key, value in override.items() if key != 'original_reasons'}}
+
+
+def _recorded(state, client_request_id, request):
+    queue = TicketStore(state, read_only=True)
+    try:
+        if not queue.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='queue_actions'").fetchone():
+            return None
+        row = queue.db.execute('SELECT body FROM queue_actions WHERE id=?', (client_request_id,)).fetchone()
+    finally:
+        queue.close()
+    if row is None:
+        return None
+    result = json.loads(row[0])
+    if _identity_request(result['request']) != _identity_request(request):
+        raise ValueError('client-request-id already binds another immutable action')
+    return result
+
+
 def enqueue(config_path, state, kind, client_request_id, *, ticket=None, candidate_id=None, expected_ticket=None,
             override=False, override_reason=None, runtime=None):
     if not isinstance(client_request_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', client_request_id):
@@ -239,13 +263,18 @@ def enqueue(config_path, state, kind, client_request_id, *, ticket=None, candida
     if override is True:
         if kind != 'send':
             raise ValueError('manual priority applies only to a send action')
-        text = _clean_override_reason(override_reason)
+        request['override'] = dict(reason=_clean_override_reason(override_reason))
+        # A retry of an already recorded request returns that action before any new preview:
+        # the preview itself changes once the first request holds the ticket.
+        known = _recorded(state, client_request_id, request)
+        if known is not None:
+            return known
         # Preview the gates now so the durable record keeps why this was not assignable.
         chosen = next((row for row in candidates(config_path, state, ticket, runtime=runtime)['candidates']
                        if row['id'] == candidate_id), None)
         if chosen is not None and chosen.get('planned'):
             raise ValueError('planned worker cannot be sent by manual priority')
-        request['override'] = dict(reason=text, original_reasons=[chosen['reason']] if chosen and chosen['reason'] else [])
+        request['override']['original_reasons'] = [chosen['reason']] if chosen and chosen['reason'] else []
     queue = TicketStore(state)
     try:
         schema(queue.db)
@@ -253,7 +282,7 @@ def enqueue(config_path, state, kind, client_request_id, *, ticket=None, candida
             row = queue.db.execute('SELECT body FROM queue_actions WHERE id=?', (client_request_id,)).fetchone()
             if row:
                 result = json.loads(row[0])
-                if result['request'] != request:
+                if _identity_request(result['request']) != _identity_request(request):
                     raise ValueError('client-request-id already binds another immutable action')
                 return result
             result = dict(id=client_request_id, kind=kind, request=request, status='queued',

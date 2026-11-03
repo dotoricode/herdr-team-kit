@@ -97,6 +97,24 @@ class QueueOverrideTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'already binds'):
             self.send('same', choices, candidate, override=True, override_reason='다른 사유')
 
+    def test_retry_with_same_id_and_reason_returns_the_existing_action(self):
+        # R1-3: the stored action is the answer; a later preview must not make the retry look different.
+        self.enqueue('ONE')
+        self.mismatch()
+        choices, candidate = self.choose()
+        first = self.send('same', choices, candidate, override=True, override_reason='같은 사유')
+        again = self.send('same', choices, candidate, override=True, override_reason='같은 사유')
+        self.assertEqual(('same', 'queued'), (again['id'], again['status']))
+        self.assertEqual(first['request'], again['request'])
+        actions.consume(self.config, self.state, runtime=self.runtime)
+        done = actions.status(self.state, 'same')
+        after = self.send('same', choices, candidate, override=True, override_reason='같은 사유')
+        self.assertEqual((done['id'], done['status']), (after['id'], after['status']))
+        self.assertEqual('completed', after['status'])
+        self.assertEqual(1, len(self.runtime.sent))
+        with self.assertRaisesRegex(ValueError, 'already binds'):
+            self.send('same', choices, candidate, override=True, override_reason='다른 사유')
+
     def test_capacity_and_profile_constraints_are_bypassed(self):
         self.enqueue('ONE', profiles=['claude/team'], execution_constraint={'provider': 'claude', 'account': 'team'})
         self.busy_observation()
