@@ -612,7 +612,7 @@ def reconcile(queue, runtime, config=None):
             submission = attempt.get('submission') or {}
             if submission.get('status') in ('blocked','incomplete'):
                 queue.request_intervention(ticket['id'], attempt['id'], 'blocked_result',
-                    submission.get('reason') or '담당자가 미완료·차단 결과를 제출했습니다. 운영 확인이 필요합니다')
+                    (submission.get('reason') if isinstance(submission.get('reason'), str) and submission['reason'].strip() else None) or '담당자가 미완료·차단 결과를 제출했습니다. 운영 확인이 필요합니다')
                 continue
             proof = verify(ticket, attempt, config, queue.path)
             if not all(proof['checks'].values()):

@@ -52,3 +52,14 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual('pending',q.get('PARENT')['state'])
         self.assertNotIn('intervention',q.get('PARENT'))
         self.assertEqual('',q.get('PARENT')['reason'])
+
+    def test_late_actor_submission_clears_intervention(self):
+        self.enqueue('LATE')
+        tick(self.config,self.state,self.runtime)
+        q=TicketStore(self.state);self.addCleanup(q.close)
+        item=q.get('LATE');attempt=item['attempt']
+        q.request_intervention('LATE',attempt,'missing_result','result missing')
+        # Repeated identical result is also the actor's reconciliation path.
+        result=q.attempt(attempt)['submission'].copy();result.pop('artifact_digest')
+        q.submit('LATE',attempt,self.runtime.executor['owner'],result)
+        self.assertNotIn('intervention',q.get('LATE'))

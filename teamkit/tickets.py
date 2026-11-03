@@ -695,10 +695,15 @@ class TicketStore:
             if 'submission' in attempt:
                 if attempt['submission'] != proof:
                     raise ValueError('conflicting repeated submission')
+                if item.get('intervention') and proof.get('status') not in ('blocked','incomplete'):
+                    item.pop('intervention', None)
+                    item.update(reason='', next_action='validate task-specific evidence')
+                    self._save(item, 'actor_result_reconciled', {'attempt': attempt_id})
                 return item
+            item.pop('intervention', None)
             attempt['submission'] = proof
             self._save_attempt(attempt)
-            item.update(state='awaiting_verification', next_action='validate task-specific evidence')
+            item.update(state='awaiting_verification', reason='', next_action='validate task-specific evidence')
             self._save(item, 'result_submitted', {'attempt': attempt_id})
         self.notify()
         return item
