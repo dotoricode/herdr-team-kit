@@ -58,15 +58,17 @@ def prove_uncertain_slot(executor):
 
 class AdmitError(ValueError):
     """admit() failure that carries every gate that failed: [{code, bypassable, reason}]."""
-    def __init__(self, issues):
+    def __init__(self, issues, errors=()):
         self.issues = issues
+        self.errors = list(errors)  # The original exceptions, in the same order as issues.
         super().__init__('; '.join(dict.fromkeys(x['reason'] for x in issues)))
 
 
 def gate_issues(runtime, ticket, executor):
     """All failed admission gates of one executor; [] when it is assignable.
 
-    A runtime without admit_report (a test double) reports its single admit() failure as bypassable.
+    A runtime without admit_report (a test double) cannot classify its failure, so a plain admit() error
+    is reported as not bypassable; only an AdmitError carries its own classification.
     """
     report = getattr(runtime, 'admit_report', None)
     if report is not None:
@@ -76,8 +78,12 @@ def gate_issues(runtime, ticket, executor):
     except AdmitError as error:
         return error.issues
     except (ValueError, KeyError, OSError, subprocess.SubprocessError, NativeError) as error:
-        return [dict(code='unclassified', bypassable=True, reason=str(error))]
+        return [dict(code='unclassified', bypassable=False, reason=str(error))]
     return []
+
+
+class NativeStateError(ValueError):
+    """The live terminal state cannot be read as the gate needs it; never a bypassable failure."""
 
 
 class NativeRuntime:
@@ -196,13 +202,17 @@ class NativeRuntime:
                     status=(native.get('status') or {}).get('state'), turn=native.get('turn'))
 
     def admit(self, ticket, executor):
-        issues = self.admit_report(ticket, executor)
+        """Automatic admission: stop at the first failed gate (no extra terminal or provider reads)."""
+        issues, errors = self._evaluate(ticket, executor, collect_all=False)
         if issues:
-            raise AdmitError(issues)
+            raise AdmitError(issues, errors)
         return executor
 
-    def admit_report(self, ticket, executor):
-        """Evaluate every admission gate and return all failures as [{code, bypassable, reason}].
+    def admit_report(self, ticket, executor, collect_all=True):
+        """Evaluate the admission gates and return the failures as [{code, bypassable, reason}].
+
+        Previews and manual priority sends use the default full evaluation; collect_all=False stops at
+        the first failure.
 
         Bypassable gates may be waived by an explicit manual priority send: role/responsibility,
         role and provider policy, uncertain-slot proof, account usage. Capacity and the ticket
@@ -210,14 +220,30 @@ class NativeRuntime:
         UI work, review independence, working folder, profile binding, provider identity,
         personal document staff, and the live owner/PID/draft check.
         """
-        issues = []
+        return self._evaluate(ticket, executor, collect_all)[0]
+
+    def _evaluate(self, ticket, executor, collect_all):
+        issues, errors = [], []
 
         def gate(code, bypassable, check):
+            if issues and not collect_all:
+                return False
             try:
                 check()
                 return True
-            except (ValueError, KeyError, OSError, subprocess.SubprocessError, NativeError) as error:
+            except Exception as error:
+                if isinstance(error, NativeStateError):
+                    code, bypassable = 'native', False
+                elif not isinstance(error, (ValueError, KeyError, OSError, subprocess.SubprocessError, NativeError)):
+                    # Not a known gate failure: keep the original type and text so a programming error is
+                    # visible, but never let it waive a gate or escape the tick.
+                    code, bypassable = 'unclassified', False
+                    error_text = '%s: %s' % (type(error).__name__, error)
+                    issues.append(dict(code=code, bypassable=bypassable, reason=error_text))
+                    errors.append(error)
+                    return False
                 issues.append(dict(code=code, bypassable=bypassable, reason=str(error)))
+                errors.append(error)
                 return False
 
         from . import docsstaff
@@ -233,11 +259,12 @@ class NativeRuntime:
         # report it without touching the terminal or the provider account.
         if not (gate('work_approval', False, lambda: work_gate(self.config, self.state, ticket))
                 and gate('docs_staff', False, staff)):
-            return issues
+            return issues, errors
         if ticket['role'] == 'ui':
             issues.append(dict(code='ui', bypassable=False, reason=(
                 'UI work requires the existing personal Codex UI lab, test host and exclusive screen lease')))
-            return issues
+            errors.append(ValueError(issues[-1]['reason']))
+            return issues, errors
         if executor.get('new') is True:
             def planned():
                 from .workers import plans, PLAN_FIELDS
@@ -245,14 +272,12 @@ class NativeRuntime:
                            for candidate in plans(self.config, self.state, ticket)):
                     raise ValueError('planned role/profile/quota no longer eligible')
             gate('plan', False, planned)
-            return issues
+            return issues, errors
 
         def responsibility():
             if executor['product'] not in (ticket['product'], '*') or ticket['role'] not in executor['roles']:
                 raise ValueError('executor responsibility or role mismatch')
         gate('role', True, responsibility)
-        if executor.get('pool_phase') == 'uncertain':
-            gate('uncertain', True, lambda: prove_uncertain_slot(executor))
         from .core_runtime import _model_effort
         from .workers import _policy_task
         from .departments import execution_config
@@ -268,7 +293,10 @@ class NativeRuntime:
             if role.get('action') != 'dispatch':
                 raise ValueError('role policy requires a user decision')
             resolved.update(effective=effective, task=task, role=role)
-        if gate('policy', True, resolve) and resolved['role']:
+        if executor.get('pool_phase') == 'uncertain':
+            gate('uncertain', True, lambda: prove_uncertain_slot(executor))
+        policy_ok = gate('policy', True, resolve) and resolved['role']
+        if policy_ok:
             def provider_policy():
                 effective, task, role = resolved['effective'], resolved['task'], resolved['role']
                 if docsstaff.policy(self.config, ticket):
@@ -281,7 +309,10 @@ class NativeRuntime:
                 if expected is None:
                     raise ValueError('executor provider is outside the existing role policy')
                 from .core_runtime import _call
-                observed = _call('get', executor['terminal'])['foreground']['argv']
+                foreground = _call('get', executor['terminal']).get('foreground')
+                observed = foreground.get('argv') if isinstance(foreground, dict) else None
+                if not isinstance(observed, list):
+                    raise NativeStateError('executor foreground process is not readable; cannot verify model/effort')
                 if _model_effort(executor['provider'], observed) != (expected['model'], expected.get('effort', 'medium')):
                     raise ValueError('executor model/effort differs from existing role policy')
             gate('policy', True, provider_policy)
@@ -329,7 +360,7 @@ class NativeRuntime:
         if native_ok and not issues:
             # Identity/quota calls can race a human input or process replacement.
             gate('native', False, lambda: self.native(executor))
-        return issues
+        return issues, errors
 
     def send(self, executor, text, before_send=None):
         from .core_runtime import CoreRuntime
@@ -365,10 +396,14 @@ class NativeRuntime:
                 after=self.native(executor)
                 if type(before.get('turn')) is int and before['turn']==after.get('turn'):
                     return executor
-            except NativeError as error:
+            except (NativeError, AdmitError) as admitted:
                 # A newly created CLI can briefly become busy while loading MCP.
                 # No task text has been submitted by this launch method.
-                if str(error)!='Core agent is not idle and ready; inspect before sending':
+                # admit() wraps its failures; only a lone native not-idle failure is a busy start.
+                error = admitted
+                if isinstance(admitted, AdmitError):
+                    error = admitted.errors[0] if len(admitted.errors) == 1 else admitted
+                if not isinstance(error, NativeError) or str(error)!='Core agent is not idle and ready; inspect before sending':
                     raise
                 observed=self.native(executor,require_idle=False)
                 if observed.get('status') not in ('working','unknown',None):

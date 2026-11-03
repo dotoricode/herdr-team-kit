@@ -5,7 +5,7 @@ import unittest
 
 import test_operations as operation_fixtures
 from teamkit import queue_actions as actions
-from teamkit.operations import NativeRuntime
+from teamkit.operations import AdmitError, NativeRuntime
 from teamkit.runtime import RuntimeError as NativeError
 from teamkit.tickets import TicketStore
 
@@ -17,7 +17,7 @@ class QueueOverrideTest(unittest.TestCase):
     def mismatch(self):
         """Fixture executor that the official admission gate rejects."""
         def admit(ticket, candidate):
-            raise ValueError('executor responsibility or role mismatch')
+            raise AdmitError([dict(code='role', bypassable=True, reason='executor responsibility or role mismatch')])
         self.runtime.admit = admit
 
     def choose(self, ticket='ONE'):
@@ -43,12 +43,12 @@ class QueueOverrideTest(unittest.TestCase):
         self.assertTrue(candidate['override_allowed'])
         self.assertFalse(choices['send_allowed'])
 
-    def test_unknown_reason_keeps_original_text_in_korean_label(self):
+    def test_unknown_reason_keeps_original_text_in_korean_label_and_is_not_overridable(self):
         self.enqueue('ONE')
         self.runtime.admit = lambda *args: (_ for _ in ()).throw(ValueError('something new'))
         _, candidate = self.choose()
         self.assertIn('something new', candidate['reason_ko'])
-        self.assertTrue(candidate['override_allowed'])
+        self.assertFalse(candidate['override_allowed'])
 
     def test_plain_send_to_ineligible_candidate_is_still_blocked(self):
         self.enqueue('ONE')
