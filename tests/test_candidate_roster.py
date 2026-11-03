@@ -104,6 +104,31 @@ class UncertainSlotTest(unittest.TestCase):
         self.assertEqual('uncertain', found[0]['pool_phase'])
         self.assertEqual(['--model', 'm'], found[0]['pool_launch_args'])
 
+    def test_uncertain_slot_without_terminal_or_pid_is_skipped_not_fatal(self):
+        # R1-1: the launch can fail before a terminal or PID is recorded; such a slot is not a candidate.
+        no_pid, no_terminal = slot('t7', 'uncertain', 'a' * 32), slot('t8', 'uncertain', 'b' * 32)
+        del no_pid['native_pid']
+        del no_terminal['terminal']
+        text_pid = slot('t6', 'uncertain', 'd' * 32, native_pid='700')
+        runtime = self.runtime_with(no_pid, no_terminal, text_pid, slot('t9', 'uncertain', 'c' * 32))
+        found = [e['terminal'] for e in runtime.executors() if e['task'] == 'POOL-LEADER-EXAMPLE']
+        self.assertEqual(['t9'], found)
+
+    def test_automatic_tick_is_not_blocked_by_an_incomplete_uncertain_slot(self):
+        from unittest.mock import patch
+        from teamkit.operations import tick
+        broken = slot('t7', 'uncertain', 'a' * 32)
+        del broken['native_pid']
+        runtime = self.runtime_with(broken)
+        operation_fixtures.OperationsTest.enqueue(self, 'ONE')
+        with patch('teamkit.workers.plans', return_value=[]):
+            tick(self.config, self.state, runtime)
+        queue = operation_fixtures.TicketStore(self.state)
+        try:
+            self.assertNotIn('native_pid', json.dumps(queue.get('ONE'), ensure_ascii=False))
+        finally:
+            queue.close()
+
     def test_prepared_slot_identity_is_unchanged(self):
         runtime = self.runtime_with(slot('t7', 'prepared', 'a' * 32))
         found = [e for e in runtime.executors() if e['task'] == 'POOL-LEADER-EXAMPLE'][0]

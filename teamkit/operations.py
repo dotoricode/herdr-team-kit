@@ -69,6 +69,9 @@ class NativeRuntime:
             runtime = slot.get('runtime') or {}
             if slot.get('phase') not in ('prepared', 'leased', 'uncertain'):
                 continue
+            if slot['phase'] == 'uncertain' and not (isinstance(slot.get('terminal'), str)
+                                                     and type(slot.get('native_pid')) is int):
+                continue  # The launch never recorded a terminal and PID; nothing to prove, not a candidate.
             # Uncertain slots stay candidates only through a read-only launch proof in admit();
             # prepared/leased executor identity is unchanged.
             proof = dict(pool_phase='uncertain', pool_launch_args=(slot.get('spec') or {}).get('args')) \
