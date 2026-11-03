@@ -15,7 +15,7 @@ from .config import binding, cached_quota, load, profile
 from .core_runtime import CoreRuntime, _call, _model_effort, _process_matches, _detector_matches, claude_gui_settings, require_managed
 from .policy import eligible
 from .resources import ResourceLedger, observe_native
-from .runtime import AUTH_ENV, launch_spec, profile_home_matches
+from .runtime import AUTH_ENV, home_key, home_value, launch_spec, profile_home_matches
 from .store import Store
 from .tickets import TicketStore, file_digest
 from .workers import _atlassian_registered, _hint, _policy_task
@@ -132,6 +132,108 @@ def _pid_stopped(pid):
     raise ValueError('previous native PID still exists; preserve it before resume')
 
 
+def _process_environment(pid):
+    # ps output is consumed locally; retain only the authentication namespace fields.
+    result = subprocess.run(['ps', 'eww', '-p', str(pid), '-o', 'command='], capture_output=True,
+                            text=True, timeout=5, check=True)
+    selected = {home_key('codex'), home_key('claude'), *AUTH_ENV}
+    env = {}
+    for key, value in re.findall(r'(?:^|\s)([A-Z_][A-Z0-9_]*)=([^\s]*)', result.stdout):
+        if key in selected:
+            if key in env:
+                raise ValueError('native profile namespace is ambiguous')
+            env[key] = value
+    return env
+
+
+def _namespace_matches(provider, pr, env):
+    # Match runtime.profile_home_matches without changing the host process environment.
+    expected = home_value(provider, pr['home'])
+    observed = env.get(home_key(provider))
+    if provider == 'claude' and expected == '':
+        return not observed
+    effective = observed or str(Path.home() / ('.codex' if provider == 'codex' else '.claude'))
+    return effective == expected
+
+
+def _session_record(pr, pid, cwd):
+    path = Path(pr['home']) / 'sessions' / (str(pid) + '.json')
+    try:
+        if path.is_symlink() or path.parent.is_symlink():
+            raise ValueError('native session record must not be a symlink')
+        original = json.loads(path.read_text())
+        sid = original.get('sessionId')
+        if (not isinstance(sid, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', sid)
+                or not isinstance(cwd, str) or not Path(cwd).is_absolute()
+                or original.get('cwd') != cwd):
+            raise ValueError('native session metadata has an ambiguous SID or working root')
+        return dict(sessionId=sid, cwd=cwd, path=str(path), digest=file_digest(path))
+    except (OSError, json.JSONDecodeError, AttributeError) as error:
+        raise ValueError('native session metadata is unavailable or ambiguous') from error
+
+
+def _argv_session(provider, argv):
+    if not isinstance(argv, list) or not argv or any(not isinstance(arg, str) for arg in argv):
+        raise ValueError('native session argv is unavailable or ambiguous')
+    explicit = []
+    continued = 0
+    options = ('--resume', '-r', '--session-id') if provider == 'claude' else ()
+    for index, arg in enumerate(argv):
+        if provider == 'claude' and arg in ('--continue', '-c'):
+            continued += 1
+        for option in options:
+            if arg == option:
+                if index + 1 >= len(argv):
+                    raise ValueError('native session argument is missing')
+                explicit.append(argv[index + 1])
+            elif arg.startswith(option + '='):
+                explicit.append(arg[len(option) + 1:])
+        if provider == 'codex' and arg == 'resume':
+            if index + 1 >= len(argv):
+                raise ValueError('native session argument is missing')
+            explicit.append(argv[index + 1])
+    if (len(explicit) > 1 or continued > 1 or explicit and continued
+            or any(not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', sid) for sid in explicit)):
+        raise ValueError('native session arguments are ambiguous')
+    return explicit[0] if explicit else None
+
+
+def _exclude_live_session(observed, provider, pr, session):
+    foreground = observed.get('foreground') or {}
+    name = foreground.get('name')
+    if not isinstance(name, str) or not name:
+        raise ValueError('native session process identity is unavailable or ambiguous')
+    if name in ('zsh', 'bash', 'sh', 'fish', 'nu', 'pwsh', 'csh', 'tcsh'):
+        return
+    detected = _detector_matches(provider, (observed.get('status') or {}).get('app'))
+    if not _process_matches(provider, name):
+        if detected:
+            raise ValueError('native session process identity is ambiguous')
+        return
+    pid = foreground.get('pid')
+    if type(pid) is not int or pid <= 0:
+        raise ValueError('native session PID is unavailable or ambiguous')
+    env = _process_environment(pid)
+    if not _namespace_matches(provider, pr, env):
+        actual_home = env.get(home_key(provider)) or str(Path.home() / ('.codex' if provider == 'codex' else '.claude'))
+        if Path(actual_home).resolve() == Path(pr['home']).resolve():
+            raise ValueError('native session authentication namespace is ambiguous')
+        return  # A positively different profile cannot own this profile's session journal.
+    if any(env.get(key) for key in AUTH_ENV):
+        raise ValueError('native session authentication namespace is ambiguous')
+    metadata = _session_record(pr, pid, foreground.get('cwd', observed.get('cwd'))) if provider == 'claude' else None
+    explicit = _argv_session(provider, foreground.get('argv'))
+    if (metadata and metadata['sessionId'] == session) or explicit == session:
+        raise ValueError('requested session is already resumed in another native')
+    if (metadata is None and explicit is None) or (metadata and explicit and metadata['sessionId'] != explicit):
+        raise ValueError('native session metadata and argv are ambiguous')
+    after = _call('get', observed['address'])
+    if any(after.get(key) != observed.get(key) for key in ('address', 'state', 'foreground')):
+        raise ValueError('native session changed during duplicate inspection')
+    if metadata and _session_record(pr, pid, metadata['cwd']) != metadata:
+        raise ValueError('native session metadata changed during duplicate inspection')
+
+
 def checkpoint(config_path, state, department, provider, terminal, pid, session, journal):
     """Capture an idle, empty original native before a separately authorized normal stop."""
     require_managed()
@@ -148,23 +250,12 @@ def checkpoint(config_path, state, department, provider, terminal, pid, session,
             or foreground.get('cwd', native.get('cwd')) != root
             or screen.get('complete') is not True or not empty_input(screen.get('text', ''))):
         raise ValueError('resume checkpoint requires the exact idle PID, working root and empty input')
-    # Inspect only selected environment values. Never return the raw ps output.
-    result = subprocess.run(['ps', 'eww', '-p', str(pid), '-o', 'command='], capture_output=True,
-                            text=True, timeout=5, check=True)
-    env = dict(re.findall(r'(?:^|\s)([A-Z_][A-Z0-9_]*)=([^\s]*)', result.stdout))
-    key = 'CODEX_HOME' if provider == 'codex' else 'CLAUDE_CONFIG_DIR'
-    actual_home = env.get(key) or str(Path.home() / ('.codex' if provider == 'codex' else '.claude'))
-    if Path(actual_home).resolve() != Path(pr['home']).resolve() or any(env.get(key) for key in AUTH_ENV):
+    env = _process_environment(pid)
+    if not _namespace_matches(provider, pr, env) or any(env.get(key) for key in AUTH_ENV):
         raise ValueError('original native profile or authentication namespace is unverified')
-    session_record = None
-    if provider == 'claude':
-        path = Path(pr['home']) / 'sessions' / (str(pid) + '.json')
-        if path.is_symlink():
-            raise ValueError('native session record must not be a symlink')
-        original = json.loads(path.read_text())
-        if original.get('sessionId') != session or original.get('cwd') != root:
-            raise ValueError('official PID session record does not match the original conversation')
-        session_record = dict(sessionId=session, cwd=root, path=str(path), digest=file_digest(path))
+    session_record = _session_record(pr, pid, root) if provider == 'claude' else None
+    if session_record and session_record['sessionId'] != session:
+        raise ValueError('official PID session record does not match the original conversation')
     proof = dict(seat=department + '/' + provider, terminal=terminal, pid=pid, session=session,
                  profile_binding=binding(pr), journal=_journal(pr, provider, session, root, journal),
                  captured_at=time.time(), native_turn=native.get('turn'), checks=checks,
@@ -206,11 +297,17 @@ def _resume(db, seat, session, pr, provider, root):
         raise ValueError('original journal changed since empty-input checkpoint; inspect before resume')
     # A separately started resume is not permission to start another copy.
     listing = _call('ls', '--json')
+    if not isinstance(listing.get('terminals'), list):
+        raise ValueError('live session inventory is unavailable or ambiguous')
     for terminal in listing['terminals']:
-        if terminal.get('state') == 'live':
+        if (not isinstance(terminal, dict) or not isinstance(terminal.get('state'), str)
+                or not isinstance(terminal.get('address'), str)):
+            raise ValueError('live session inventory is unavailable or ambiguous')
+        if terminal['state'] == 'live':
             observed = _call('get', terminal['address'])
-            if session in ((observed.get('foreground') or {}).get('argv') or []):
-                raise ValueError('requested session is already resumed in another native')
+            if observed.get('address') != terminal['address'] or observed.get('state') != 'live':
+                raise ValueError('live session inventory changed during duplicate inspection')
+            _exclude_live_session(observed, provider, pr, session)
     return proof
 
 

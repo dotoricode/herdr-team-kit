@@ -235,6 +235,101 @@ class StaffBootstrapTests(unittest.TestCase):
         self.assertEqual(record['phase'], 'awaiting_receipt')
         self.assertEqual(admission.policy_for(None, self.store.db)[1]['global_limit'], 3)
 
+    def resume_fixture(self):
+        self.configure(); self.fake_boundaries()
+        pr = self.config['profiles']['claude']['personal']
+        journal = Path(pr['home']) / 'projects' / 'fixture-session.jsonl'
+        journal.parent.mkdir()
+        journal.write_text(json.dumps({'sessionId': 'fixture-session', 'cwd': str(self.root)}) + '\n')
+        proof = dict(seat='docs/claude', terminal='t99', pid=999, session='fixture-session',
+            profile_binding=binding(pr), journal=staff._journal(pr, 'claude', 'fixture-session', str(self.root), journal))
+        staff._schema(self.store.db)
+        self.store.db.execute('INSERT INTO staff_resume_proofs VALUES (?,?)', ('docs/claude', json.dumps(proof)))
+        return pr, proof
+
+    def resume_listing(self, argv):
+        native = dict(address='t200', state='live', foreground=dict(pid=555, name='claude',
+            cwd=str(self.root), argv=argv), status={'app': 'claude-code', 'state': 'working'})
+        def call(*args):
+            if args[0] == 'ls':
+                return {'terminals': [{'address': 't200', 'state': 'live'}]}
+            return native if args[1] == 't200' else {'foreground': None}
+        return call
+
+    def test_existing_sid_metadata_blocks_equals_continue_short_and_bare_native(self):
+        pr, proof = self.resume_fixture()
+        sessions = Path(pr['home']) / 'sessions'
+        sessions.mkdir()
+        (sessions / '555.json').write_text(json.dumps({'sessionId': proof['session'], 'cwd': str(self.root)}))
+        for argv in (['claude', '--resume=fixture-session'], ['claude', '--continue'],
+                     ['claude', '-c'], ['claude', '-r', 'fixture-session'], ['claude']):
+            with self.subTest(argv=argv), patch.object(staff.os, 'kill', side_effect=ProcessLookupError), \
+                    patch.object(staff, '_call', side_effect=self.resume_listing(argv)), \
+                    patch.object(staff.subprocess, 'run', return_value=SimpleNamespace(stdout='CLAUDE_CONFIG_DIR=' + pr['home'])):
+                with self.assertRaisesRegex(ValueError, 'already resumed'):
+                    staff._resume(self.store.db, proof['seat'], proof['session'], pr, 'claude', str(self.root))
+        self.assertEqual(self.launched, [])
+
+    def test_missing_or_inconsistent_live_session_metadata_fails_closed(self):
+        pr, proof = self.resume_fixture()
+        sessions = Path(pr['home']) / 'sessions'
+        sessions.mkdir()
+        for metadata in (None, {'sessionId': 'other-session'},
+                         {'sessionId': 'other-session', 'cwd': '/srv/other'},
+                         {'sessionId': 'other-session', 'cwd': str(self.root)}):
+            path = sessions / '555.json'
+            if metadata is not None:
+                path.write_text(json.dumps(metadata))
+            with self.subTest(metadata=metadata), patch.object(staff.os, 'kill', side_effect=ProcessLookupError), \
+                    patch.object(staff, '_call', side_effect=self.resume_listing(['claude', '--resume=another-session'])), \
+                    patch.object(staff.subprocess, 'run', return_value=SimpleNamespace(stdout='CLAUDE_CONFIG_DIR=' + pr['home'])):
+                with self.assertRaisesRegex(ValueError, 'session|ambiguous'):
+                    staff._resume(self.store.db, proof['seat'], proof['session'], pr, 'claude', str(self.root))
+        self.assertEqual(self.launched, [])
+
+    def test_confirmed_different_session_in_same_profile_does_not_block_resume(self):
+        pr, proof = self.resume_fixture()
+        sessions = Path(pr['home']) / 'sessions'
+        sessions.mkdir()
+        (sessions / '555.json').write_text(json.dumps({'sessionId': 'other-session', 'cwd': str(self.root)}))
+        with patch.object(staff.os, 'kill', side_effect=ProcessLookupError), \
+                patch.object(staff, '_call', side_effect=self.resume_listing(['claude', '--continue'])), \
+                patch.object(staff.subprocess, 'run', return_value=SimpleNamespace(stdout='CLAUDE_CONFIG_DIR=' + pr['home'])):
+            self.assertEqual(staff._resume(self.store.db, proof['seat'], proof['session'], pr, 'claude', str(self.root)), proof)
+
+    def test_process_namespace_matches_existing_runtime_contract_without_host_env_mutation(self):
+        self.configure(); self.fake_boundaries()
+        default = str(self.root / '.claude')
+        with patch.object(staff.Path, 'home', return_value=self.root):
+            for observed in (None, '', default, default + '/', str(self.root / 'other')):
+                env = {} if observed is None else {'CLAUDE_CONFIG_DIR': observed}
+                with self.subTest(observed=observed), patch.dict(os.environ, env, clear=True):
+                    self.assertEqual(staff._namespace_matches('claude', {'home': default}, env),
+                                     staff.profile_home_matches('claude', default))
+                    self.assertEqual(staff._namespace_matches('claude', {'home': str(self.root / 'other')}, env),
+                                     staff.profile_home_matches('claude', str(self.root / 'other')))
+
+    def test_default_claude_explicit_home_namespace_cannot_checkpoint(self):
+        self.configure(); self.fake_boundaries()
+        pr = {**self.config['profiles']['claude']['personal'], 'home': str(self.root / '.claude')}
+        sessions = Path(pr['home']) / 'sessions'
+        sessions.mkdir(parents=True)
+        (sessions / '999.json').write_text(json.dumps({'sessionId': 'fixture-session', 'cwd': str(self.root)}))
+        journal = Path(pr['home']) / 'projects' / 'fixture-session.jsonl'
+        journal.parent.mkdir()
+        journal.write_text(json.dumps({'sessionId': 'fixture-session', 'cwd': str(self.root)}) + '\n')
+        original = dict(address='t99', state='live', turn=0, foreground=dict(pid=999, name='claude', cwd=str(self.root)),
+                        status={'state': 'idle', 'app': 'claude-code'})
+        def call(*args):
+            return {'complete': True, 'text': '❯ '} if args[0] == 'read' else original
+        preflight = (dict(product='docs', role='documenter'), 'implementer', str(self.root), {}, pr, {})
+        with patch.object(staff, '_preflight', return_value=preflight), patch.object(staff.Path, 'home', return_value=self.root), \
+                patch.object(staff, '_call', side_effect=call), \
+                patch.object(staff.subprocess, 'run', return_value=SimpleNamespace(stdout='CLAUDE_CONFIG_DIR=' + pr['home'])):
+            with self.assertRaisesRegex(ValueError, 'namespace'):
+                staff.checkpoint(self.config_path, self.state, 'docs', 'claude', 't99', 999, 'fixture-session', str(journal))
+        self.assertEqual(self.launched, [])
+
     def test_resume_without_official_proof_never_launches(self):
         self.configure(); self.fake_boundaries()
         with self.assertRaisesRegex(ValueError, 'official original-native checkpoint'):
