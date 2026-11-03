@@ -694,6 +694,9 @@ def reconcile(config_path,state,ident):
 
 def handle(args):
     config=load(args.config)
+    if args.action=='workspace-status':
+        from .workspace_sessions import discover
+        return {'team':args.team,'sessions':discover(config,args.state,args.team)}
     if args.action=='status':
         from .policy import eligible
         from .workflow import snapshot
@@ -711,6 +714,14 @@ def handle(args):
     if args.action=='plan':return plan(args.config,args.state,args.team,getattr(args,'provider',None),getattr(args,'account',None))
     from .core_runtime import require_managed
     require_managed()
+    if args.action=='workspace-register':
+        from .workspace_sessions import register
+        return register(args.config,args.state,args.team,args.terminal,args.operator_approved)
+    if args.action=='workspace-receipt':
+        from .workspace_sessions import receipt
+        return receipt(args.config,args.state,args.terminal,args.expected_owner,args.delivery_id)
+    if args.action=='resume-preparation':
+        return resume_preparation(args.config,args.state,args.request,args.operator_approved)
     if args.action=='prepare':return prepare(args.config,args.state)
     if args.action=='recheck':return pool.recheck(args.config,args.state)
     if args.action=='present':return pool.present(config,args.state)
@@ -754,3 +765,26 @@ def handle(args):
         attach({**config,'context_bindings':config['session_pool']['bindings']},args.state,
                {'kind':'task','id':result['id'],'terminal':previous_terminal},result['runtime']['terminal'])
     return result
+
+
+def resume_preparation(config_path,state,ident,approved=False):
+    """Resume only a proven pre-delivery preparation failure, preserving request identity."""
+    from .core_runtime import require_managed
+    from .context_handoff import locked, read
+    require_managed()
+    if approved is not True:raise ValueError('operator approval required')
+    from .context_handoff import JOB
+    if not isinstance(ident,str) or not JOB.fullmatch(ident):raise ValueError('invalid request identity')
+    path=folder(state)/(ident+'.json')
+    with locked(path):
+        job=read(path)
+        if (not job or job.get('phase')!='uncertain' or job.get('error_code')!='preparation_failed'
+                or job.get('error_stage') not in ('pending','waiting_handoff')
+                or any(job.get(k) for k in ('receiver','delivery_id','delivery_receipt','delivery_message_sha256','submission'))):
+            raise ValueError('request is not a proven pre-delivery failure; preserve original outcome')
+        job.setdefault('recovery_history',[]).append(dict(at=time.time(),phase=job['phase'],
+            error_type=job.get('error_type'),error_code=job.get('error_code'),error_stage=job.get('error_stage')))
+        job.update(phase='pending',reason='전달 전 준비 실패를 확인했습니다. 현재 세션과 사용량을 다시 확인해 배정합니다.',updated_at=time.time())
+        write_request(path,job)
+    notify(state)
+    return {k:v for k,v in job.items() if k!='message'}

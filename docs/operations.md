@@ -216,3 +216,11 @@ GUI core 배정은 실제 응답에 연결된 statusline 자료와 검증된 공
 생성 의도와 기준 커밋을 상태 DB에 먼저 기록한 다음, 상태 디렉터리의 `operation-worktrees` 아래에 별도 브랜치와 worktree를 만듭니다. ticket의 명시적 `git_base`가 있으면 해당 ref를 커밋 SHA로 고정하고, 없으면 현재 HEAD를 사용합니다. 다시 시도할 때 기존 Git 등록·경로·브랜치·기준 이력을 확인하고 기존 파일을 유지합니다. 원본 HEAD가 이동해도 기록된 기준 커밋을 유지합니다. 의도가 기록된 뒤 중단됐거나 확인에 실패한 폴더는 자동 삭제하지 않고 확인합니다. 후보 미리보기는 Git worktree를 생성하지 않습니다.
 
 원본 승인 범위와 실행 경로는 별도로 기록합니다. 같은 저장소의 읽기·쓰기 자원과 결과 경로는 분리 폴더 안의 대응 경로로 바뀌며, 전달 내용에도 실제 작업 위치를 명시합니다. 별도 머지 단계는 없고, 완료 결과물과 작업 폴더는 보존합니다. 운영 현황의 정리 후보 목록은 삭제를 실행하지 않습니다. 기존 직원에게 새 경로를 전달하려면 그 직원의 확인된 작업 경계가 분리 폴더를 포함해야 합니다. 포함하지 않으면 전송하지 않고 대기합니다. 새 직원은 분리 폴더를 시작 위치로 사용하고 실제 시작 경로를 확인합니다.
+
+### 현재 워크스페이스 세션 등록
+
+`pool workspace-status --team TEAM`은 팀 binding의 실제 space 소속 세션을 조회합니다. 이름이나 cwd만으로 계정을 추정하지 않으며 foreground 프로세스·모델·프로필 환경·공식 신원·최신 사용량·입력 초안을 확인합니다. 이 조회는 등록이나 제품 요청 전달을 하지 않습니다. 검증 실패는 후보로 확정하지 않습니다.
+
+현재 세션을 새 실행자로 연결할 때는 `pool workspace-register --team TEAM --terminal TERMINAL --operator-approved`를 사용합니다. 이전 활성 task나 execution lease가 있으면 거절합니다. 새로운 owner와 기존 라벨·PID 이력을 먼저 기록하고 등록 명령만 한 번 전달합니다. 세션이 받은 정확한 `pool workspace-receipt` 명령을 자신의 터미널에서 실행해야 ready 후보가 됩니다. 등록 nonce는 5분 만료이며 전송 실패·수신 불명은 다시 보내지 않습니다. 이전 owner의 업무·완료는 승계하지 않습니다. 실제 제품 전송 직전에도 기존 native·profile·quota 검사를 수행합니다.
+
+기존 요청이 `preparation_failed`이고 실패 단계가 pending/waiting_handoff이며 receiver·delivery ID·receipt·submission이 모두 없는 경우에만 운영자가 `pool resume-preparation --request REQUEST --operator-approved`로 같은 요청을 다시 pending으로 돌릴 수 있습니다. 기존 내용과 실패 이력은 보존됩니다. 이 명령은 제품 요청을 직접 보내지 않으며 다음 공식 소비기가 현재 상태를 확인합니다. 그 외 uncertain 요청은 기존 전달 결과를 대조해야 합니다.

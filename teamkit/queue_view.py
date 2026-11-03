@@ -122,6 +122,13 @@ def board(config_path, state):
                              legacy=item.get('source')=='legacy',
                              reason='구형 요청이라 이 창에서 전송할 수 없습니다.' if item.get('source')=='legacy'
                                  else '' if phase=='pending' else '이미 전달되었거나 배정 가능한 대기 상태가 아닙니다. 재전송하지 마세요.')))
+    for job, item in zip(jobs, payload['tickets']):
+        if (item.get('source') == 'legacy' and item.get('error_code') == 'preparation_failed'
+                and item.get('error_stage') in ('pending', 'waiting_handoff') and not item.get('executor')):
+            job.update(state_label='전달 전 준비 실패', category='attention',
+                       reason='담당자에게 전달하기 전 준비 단계에서 실패했습니다. 실제 수신 기록이 없습니다.',
+                       next_action='운영본부가 현재 팀 세션·사용량과 미전달 기록을 확인한 뒤 같은 요청을 재개합니다.',
+                       failure_stage=item.get('error_stage'), failure_type=item.get('error_type'))
     for job in jobs:
         job['board_state'] = board_state(state, organization_card(job))
         if job['board_state']['disposition'] == 'archived':
