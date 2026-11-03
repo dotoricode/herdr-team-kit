@@ -107,3 +107,35 @@ def capture(config, state):
         raise
     finally:
         connection.close()
+
+
+def dismiss(connection, ident, reason, expected_digest, *, clock=time.time):
+    """Exclude confirmed non-work without erasing text, receipt or attempts.
+
+    Caller holds the same immediate transaction used by ticket creation.
+    Active/uncertain classification attempts are never released or cancelled.
+    """
+    if not connection.in_transaction:
+        raise ValueError('non-work disposition requires the queue transaction')
+    if not isinstance(reason, str) or not reason.strip() or len(reason) > 4000:
+        raise ValueError('업무가 아닌 것으로 정리하는 구체 이유가 필요합니다.')
+    row = connection.execute('SELECT body FROM operation_instructions WHERE id=?', (ident,)).fetchone()
+    if row is None:
+        raise ValueError('unknown original instruction')
+    item = json.loads(row[0])
+    signature = digest({'text': item['text'], 'source': item['source']})
+    if signature != expected_digest:
+        raise ValueError('원 지시가 바뀌었습니다. 원문을 다시 확인하세요.')
+    if item.get('state') == 'dismissed':
+        return item
+    if item.get('tickets') or item.get('ticket_ids') or any(
+            json.loads(row[0]).get('instruction_id') == ident
+            for row in connection.execute('SELECT body FROM operation_tickets')):
+        raise ValueError('이미 업무 티켓이 연결되어 있습니다. 업무 상태는 별도로 처리하세요.')
+    item.setdefault('dispositions', []).append(dict(action='non_task', reason=reason.strip(),
+        previous_state=item['state'], previous_reason=item.get('reason'),
+        previous_next_action=item.get('next_action'), classification_attempt=item.get('classification_attempt'),
+        source_digest=signature, at=clock()))
+    item.update(state='dismissed', reason=reason.strip(), next_action='일상 대화로 보존 · 업무 배정 제외')
+    connection.execute('UPDATE operation_instructions SET body=? WHERE id=?', (json.dumps(item), ident))
+    return item

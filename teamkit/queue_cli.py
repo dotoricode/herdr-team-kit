@@ -11,7 +11,7 @@ from .tickets import TicketStore
 def parser(commands):
     item = commands.add_parser('queue')
     item.add_argument('action', choices=('create', 'approve', 'show', 'status', 'submit', 'receipt',
-                                        'wait-children', 'dependencies', 'tick', 'intake', 'classify', 'approval-template'))
+                                        'wait-children', 'dependencies', 'tick', 'intake', 'classify', 'approval-template', 'organize', 'dismiss'))
     item.add_argument('ticket', nargs='?')
     item.add_argument('--ticket-file')
     item.add_argument('--key')
@@ -23,6 +23,11 @@ def parser(commands):
     item.add_argument('--depends-on', action='append', default=[])
     item.add_argument('--release-writes', action='store_true')
     item.add_argument('--board', action='store_true')
+    item.add_argument('--board-action', choices=('waiting','progress','done','archive','restore'))
+    item.add_argument('--client-request-id')
+    item.add_argument('--expected-revision')
+    item.add_argument('--reason')
+    item.add_argument('--expected-digest')
 
 
 def handle(args):
@@ -31,6 +36,10 @@ def handle(args):
             from .queue_view import board
             return board(args.config, args.state)
         return view(args.config, args.state)
+    if args.action == 'organize':
+        from .queue_view import organize
+        return organize(args.config, args.state, args.ticket, args.board_action,
+                        args.client_request_id, args.expected_revision)
     if args.action == 'tick':
         return tick(args.config, args.state)
     if args.action == 'classify':
@@ -41,6 +50,10 @@ def handle(args):
                       os.environ.get('HC_TERMINAL_ID'),json.loads(Path(args.result_file).read_text()))
     queue = TicketStore(args.state)
     try:
+        if args.action == 'dismiss':
+            from .intake import dismiss
+            with queue.transaction():
+                return dismiss(queue.db, args.ticket, args.reason, args.expected_digest)
         if args.action == 'intake':
             from .intake import register
             if not args.ticket_file or not args.key:

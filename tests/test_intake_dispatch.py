@@ -107,6 +107,46 @@ class IntakeDispatchTests(unittest.TestCase):
         return dispatch.submit(self.config, self.state, self.instruction['id'], attempt['attempt'],
                                identity.get('owner', 'fixture-owner'), identity.get('terminal', 't1'), packet)
 
+    def test_non_task_submission_preserves_original_and_never_creates_work(self):
+        attempt=dispatch.tick(self.path,self.state)
+        result=self.submit(attempt, {'non_task':'일상적인 정보 질문으로 업무 지시가 아님'})
+        self.assertEqual('dismissed',result['state'])
+        self.assertEqual(self.instruction['text'],result['text'])
+        self.assertEqual(0,self.queue.db.execute('SELECT count(*) FROM operation_tickets').fetchone()[0])
+        self.assertEqual(result,self.submit(attempt, {'non_task':'일상적인 정보 질문으로 업무 지시가 아님'}))
+        self.assertEqual(1,self.accept.call_count)
+
+    def test_late_classifier_cannot_revive_manually_excluded_instruction(self):
+        from teamkit.intake import dismiss
+        from teamkit.tickets import digest
+        attempt=dispatch.tick(self.path,self.state)
+        original=self.item()
+        with self.queue.transaction():
+            dismiss(self.queue.db,original['id'],'업무 아닌 정보 질문',digest({'text':original['text'],'source':original['source']}))
+        with self.assertRaisesRegex(ValueError,'늦은 분류'):
+            self.submit(attempt,{'proposals':[self.spec()]})
+        self.assertEqual('dismissed',self.item()['state'])
+        self.assertEqual(0,self.queue.db.execute('SELECT count(*) FROM operation_tickets').fetchone()[0])
+        # The execution lease remains fenced until actual idle observation.
+        self.assertFalse(json.loads(self.queue.db.execute('SELECT body FROM operation_intake_attempts').fetchone()[0]).get('slot_released',False))
+
+    def test_disposition_during_external_delivery_is_not_overwritten_by_receipt(self):
+        from teamkit.intake import dismiss
+        from teamkit.tickets import digest
+        def send_and_exclude(name,text,before_send=None):
+            receipt=self.send(name,text,before_send)
+            original=self.item()
+            with self.queue.transaction():
+                dismiss(self.queue.db,original['id'],'정보 질문',digest({'text':original['text'],'source':original['source']}))
+            return receipt
+        self.accept.side_effect=send_and_exclude
+        result=dispatch.tick(self.path,self.state)
+        self.assertEqual('accepted',result['phase'])
+        self.assertEqual('dismissed',self.item()['state'])
+        self.assertEqual('정보 질문',self.item()['reason'])
+        with self.assertRaisesRegex(ValueError,'늦은 분류'):
+            self.submit(result,{'proposals':[self.spec()]})
+
     def test_busy_original_turn_waits_then_dispatches_once_after_actual_idle(self):
         self.native['status']['state'] = 'working'
         result = dispatch.tick(self.path, self.state)

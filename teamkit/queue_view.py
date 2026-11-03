@@ -3,6 +3,9 @@ from collections import Counter
 import hashlib
 import json
 import math
+import re
+
+from .app_board import board_state, board_action
 
 from .config import load
 from .operations import view
@@ -75,11 +78,8 @@ def board(config_path, state):
     payload = view(config_path, state)
     labels = config.get('operations', {}).get('product_labels', {})
     jobs = []
-    instructions = [dict(id=x['id'], origin_id=x['id'], product='operations',
-                         state=x['state'], goal=x['text'], reason=x['reason'],
-                         next_action=x['next_action'], created_at=x['created_at'])
-                    for x in payload.get('intake_pending', [])]
-    for item in [*payload['tickets'], *instructions]:
+    # Captured conversation is an inbox, not an approved work ticket.
+    for item in payload['tickets']:
         phase = item['state']
         history = phase in ('completed','cancelled')
         attention = phase in ('uncertain','waiting_handoff','classification_uncertain','classification_unknown','needs_clarification','unknown') or bool(item.get('reason'))
@@ -99,7 +99,7 @@ def board(config_path, state):
         verified_working = phase == 'running' and receiver_matches and _fresh_native(config, payload) and native.get('status') == 'working'
         team = item['product']
         jobs.append(dict(id=item['id'], team=team, team_label=labels.get(team,team),
-                         title=item.get('goal', item.get('title',item['id'])), request=item.get('goal',''),
+                         title=summary_title(item.get('goal', item.get('title',item['id']))), request=item.get('goal',''),
                          phase=phase, state_label='진행 중' if verified_working else LABELS.get(phase,'상태 확인 필요'), category=category,
                          reason=_reason(item.get('reason') or ''),
                          next_action='실행자의 작업 결과와 공식 제출 기록을 기다립니다.' if verified_working else ACTIONS.get(phase,'원 상태·실행자·결과 근거를 확인합니다. 확인 전 재전송하지 마세요.'),
@@ -113,16 +113,20 @@ def board(config_path, state):
                          parent_id=item.get('parent_id'), role=item.get('role'),
                          work_completion_confirmed=phase=='completed', requires_user_decision=phase=='waiting_approval',
                          completion_intent=phase in ('awaiting_review','awaiting_verification')))
+    for job in jobs:
+        job['board_state'] = board_state(state, organization_card(job))
+        if job['board_state']['disposition'] == 'archived':
+            job['category'] = 'archived'
     counts = Counter(j['category'] for j in jobs)
     counts['all'] = len(jobs)
-    counts['active'] = sum(j['category'] not in ('history','deferred') for j in jobs)
+    counts['active'] = sum(j['category'] not in ('history','deferred','archived') for j in jobs)
     teams = list(dict.fromkeys([*config['teams'], *config.get('operations',{}).get('departments',{}), *(x['team'] for x in jobs)]))
     lanes = [dict(team=team,label=labels.get(team,team)) for team in teams]
     value = dict(schema_version=payload['schema_version'], jobs=jobs, counts=dict(counts), lanes=lanes,
                  capacity=payload['capacity'], supervisor=payload['supervisor'], profiles=payload['profiles'],
                  candidate_slots=payload['candidate_slots'], account_profiles=payload['account_profiles'],
                  policy_ready_count=payload['ready_count'], ready_count_boundary=payload['ready_count_boundary'],
-                 waiting=dict(Counter(j['state_label'] for j in jobs if j['category'] not in ('history','deferred'))),
+                 waiting=dict(Counter(j['state_label'] for j in jobs if j['category'] not in ('history','deferred','archived'))),
                  warnings=[])
     # Observation time alone never triggers rebuilding the whole view.
     semantic = dict(value)
@@ -136,3 +140,25 @@ def board(config_path, state):
     semantic['capacity'] = {k:v for k,v in value['capacity'].items() if k not in ('observed_at','observation_age')}
     value['fingerprint'] = hashlib.sha256(json.dumps(semantic,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
     return value
+
+
+def summary_title(text):
+    """Hide transport envelopes only in the one-line card summary."""
+    text = re.sub(r'<image\b[^>]*>.*?</image>', '', text, flags=re.S)
+    text = re.sub(r'<image\b[^>]*>', '', text)
+    text = re.sub(r'\[Image #\d+\]', '', text)
+    return ' '.join(text.split()) or '첨부된 요청'
+
+
+def organization_card(job):
+    # Dedicated namespace reuses the reversible journal without expanding
+    # feedback/approval card kinds or conflating this with an existing card.
+    return dict(kind='inventory', id='queue-'+hashlib.sha256(job['id'].encode()).hexdigest(),
+                title=job['title'], prompt=job['request'], condition=None)
+
+
+def organize(config_path, state, ident, action, client_request_id, expected_revision):
+    job = next((job for job in board(config_path, state)['jobs'] if job['id'] == ident), None)
+    if job is None:
+        raise ValueError('현재 업무 카드를 찾을 수 없습니다. 최신 목록을 확인하세요.')
+    return board_action(state, organization_card(job), action, client_request_id, expected_revision)

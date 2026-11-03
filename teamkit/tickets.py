@@ -210,6 +210,8 @@ class TicketStore:
                 instruction = self.db.execute('SELECT body FROM operation_instructions WHERE id=?', (instruction_id,)).fetchone()
                 if instruction is None:
                     raise ValueError('original instruction must be registered before execution ticket')
+                if json.loads(instruction[0]).get('state') == 'dismissed':
+                    raise ValueError('non-work instruction is excluded from ticket creation')
             relation = spec.get('relation', 'required')
             if relation not in ('required', 'defect', 'improvement'):
                 raise ValueError('unknown follow-up relation')

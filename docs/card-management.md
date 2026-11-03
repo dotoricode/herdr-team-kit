@@ -104,3 +104,16 @@ BINDINGS=/srv/example/gui/bindings.json
 ## 공유 범위
 
 팀의 공통 지침 또는 `references`에서 이 문서를 연결합니다. 새 배정은 현재 지침 경로를 받으며, 진행 중인 세션은 다음 카드 관련 작업 전에 다시 읽습니다. 파일이 공유된 사실과 이미 실행 중인 세션이 읽은 사실은 구분합니다. 지침을 배포하려고 기존 대화를 재시작하거나 승인되지 않은 메시지를 보내지 않습니다.
+
+### 영속 업무 큐 카드
+
+`queue status --board`는 실제 티켓만 카드로 표시합니다. 대화에서 포착한 미분류 원문은 아직 실행 티켓이 아니며 운영 정보의 `intake_pending`에 남습니다. 분류 담당자는 정보 질문·일상 대화를 `{"non_task":"구체 이유"}`로 제출합니다. 목표·범위가 불분명한 실제 업무에는 `needs_clarification`을 사용합니다. 물음표만으로 업무 여부를 판단하지 않습니다.
+
+큐 카드의 수동 정리는 `jobs[].board_state.revision`과 고유 요청 ID를 사용합니다. 동작은 위의 보드 상태와 같고, 원 티켓의 실행·승인·검증 기록을 바꾸지 않습니다. 제거는 되돌릴 수 있는 보관이며 진행 중 실행을 중단하지 않습니다.
+
+```sh
+"$PYTHON" "$TEAMKIT/teamkit_cli.py" --config "$CONFIG" --state "$STATE" queue organize TICKET-1 \
+  --board-action archive --client-request-id queue-example-0001 --expected-revision CURRENT_REVISION
+```
+
+기존 비업무 접수는 원문과 수신·시도 기록을 대조한 뒤 `queue dismiss INSTRUCTION_ID --reason REASON --expected-digest ORIGINAL_TEXT_SOURCE_DIGEST`로 제외합니다. digest는 원문의 `text`와 `source` 객체를 기존 ticket digest 규칙으로 계산합니다. 이미 업무 티켓이 연결되면 제외를 거절합니다. 제외는 원문·시도·분류 제출 기록을 삭제하지 않고 별도 disposition 이력을 추가합니다. 늦은 분류는 제외된 원문에서 새 업무를 만들 수 없습니다. 실행 슬롯은 제외만으로 해제하지 않으며 기존 실행자의 실제 대기 상태를 관측한 뒤 반환합니다.
