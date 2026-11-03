@@ -117,5 +117,44 @@ function id(x,key){return nodes(x).find(x=>x.value.props.id?.[0]===key)}
   await denied.executeAction(cx,'send',denied.candidates.candidates[0]);
   assert(denied.pendingExecution,'process error without authoritative status remains uncertain');
   assert(denied.executionFailure.includes('gate changed'));
-  console.log('PASS queue controls: CAS, direct selection, asynchronous sync, double-click fence, unknown-outcome polling, archive/restore, truthful manual state. Native pixels/Esc/outside not exercised.');
+  // Manual priority send: listed with Korean reasons, explicit confirmation, no bypass of delivery guards.
+  const force=view('detail');
+  calls=[];reply=async()=>({code:0,stdout:JSON.stringify({send_allowed:false,reason:'배정 가능한 직원 없음',expected_ticket:'ticket-force',candidates:[
+    {id:'mismatch',alias:'Other team',account:'team',role:'leader',eligible:false,reason:'executor responsibility or role mismatch',reason_ko:'담당 제품·역할이 이 업무와 맞지 않습니다',override_allowed:true,planned:false},
+    {id:'planned',alias:'New worker',account:'team',role:'leader',eligible:false,reason:'profile execution capacity is exhausted or unknown',reason_ko:'계정 동시 실행 용량이 가득 찼습니다',override_allowed:false,planned:true}]})});
+  await force.loadCandidates(cx);
+  let ftree=force.render(cx);
+  assert(text(ftree).includes('배정 불가 · 담당 제품·역할이 이 업무와 맞지 않습니다'),'Korean reason is shown for an unassignable candidate');
+  assert(id(ftree,'queue-force-mismatch'),'unassignable candidate offers the force button');
+  assert(!id(ftree,'queue-send-mismatch'),'normal send stays unavailable');
+  assert(!id(ftree,'queue-force-planned'),'a planned new worker cannot be forced');
+  assert(text(ftree).includes('새로 만들 직원이라 강제 전송할 수 없습니다'));
+  calls=[];await force.executeAction(cx,'send',force.candidates.candidates[0],true);
+  assert.equal(calls.length,0,'force without the confirmation step sends nothing');
+  id(ftree,'queue-force-mismatch').value.handlers.click({},cx);
+  ftree=force.render(cx);
+  assert(id(ftree,'queue-force-confirm-mismatch')&&id(ftree,'queue-force-cancel-mismatch'),'confirmation step has confirm and cancel');
+  assert(text(ftree).includes('닫기·Esc·바깥 클릭은 전송하지 않고 닫습니다'));
+  assert.equal(calls.length,0,'opening the confirmation sends nothing');
+  id(ftree,'queue-force-cancel-mismatch').value.handlers.click({},cx);
+  ftree=force.render(cx);assert(!id(ftree,'queue-force-confirm-mismatch'));assert(id(ftree,'queue-force-mismatch'));assert.equal(calls.length,0);
+  id(ftree,'queue-force-mismatch').value.handlers.click({},cx);
+  reply=async args=>({code:0,stdout:JSON.stringify({id:args[args.indexOf('--client-request-id')+1],kind:'send',status:'blocked',reason:'executor draft, dialog or incomplete screen'})});
+  const forced=force.executeAction(cx,'send',force.candidates.candidates[0],true);
+  await forced;
+  const sendCall=calls.filter(x=>x.includes('send')).at(-1);
+  assert(sendCall.includes('--override-eligibility')&&sendCall.includes('--reason')&&sendCall.includes('mismatch')&&sendCall.includes('ticket-force'));
+  assert(sendCall[sendCall.indexOf('--reason')+1].length<=300);
+  assert(text(force.render(cx)).includes('대상 화면에 입력 중인 내용이 있어 전송하지 않았습니다'),'delivery-time draft guard is explained, not hidden');
+  assert.equal(force.pendingExecution,null);
+  const plainOnly=view('detail');plainOnly.candidates={send_allowed:false,expected_ticket:'t',candidates:[{id:'x',eligible:false,override_allowed:false}]};
+  plainOnly.forceCandidate=plainOnly.candidates.candidates[0];calls=[];
+  await plainOnly.executeAction(cx,'send',plainOnly.candidates.candidates[0],true);assert.equal(calls.length,0,'non-overridable candidate is never forced');
+  const legacy=view('detail');legacy.selected={...item,execution_actions:{legacy:true,send_allowed:false}};calls=[];
+  await legacy.loadCandidates(cx);assert.equal(calls.length,0,'legacy request never calls the ticket backend');
+  assert(text(legacy.render(cx)).includes('구형 요청이라 이 창에서 전송할 수 없습니다'));
+  const unknown=view('detail');calls=[];reply=async()=>({code:1,stderr:'unknown ticket'});
+  await unknown.loadCandidates(cx);assert(text(unknown.render(cx)).includes('구형 요청이라 이 창에서 전송할 수 없습니다'));
+  assert(!text(unknown.render(cx)).includes('unknown ticket'));
+  console.log('PASS queue controls: CAS, direct selection, asynchronous sync, double-click fence, unknown-outcome polling, archive/restore, truthful manual state. Manual priority send confirmation and legacy notice covered. Native pixels/Esc/outside not exercised.');
 })().catch(error=>{console.error(error);process.exitCode=1});

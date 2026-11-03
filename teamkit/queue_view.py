@@ -117,7 +117,9 @@ def board(config_path, state):
                          execution_actions=dict(candidates='queue candidates', send='queue send',
                              ticket=item['id'], requires_candidate_preview=True,
                              send_allowed=phase=='pending' and item.get('source')!='legacy',
-                             reason='' if phase=='pending' else '이미 전달되었거나 배정 가능한 대기 상태가 아닙니다. 재전송하지 마세요.')))
+                             legacy=item.get('source')=='legacy',
+                             reason='구형 요청이라 이 창에서 전송할 수 없습니다.' if item.get('source')=='legacy'
+                                 else '' if phase=='pending' else '이미 전달되었거나 배정 가능한 대기 상태가 아닙니다. 재전송하지 마세요.')))
     for job in jobs:
         job['board_state'] = board_state(state, organization_card(job))
         if job['board_state']['disposition'] == 'archived':

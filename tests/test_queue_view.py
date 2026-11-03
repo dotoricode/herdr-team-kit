@@ -29,6 +29,15 @@ class QueueViewTest(unittest.TestCase):
         result = self.project(dict(id='ONE', product='example', state='pending'), capacity=capacity)
         self.assertEqual(result['capacity'], capacity)
 
+    def test_legacy_pool_request_is_marked_so_the_window_never_calls_the_ticket_backend(self):
+        legacy = self.project(dict(id='OLD', product='example', state='pending', source='legacy'))['jobs'][0]['execution_actions']
+        current = self.project(dict(id='NEW', product='example', state='pending'))['jobs'][0]['execution_actions']
+        self.assertTrue(legacy['legacy'])
+        self.assertFalse(legacy['send_allowed'])
+        self.assertIn('구형 요청', legacy['reason'])
+        self.assertFalse(current['legacy'])
+        self.assertTrue(current['send_allowed'])
+
     def test_internal_next_action_is_operational_korean_and_raw_value_is_preserved(self):
         ticket = dict(id='ONE', product='example', state='waiting_approval', next_action='check admission',
                       reason='approval missing or changed', role='investigator', origin_id='ORIGINAL')

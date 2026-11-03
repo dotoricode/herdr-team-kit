@@ -10,6 +10,11 @@ const clock = x => x == null ? "—" : new Date(x * 1000).toLocaleString();
 const percent = x => x == null ? "미제공" : typeof x === "number" && Number.isFinite(x) ? String(x)+"%" : "미확인";
 const periodUsage = (value,key) => value.not_applicable?.includes(key) ? "해당 없음" : percent(value[key]?.used);
 const clean = x => String(x ?? "").replaceAll("장부", "작업 기록");
+const LEGACY_SEND = "구형 요청이라 이 창에서 전송할 수 없습니다";
+// Delivery-time guards keep their own wording: the force option never bypasses them.
+const guardKo = reason => /draft, dialog or incomplete screen/.test(reason??"") ? "대상 화면에 입력 중인 내용이 있어 전송하지 않았습니다"
+  : /owner\/process changed|executor PID changed/.test(reason??"") ? "대상 터미널의 소유자나 프로세스가 바뀌었거나 종료되어 전송하지 않았습니다"
+  : /not idle and ready/.test(reason??"") ? "대상이 작업 중이거나 준비되지 않아 전송하지 않았습니다" : null;
 const manualState = item => ({waiting:"대기 표시",progress:"진행 표시",complete:"완료 표시"})[item.board_state?.manual_status] ?? null;
 const categoryColor = (category, t) => ({ attention: t.blocked, waiting: t.idle, progress: t.working, history: t.muted })[category] ?? t.muted;
 // Each word is its own unbroken native text item; long paths wrap only at separators.
@@ -61,7 +66,7 @@ export default class TeamQueue extends View {
     this.data = null; this.failure = null; this.inFlight = false;
     this.actionFlight = false; this.actionFailure = null; this.pendingAction = null;
     this.executionFlight=false; this.executionFailure=null; this.executionResult=null; this.pendingExecution=null;
-    this.candidates=null; this.candidateFlight=false; this.candidateFailure=null;
+    this.candidates=null; this.candidateFlight=false; this.candidateFailure=null; this.forceCandidate=null;
     this.filter = "active"; this.selected = this.options.item ?? null;
     this.revealed = this.role !== "detail";
     this.entering = new Set(); this.leaving = new Map(); this.minute = 0; this.again = false;
@@ -152,24 +157,31 @@ export default class TeamQueue extends View {
   }
   async loadCandidates(cx) {
     if(this.candidateFlight || this.pendingExecution || !this.config || !this.selected) return;
-    this.candidateFlight=true; this.candidateFailure=null; cx.notify();
+    if(this.selected.execution_actions?.legacy === true) { this.candidates=null; this.candidateFailure=LEGACY_SEND; cx.notify(); return; }
+    this.candidateFlight=true; this.candidateFailure=null; this.forceCandidate=null; cx.notify();
     try {
       const result=await this.queueCall(["candidates",this.selected.id]);
       if(!Array.isArray(result.candidates)) throw new Error("담당자 후보 자료 형식을 확인하세요");
       this.candidates=result;
-    } catch(error) { this.candidates=null; this.candidateFailure=String(error); }
+    } catch(error) { this.candidates=null; this.candidateFailure=/unknown ticket/.test(String(error)) ? LEGACY_SEND : String(error); }
     finally { this.candidateFlight=false; cx.notify(); }
   }
-  async executeAction(cx,kind,candidate) {
+  // Manual priority send: only after the explicit confirmation step, only for a listed candidate that the backend marked overridable.
+  async executeAction(cx,kind,candidate,force=false) {
     if(this.executionFlight || this.pendingExecution || this.actionFlight || this.pendingAction || !this.config) return;
-    if(kind === "send" && (!this.selected || this.candidates?.send_allowed !== true ||
+    if(kind === "send" && force) {
+      if(!this.selected || !this.candidates?.expected_ticket || this.forceCandidate?.id !== candidate?.id ||
+        candidate?.eligible === true || candidate?.override_allowed !== true ||
+        !this.candidates.candidates.some(x=>x.id===candidate.id && x.override_allowed===true)) return;
+    } else if(kind === "send" && (!this.selected || this.candidates?.send_allowed !== true ||
       !this.candidates.expected_ticket || candidate?.eligible !== true ||
       !this.candidates.candidates.some(x=>x.id===candidate.id && x.eligible===true))) return;
     const pending={kind,request:"queue-action-ui-"+Date.now().toString(36)+"-"+Math.random().toString(36).slice(2)};
-    this.pendingExecution=pending; this.executionFlight=true; this.executionFailure=null; this.executionResult=null; cx.notify();
+    this.pendingExecution=pending; this.executionFlight=true; this.executionFailure=null; this.executionResult=null; this.forceCandidate=null; cx.notify();
     try {
+      const why=("상세 창에서 사용자가 확인하고 강제 전송 · 배정 불가 사유: "+(candidate?.reason_ko||candidate?.reason||"미확인")).slice(0,300);
       const args=kind === "send" ? ["send",this.selected.id,"--candidate-id",candidate.id,
-        "--expected-ticket",this.candidates.expected_ticket] : ["sync"];
+        "--expected-ticket",this.candidates.expected_ticket,...(force ? ["--override-eligibility","--reason",why] : [])] : ["sync"];
       this.acceptAction(await this.queueCall([...args,"--client-request-id",pending.request]));
       if(!this.pendingExecution) await this.refresh(cx);
     } catch(error) { this.executionFailure=String(error)+" · 결과 확인 필요: 같은 요청 ID로 조회합니다"; }
@@ -196,7 +208,7 @@ export default class TeamQueue extends View {
     const label=({queued:"처리 접수 · 결과 확인 대기",running:"업무 상태 확인·처리 중",completed:"요청 처리 확인",blocked:"처리 불가",uncertain:"결과 불명 · 재전송 금지",failed:"처리 실패"})[result?.status];
     return v_flex().gap(5)
       .when(Boolean(this.pendingExecution)&&!result,el=>el.child(words("요청 결과 확인 중")))
-      .when(Boolean(label),el=>el.child(words(label+(result.reason?" · "+result.reason:""))))
+      .when(Boolean(label),el=>el.child(words(label+(result.reason?" · "+(guardKo(result.reason)??result.reason):""))))
       .when(Boolean(sync),el=>el.child(words("확인 업무 "+String(sync.observed_count??"미확인")+" · 새 배정 "+String(sync.dispatch?.started?.length??"미확인")+" · 검증 종결 "+String(sync.completed?.length??"미확인"))))
       .when(Boolean(this.executionFailure),el=>el.child(words(this.executionFailure).text_color(t.blocked)))
       .when(Boolean(this.pendingExecution),el=>el.child(button("queue-action-recheck",this.executionFlight?"확인 중…":"동작 결과 재확인",cx=>cx.spawn(async cx=>this.pollAction(cx)),t)));
@@ -368,8 +380,18 @@ export default class TeamQueue extends View {
               .when(!this.candidates?.candidates.length,x=>x.child(words("선택 가능한 담당자가 없습니다")))
               .children((this.candidates?.candidates??[]).map(candidate=>v_flex().gap(4)
                 .child(words((candidate.alias||"별명 미확인")+" ("+({personal:"개인",team:"팀"}[candidate.account]||"계정 미확인")+") · "+(candidate.role||"역할 미확인")))
-                .when(candidate.eligible!==true,x=>x.child(words(candidate.reason||"현재 배정 불가").text_color(t.blocked)))
-                .when(this.candidates?.send_allowed===true&&candidate.eligible===true&&!this.pendingExecution,x=>x.child(button("queue-send-"+candidate.id,"이 담당자에게 전송",cx=>cx.spawn(async cx=>this.executeAction(cx,"send",candidate)),t))))))
+                .when(candidate.eligible!==true,x=>x.child(words("배정 불가 · "+(candidate.reason_ko||candidate.reason||"현재 배정 불가")).text_color(t.blocked)))
+                .when(candidate.eligible!==true&&Boolean(candidate.reason)&&Boolean(candidate.reason_ko)&&candidate.reason!==candidate.reason_ko,x=>x.child(words(candidate.reason).text_size(11).text_color(t.muted)))
+                .when(this.candidates?.send_allowed===true&&candidate.eligible===true&&!this.pendingExecution,x=>x.child(button("queue-send-"+candidate.id,"이 담당자에게 전송",cx=>cx.spawn(async cx=>this.executeAction(cx,"send",candidate)),t)))
+                .when(candidate.eligible!==true&&candidate.override_allowed!==true&&candidate.planned===true,x=>x.child(words("새로 만들 직원이라 강제 전송할 수 없습니다").text_size(11).text_color(t.muted)))
+                .when(candidate.override_allowed===true&&!this.pendingExecution&&this.forceCandidate?.id!==candidate.id,x=>x.child(button("queue-force-"+candidate.id,"그래도 전송",()=>{this.forceCandidate=candidate;this.executionFailure=null;this.executionResult=null;},t)))
+                .when(candidate.override_allowed===true&&!this.pendingExecution&&this.forceCandidate?.id===candidate.id,x=>x.child(v_flex().gap(6).p(10).border_1().border_color(t.blocked)
+                  .child(words("강제 전송 확인").font_semibold())
+                  .child(words("배정 불가 사유: "+(candidate.reason_ko||candidate.reason||"미확인")).text_color(t.blocked))
+                  .child(words("사유를 알고도 이 직원에게 보냅니다. 대상 화면에 입력 중인 내용이 있거나 터미널이 바뀌었으면 전송하지 않습니다. 이 선택은 기록에 남습니다. 닫기·Esc·바깥 클릭은 전송하지 않고 닫습니다.").text_size(11).text_color(t.muted))
+                  .child(h_flex().flex_wrap().gap(6)
+                    .child(button("queue-force-confirm-"+candidate.id,"이 직원에게 강제 전송",cx=>cx.spawn(async cx=>this.executeAction(cx,"send",candidate,true)),t))
+                    .child(button("queue-force-cancel-"+candidate.id,"취소",()=>{this.forceCandidate=null;},t))))))))
             .child(this.actionStatus(t))))
           .child(section("요청 내용",(()=>{
             const text=item.request || "저장된 요청 본문 없음";
