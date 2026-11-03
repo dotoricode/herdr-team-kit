@@ -290,9 +290,11 @@ class CoreRuntime:
                 'native_pid': native['foreground']['pid'],
                 'turn_baseline': native.get('turn', 0), 'turn': sent['turn']}
 
-    def prompt(self, name, text):
+    def prompt(self, name, text, before_send=None):
         require_managed()
         native = self._native(name, ready=True)
+        if before_send is not None:
+            before_send()
         address = native['address']
         # hc has an atomic --if idle guard, but no --if done. For a checked,
         # settled done agent use ordinary send; never force a blocked program.

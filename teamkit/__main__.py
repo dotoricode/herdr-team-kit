@@ -509,6 +509,9 @@ def run(args):
             if task.get('team_dispatch_team') is not None:
                 from .team_dispatch import verify_tell
                 verify_tell(args.config,args.state,task)
+            if task.get('workspace_registered'):
+                from .workspace_sessions import verify_task
+                verify_task(config,args.state,task)
             store.wake(args.task, task['owner'], approval_config=config)
             try:
                 import shlex
@@ -540,7 +543,11 @@ def run(args):
                         current['runtime']['last_delivery']=delivery
                         store._save(current,'input_accepted',delivery)
                     return {**current,'delivery':delivery}
-                runtime.prompt(task['runtime']['name'],text)
+                if task.get('workspace_registered'):
+                    from .workspace_sessions import verify_task
+                    runtime.prompt(task['runtime']['name'],text,before_send=lambda:verify_task(config,args.state,task))
+                else:
+                    runtime.prompt(task['runtime']['name'],text)
             except BaseException:
                 current = store.get(args.task)
                 if current['state'] == 'running':

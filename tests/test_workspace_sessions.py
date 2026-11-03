@@ -195,3 +195,44 @@ class WorkspaceTests(Fixture):
         result=ws.discovery_failure(ValueError('provider credential=private-value'))
         self.assertEqual(result['reason_code'],'observation_failed')
         self.assertNotIn('private-value',json.dumps(result))
+
+    def test_public_tell_rejects_changed_workspace_before_prompt(self):
+        with patch.object(ws.CoreRuntime,'accept',return_value={'accepted':True}):ws.register(self.config,self.state,'alpha','t1',True)
+        q=TicketStore(self.state);row=ws.rows(q.db)[0];q.close();self.native['turn']=5
+        with patch.dict(os.environ,{'HC_TERMINAL_ID':'t1'}):ws.receipt(self.config,self.state,'t1',row['actor']['owner'],row['nonce'])
+        self.native['labels']['herdr.space']='another'
+        message=self.root/'tell.txt';message.write_text('Approved fixture continuation.')
+        with patch('teamkit.core_runtime.require_managed'),patch.object(ws.CoreRuntime,'prompt') as prompt:
+            with self.assertRaisesRegex(ValueError,'workspace'):
+                self.call('tell',row['actor']['task'],'--message-file',str(message))
+            prompt.assert_not_called()
+        store=ws.Store(self.state);self.assertEqual(store.get(row['actor']['task'])['state'],'ready');store.close()
+
+    def test_public_tell_rechecks_workspace_in_prompt_send_fence(self):
+        with patch.object(ws.CoreRuntime,'accept',return_value={'accepted':True}):ws.register(self.config,self.state,'alpha','t1',True)
+        q=TicketStore(self.state);row=ws.rows(q.db)[0];q.close();self.native['turn']=5
+        with patch.dict(os.environ,{'HC_TERMINAL_ID':'t1'}):ws.receipt(self.config,self.state,'t1',row['actor']['owner'],row['nonce'])
+        message=self.root/'tell.txt';message.write_text('Approved fixture continuation.')
+        sent=[]
+        def prompt(runtime,name,text,before_send=None):
+            self.native['foreground']['cwd']=str(self.root)
+            if before_send is not None:before_send()
+            sent.append(text)
+        with patch('teamkit.core_runtime.require_managed'),patch.object(ws.CoreRuntime,'prompt',new=prompt):
+            with self.assertRaisesRegex(ValueError,'root'):
+                self.call('tell',row['actor']['task'],'--message-file',str(message))
+        self.assertEqual(sent,[])
+
+    def test_native_prompt_guard_failure_prevents_transport(self):
+        with patch.object(ws.CoreRuntime,'accept',return_value={'accepted':True}):ws.register(self.config,self.state,'alpha','t1',True)
+        q=TicketStore(self.state);row=ws.rows(q.db)[0];q.close();self.native['turn']=5
+        with patch.dict(os.environ,{'HC_TERMINAL_ID':'t1'}):ws.receipt(self.config,self.state,'t1',row['actor']['owner'],row['nonce'])
+        store=ws.Store(self.state);task=store.get(row['actor']['task']);store.close()
+        runtime=ws.CoreRuntime(task)
+        original=ws._call
+        calls=[]
+        def call(*args,**kwargs):calls.append(args[0]);return original(*args,**kwargs)
+        with patch('teamkit.core_runtime.require_managed'),patch('teamkit.core_runtime._call',side_effect=call):
+            with self.assertRaisesRegex(ValueError,'changed'):
+                runtime.prompt(task['runtime']['name'],'Approved fixture',before_send=lambda:(_ for _ in ()).throw(ValueError('changed')))
+        self.assertNotIn('send',calls)
