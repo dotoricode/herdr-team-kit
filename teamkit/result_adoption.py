@@ -1,6 +1,7 @@
 """Explicit operator adoption of historical results; never delivers actor input."""
 import hashlib
 import json
+import math
 import os
 import re
 from pathlib import Path
@@ -102,6 +103,53 @@ def _no_leases(db, task):
             raise ValueError('active execution or write lease prevents historical result adoption')
 
 
+def _request_snapshot(packet, current, raw):
+    expected = packet.get('request_record_sha256')
+    source = packet.get('request_record_snapshot')
+    if source is None:
+        if hashlib.sha256(raw).hexdigest() != expected:
+            raise ValueError('original request record changed')
+        return None, []
+    path = Path(source)
+    if not path.is_absolute():
+        raise ValueError('absolute pinned request snapshot required')
+    fd = os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(fd,'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 1024*1024:
+            raise ValueError('bounded regular request snapshot required')
+        original = stream.read(1024*1024+1)
+    if len(original)>1024*1024 or hashlib.sha256(original).hexdigest() != expected:
+        raise ValueError('request snapshot bytes differ from pinned request hash')
+    def unique_object(pairs):
+        value = {}
+        for key,item in pairs:
+            if key in value:
+                raise ValueError('duplicate request snapshot key is ambiguous')
+            value[key] = item
+        return value
+    snapshot = json.loads(original,object_pairs_hook=unique_object)
+    json.loads(raw,object_pairs_hook=unique_object)
+    if not isinstance(snapshot,dict):
+        raise ValueError('request snapshot must be an object')
+    diagnostics = ('updated_at','reason')
+    for key in diagnostics:
+        if (key in snapshot) != (key in current):
+            raise ValueError('request diagnostic shape changed')
+    if 'reason' in current and any(value is not None and not isinstance(value,str) for value in (current['reason'],snapshot['reason'])):
+        raise ValueError('request reason is not a diagnostic string')
+    if 'updated_at' in current:
+        times = (snapshot['updated_at'], current['updated_at'])
+        if any(type(value) not in (int,float) or not math.isfinite(value) for value in times) or times[1] < times[0]:
+            raise ValueError('request diagnostic timestamp is invalid or moved backwards')
+    def contract(value):
+        return json.dumps({k:v for k,v in value.items() if k not in diagnostics},sort_keys=True,allow_nan=False,separators=(',',':'))
+    if contract(snapshot) != contract(current):
+        raise ValueError('request immutable or unknown fields changed since pinned snapshot')
+    changed = [key for key in diagnostics if json.dumps(snapshot.get(key),allow_nan=False) != json.dumps(current.get(key),allow_nan=False)]
+    return original, changed
+
+
 @contextmanager
 def _final_fence(state, task):
     # Shares SQLite's write lock with every resource reservation and task mutation.
@@ -155,10 +203,13 @@ def adopt(config_path, state, ident, evidence_file, owner, attempt, operator_app
             if (job['phase'] != 'completed' or control._file_proof(prior['original_request_file']) != prior['original_request_sha256']
                     or control._file_proof(prior['evidence_snapshot']) != prior['evidence_snapshot_sha256']):
                 raise ValueError('adopted original request evidence changed')
+            if prior.get('request_record_snapshot_file') and control._file_proof(prior['request_record_snapshot_file']) != prior['request_record_snapshot_sha256']:
+                raise ValueError('preserved diagnostic request snapshot changed')
             return {k:v for k,v in job.items() if k != 'message'}
         original = path.read_bytes()
+        pinned_snapshot, diagnostic_changes = _request_snapshot(packet,job,original)
         if (job.get('phase') not in ('pending','received','done') or job.get('submission') or job.get('delivery_id')
-                or prior or hashlib.sha256(original).hexdigest() != packet.get('request_record_sha256')
+                or prior
                 or hashlib.sha256(job['message'].encode()).hexdigest() != packet.get('request_digest')
                 or job.get('digest') != packet.get('request_digest')
                 or packet.get('work_id') != job.get('work_id',ident)
@@ -246,6 +297,10 @@ def adopt(config_path, state, ident, evidence_file, owner, attempt, operator_app
                     return
                 with os.fdopen(fd,'wb') as output:
                     output.write(raw);output.flush();os.fsync(output.fileno())
+            snapshot_path = None
+            if pinned_snapshot is not None:
+                snapshot_path = path.with_name(ident+'.request-snapshot-before-diagnostics-'+evidence_digest+'.json')
+                preserve(snapshot_path,pinned_snapshot)
             preserve(original_path,original)
             evidence_snapshot = path.with_name(ident+'.operator-adoption-evidence-'+evidence_digest+'.json')
             evidence_bytes = json.dumps(packet,ensure_ascii=False,sort_keys=True).encode()
@@ -253,6 +308,9 @@ def adopt(config_path, state, ident, evidence_file, owner, attempt, operator_app
             audit = dict(authority='operator', evidence_file=str(Path(evidence_file).absolute()), evidence_sha256=evidence_digest,
                 original_request_file=str(original_path),original_request_sha256=hashlib.sha256(original).hexdigest(),
                 evidence_snapshot=str(evidence_snapshot),evidence_snapshot_sha256=hashlib.sha256(evidence_bytes).hexdigest(),
+                request_record_snapshot_file=str(snapshot_path) if snapshot_path else None,
+                request_record_snapshot_sha256=hashlib.sha256(pinned_snapshot).hexdigest() if pinned_snapshot is not None else None,
+                diagnostic_refresh_fields=diagnostic_changes,
                 original_phase=job['phase'], original_receiver=receiver, performer=author,
                 native=dict(terminal=task['runtime']['terminal'],pid=task['runtime']['native_pid'],turn=native.get('turn')),
                 verification=packet['verification'],artifacts=packet['artifacts'],writer_stopped=True,at=time.time())

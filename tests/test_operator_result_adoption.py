@@ -235,6 +235,57 @@ class AdoptionTests(fixtures.PoolControlTests):
         self.assertEqual(original,path.read_bytes())
 
 
+    def snapshot_then_consumer_refresh(self):
+        actor,job,path,packet,evidence=self.packet(True)
+        snapshot=self.root/'original-request.json';snapshot.write_bytes(path.read_bytes())
+        blocker=dict(job,id='a'*32,phase='done',at=job['at']-1,receiver=dict(owner=actor['owner'],attempt=1,terminal='told'))
+        context.write(control.folder(self.state)/('a'*32+'.json'),blocker)
+        control.advance(self.config,self.state,job['id'])
+        self.assertNotEqual(snapshot.read_bytes(),path.read_bytes())
+        self.assertEqual('pending',json.loads(path.read_text())['phase'])
+        return actor,job,path,packet,evidence,snapshot
+
+    def test_default_raw_hash_stays_strict_after_consumer_refresh(self):
+        actor,job,path,packet,evidence,snapshot=self.snapshot_then_consumer_refresh()
+        original=path.read_bytes()
+        with self.assertRaises(ValueError):self.adopt(actor,job,evidence)
+        self.assertEqual(original,path.read_bytes())
+
+    def test_pinned_snapshot_accepts_only_consumer_diagnostics_and_preserves_both(self):
+        actor,job,path,packet,evidence,snapshot=self.snapshot_then_consumer_refresh()
+        current=path.read_bytes()
+        packet['request_record_snapshot']=str(snapshot);evidence.write_text(json.dumps(packet))
+        result=self.adopt(actor,job,evidence)
+        audit=result['operator_result_adoption']
+        self.assertEqual('completed',result['phase'])
+        self.assertEqual(snapshot.read_bytes(),Path(audit['request_record_snapshot_file']).read_bytes())
+        self.assertEqual(current,Path(audit['original_request_file']).read_bytes())
+        self.assertEqual({'reason','updated_at'},set(audit['diagnostic_refresh_fields']))
+
+    def test_snapshot_does_not_ignore_unknown_or_immutable_fields(self):
+        actor,job,path,packet,evidence,snapshot=self.snapshot_then_consumer_refresh()
+        packet['request_record_snapshot']=str(snapshot);evidence.write_text(json.dumps(packet))
+        refreshed=json.loads(path.read_text())
+        for key,value in [('new_unknown_field',True),('error_type','changed'),('message','different request'),('task','OTHER'),('work_id','OTHER'),('phase','sending')]:
+            current=dict(refreshed,**{key:value});context.write(path,current);before=path.read_bytes()
+            with self.assertRaises(ValueError):self.adopt(actor,job,evidence)
+            self.assertEqual(before,path.read_bytes())
+
+    def test_snapshot_raw_bytes_must_match_pinned_packet_hash(self):
+        actor,job,path,packet,evidence,snapshot=self.snapshot_then_consumer_refresh()
+        packet['request_record_snapshot']=str(snapshot);evidence.write_text(json.dumps(packet))
+        snapshot.write_text(snapshot.read_text()+' ')
+        with self.assertRaises(ValueError):self.adopt(actor,job,evidence)
+
+
+    def test_snapshot_rejects_ambiguous_duplicate_fields(self):
+        actor,job,path,packet,evidence,snapshot=self.snapshot_then_consumer_refresh()
+        raw=snapshot.read_text();raw=raw.replace('"phase": "pending"','"phase": "changed", "phase": "pending"')
+        snapshot.write_text(raw);packet['request_record_sha256']=hashlib.sha256(snapshot.read_bytes()).hexdigest()
+        packet['request_record_snapshot']=str(snapshot);evidence.write_text(json.dumps(packet))
+        with self.assertRaisesRegex(ValueError,'duplicate'):self.adopt(actor,job,evidence)
+
+
 def load_tests(loader, tests, pattern):
     import unittest
     return unittest.TestSuite(AdoptionTests(name) for name in AdoptionTests.__dict__ if name.startswith('test_'))
