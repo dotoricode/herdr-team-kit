@@ -334,8 +334,6 @@ def verify_actor(config, actor, native):
     if (native.get('labels') or {}).get('herdr.space') != space(config, actor['product']):
         raise ValueError('registered workspace membership changed')
     foreground = native.get('foreground') or {}
-    if (native.get('labels') or {}).get('teamkit.auto') == 'off':
-        raise ValueError('workspace automatic allocation is disabled')
     cwd = foreground.get('cwd') or native.get('cwd')
     if not cwd or Path(cwd).resolve() != Path(actor['root']).resolve():
         raise ValueError('registered workspace root changed')

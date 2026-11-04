@@ -540,6 +540,11 @@ class TicketStore:
             attempt = dict(id=uuid.uuid4().hex, ticket=ident, ordinal=item['attempt_count'] + 1,
                            executor=executor, phase='reserved', created_at=self.clock(),
                            delivery_id=uuid.uuid4().hex, estimated_tokens=estimate)
+            if executor.get('workspace_live'):
+                executor = json.loads(json.dumps(executor))
+                executor['task'] = 'OP-' + attempt['id']
+                executor['runtime'].update(name=executor['task'], labels_bound=False)
+                attempt['executor'] = executor
             if override:
                 attempt['override'] = override
             constraints,resources=_resource_contract(item)
@@ -623,7 +628,46 @@ class TicketStore:
                         reason='' if accepted else reason,
                         next_action='wait actor receipt' if accepted else 'reconcile original attempt; never resend')
             self._save(item, 'delivery_accepted' if accepted else 'delivery_uncertain', {'attempt': ident})
+            executor = attempt['executor']
+            if (accepted and attempt.get('mailbox') and isinstance(detail, dict)
+                    and detail.get('accepted') is True and detail.get('terminal') == executor['terminal']
+                    and detail.get('native_pid') == executor['pid']
+                    and type(detail.get('turn_baseline')) is int and type(detail.get('turn')) is int
+                    and detail['turn'] >= detail['turn_baseline'] >= 0):
+                attempt.update(phase='received', baseline_turn=detail['turn_baseline'],
+                    actor_receipt=dict(terminal=executor['terminal'], pid=executor['pid'], owner=executor['owner'],
+                                       turn=detail['turn_baseline'], at=self.clock(), source='host-accepted'))
+                if executor.get('workspace_live'):
+                    executor['runtime']['labels_bound'] = True
+                self._save_attempt(attempt)
+                item.update(state='running', executor=executor, reason='', next_action='wait for mailbox result and completed turn')
+                self._save(item, 'host_received', {'attempt':ident})
         self.notify()
+
+    def attach_mailbox(self, attempt_id, path):
+        with self.transaction():
+            attempt = self.attempt(attempt_id)
+            item = self.get(attempt['ticket'])
+            if item.get('attempt') != attempt_id or attempt['phase'] != 'reserved':
+                raise ValueError('mailbox requires the current unsent attempt')
+            attempt['mailbox'] = str(path)
+            self._save_attempt(attempt)
+
+    def release_ended_execution(self, ident, attempt_id, native):
+        from .resources import ResourceLedger
+        with self.transaction():
+            item = self.get(ident)
+            attempt = self.attempt(attempt_id)
+            actor = attempt['executor']
+            receipt = attempt.get('actor_receipt') or {}
+            if (item.get('attempt') != attempt_id
+                    or any(native.get(k) != actor.get(k) for k in ('terminal','pid','owner'))
+                    or native.get('status') not in ('idle','done')
+                    or type(native.get('turn')) is not int or type(receipt.get('turn')) is not int
+                    or native['turn'] <= receipt['turn']):
+                raise ValueError('execution release requires the exact completed turn')
+            ResourceLedger(self.db).release_in_transaction(self.db, attempt_id, True)
+            self._save(item, 'execution_ended', {'attempt':attempt_id, 'native':native})
 
     def receipt(self, ident, attempt_id, owner, terminal, native):
         with self.transaction():
@@ -689,7 +733,7 @@ class TicketStore:
             except (TypeError, ValueError) as error:
                 raise ValueError('result submission must contain JSON values') from error
             artifact_paths = list(allowed_paths)
-            if not attempt.get('worktree_split'):
+            if not attempt.get('worktree_split') or attempt.get('mailbox'):
                 artifact_paths.append(str(self.path.resolve().parent / 'operation-results' / ident))
             if not within(proof.get('artifact', ''), artifact_paths):
                 raise ValueError('result artifact is outside approved data/output scope')

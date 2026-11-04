@@ -89,13 +89,17 @@ def _policy_task(config, ticket):
 
 
 def _roots(config, ticket, queue=None):
-    roots = [Path(path).resolve() for path in ticket['scope']['paths'] if Path(path).is_dir()]
-    if not roots:
-        raise ValueError('worker requires an existing approved directory')
-    root = roots[0]
-    if any(r['kind'] == 'path' and not within(r['name'], [str(root)]) for r in ticket['resources']):
-        raise ValueError('worker cwd does not cover the approved path resources')
     team_root = Path(config['teams'][ticket['product']]['root']).resolve()
+    roots = [Path(path).resolve() for path in ticket['scope']['paths'] if Path(path).is_dir()
+             and within(path, [str(team_root), *config.get('shared_roots', [])])]
+    inherited = ticket.get('inherited_worktree')
+    root = Path(inherited['worktree']).resolve() if inherited else next(iter(roots), team_root)
+    if not root.is_dir():
+        raise ValueError('worker requires an existing execution directory')
+    if any(r['kind'] == 'path' and r['mode'] == 'write' and not within(r['name'], [str(root)])
+           and not (queue is not None and within(r['name'], [str(queue.path.resolve().parent/'operation-results'/ticket['id'])]))
+           for r in ticket['resources']):
+        raise ValueError('worker cwd does not cover the approved path resources')
     allowed = [str(team_root), *config.get('shared_roots', [])]
     if not within(str(root), allowed):
         inherited = ticket.get('inherited_worktree')
@@ -325,7 +329,6 @@ def launch(config_path, state, ticket, attempt):
         if executor['provider'] == 'claude':
             spec = claude_gui_settings(spec, str(config_path), str(state), executor['account'],
                                         config.get('claude_display_commands', {}).get(executor['account'], ''))
-        spec['args'] += ['--add-dir', str(Path(state).resolve().parent)]
         spec['env'].update(TEAMKIT_TASK=executor['task'], TEAMKIT_OWNER=executor['owner'],
                            TEAMKIT_CONFIG=str(Path(config_path).resolve()), TEAMKIT_STATE=str(Path(state).resolve()))
         actor = store.get(executor['task'])
