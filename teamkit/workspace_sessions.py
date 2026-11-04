@@ -36,7 +36,11 @@ def save(db, row):
 
 def space(config, team):
     from .context_handoff import read
-    bindings = read(Path(config['session_pool']['bindings'])) or {}
+    configured = config.get('operations', {}).get('spaces', {}).get(team)
+    if configured:
+        return configured
+    path = config.get('session_pool', {}).get('bindings')
+    bindings = (read(Path(path)) or {}) if path else {}
     value = bindings.get('teams', {}).get(team, {}).get('space')
     if not value:
         raise ValueError('team workspace binding is missing')
@@ -47,6 +51,8 @@ def observe(config, state, team, terminal):
     """Verify one local live session without changing labels or task records."""
     native = _call('get', terminal)
     fg, status, labels = native.get('foreground') or {}, native.get('status') or {}, native.get('labels') or {}
+    if labels.get('teamkit.auto') == 'off':
+        raise ValueError('workspace automatic allocation is disabled')
     if (native.get('address') != terminal or native.get('state') != 'live'
             or labels.get('herdr.space') != space(config, team)):
         raise ValueError('session is not live in the requested team workspace')
@@ -78,7 +84,9 @@ def observe(config, state, team, terminal):
     try:
         if not eligible(cached_quota(config, store, provider, account), time.time(), config['quota_ttl_seconds']):
             raise ValueError('workspace session quota is missing, expired or limited')
+        from .admission import process_dead
         active = [t for t in store.list() if (t.get('runtime') or {}).get('terminal') == terminal
+                  and not process_dead((t.get('runtime') or {}).get('native_pid'))
                   and t.get('state') not in ('ready', 'queued', 'handed_off', 'completed', 'cancelled', 'retired')]
         if active:
             raise ValueError('workspace session has an existing active task owner')
@@ -126,13 +134,32 @@ def discover(config, state, team):
         if not isinstance(address, str) or '/' in address:
             continue
         native = _call('get', address)
-        if (native.get('labels') or {}).get('herdr.space') != workspace:
+        if ((native.get('labels') or {}).get('herdr.space') != workspace
+                or (native.get('labels') or {}).get('teamkit.auto') == 'off'):
             continue
         try:
-            result.append(dict(observe(config, state, team, address), registration_required=True))
+            result.append(dict(observe(config, state, team, address), registration_required=False))
         except (ValueError, RuntimeError, NativeError, OSError) as error:
             # Fixed categories only: provider errors may contain credentials or paths.
             result.append(dict(terminal=address, registration_required=True, **discovery_failure(error)))
+    return result
+
+
+def live_executors(config, state, team):
+    """Read current HC evidence; preview never writes labels or registration rows."""
+    result = []
+    for proof in discover(config, state, team):
+        if proof.get('reason_code'):
+            continue
+        owner = uuid.uuid5(uuid.NAMESPACE_OID, 'teamkit:'+proof['terminal']+':'+str(proof['pid'])).hex
+        task = 'LIVE-' + owner
+        actor = {k: proof[k] for k in ('terminal','pid','provider','account','model','effort','profile_binding','root','product')}
+        actor.update(owner=owner, task=task, workspace_live=True,
+                     roles=['leader','investigator','implementer','reviewer'],
+                     runtime=dict(backend='core', name=task, native_name=proof['native_name'],
+                                  terminal=proof['terminal'], native_pid=proof['pid'],
+                                  session_cwd=proof['root'], workspace_live=True))
+        result.append(actor)
     return result
 
 
@@ -307,6 +334,8 @@ def verify_actor(config, actor, native):
     if (native.get('labels') or {}).get('herdr.space') != space(config, actor['product']):
         raise ValueError('registered workspace membership changed')
     foreground = native.get('foreground') or {}
+    if (native.get('labels') or {}).get('teamkit.auto') == 'off':
+        raise ValueError('workspace automatic allocation is disabled')
     cwd = foreground.get('cwd') or native.get('cwd')
     if not cwd or Path(cwd).resolve() != Path(actor['root']).resolve():
         raise ValueError('registered workspace root changed')
@@ -318,7 +347,10 @@ def verify_actor(config, actor, native):
         raise ValueError('registered workspace profile/model changed')
 
 
-def registration_fence(db, terminal, owner):
+def registration_fence(db, terminal, owner, pid=None):
+    live_owner = uuid.uuid5(uuid.NAMESPACE_OID, 'teamkit:'+terminal+':'+str(pid)).hex
+    if type(pid) is int and owner == live_owner:
+        return  # Live host admission replaces the registration challenge.
     record = next((r for r in rows(db) if r['terminal'] == terminal), None)
     if record and (record['phase'] != 'ready' or record['actor']['owner'] != owner):
         raise ValueError('workspace registration owns the session; previous owner cannot dispatch')

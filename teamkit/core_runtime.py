@@ -130,9 +130,10 @@ class CoreRuntime:
         foreground = native.get('foreground') or {}
         labels = native.get('labels') or {}
         if (native.get('address') != address or native.get('state') != 'live' or native.get('name') != target.get('native_name', name)
-                or labels.get('teamkit.owner') != self.task.get('owner')
-                or labels.get('teamkit.task') != self.task.get('id')
-                or labels.get('teamkit.name') != name
+                or (not target.get('workspace_live') and (
+                    labels.get('teamkit.owner') != self.task.get('owner')
+                    or labels.get('teamkit.task') != self.task.get('id')
+                    or labels.get('teamkit.name') != name))
                 or not _process_matches(self.task.get('provider'), foreground.get('name'))
                 or type(foreground.get('pid')) is not int or foreground['pid'] <= 0
                 or type(target.get('native_pid')) is not int or target['native_pid'] <= 0
@@ -279,6 +280,13 @@ class CoreRuntime:
         native = self._native(name, ready=True)
         if before_send is not None:
             before_send()
+        if (self.target or {}).get('workspace_live'):
+            # The durable attempt and host send fence precede this relabel.
+            self._native(name, ready=True)
+            _call('label', native['address'], 'teamkit.owner='+self.task['owner'],
+                  'teamkit.task='+self.task['id'], 'teamkit.name='+name)
+            self.target['workspace_live'] = False
+            native = self._native(name, ready=True)
         condition = ['--if', 'idle'] if native['status']['state'] == 'idle' else []
         sent = _call('send', '--json', *condition, native['address'], text, timeout=30)
         if (sent.get('started') is not True or type(sent.get('turn')) is not int

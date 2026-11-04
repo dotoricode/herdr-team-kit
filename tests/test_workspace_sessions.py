@@ -47,7 +47,7 @@ class WorkspaceTests(Fixture):
         result=ws.discover(self.c,self.state,'alpha')
         self.assertEqual(result[0]['pid'],123)
         self.assertEqual(result[0]['account'],'team')
-        self.assertTrue(result[0]['registration_required'])
+        self.assertFalse(result[0]['registration_required'])
         self.assertEqual(self.native['labels']['teamkit.owner'],'old')
         self.native['labels']['herdr.space']='other'
         self.assertEqual(ws.discover(self.c,self.state,'alpha'),[])

@@ -164,15 +164,29 @@ def native_get(terminal):
     return _call('get', terminal)
 
 
+def process_dead(pid):
+    if type(pid) is not int or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        pass
+    return False
+
+
 def _stopped(session, profile):
     if not session:
         return False
     try:
         native = native_get(session['terminal'])
+        foreground = native.get('foreground') or {}
+        if (native.get('state') == 'finished' or foreground.get('pid') != session.get('pid')) and process_dead(session.get('pid')):
+            return True
         if (native.get('address') != session['terminal']
                 or (native.get('labels') or {}).get('teamkit.owner') != session['owner']):
             return False
-        foreground = native.get('foreground') or {}
         provider = profile.split('/')[0]
         names = ('codex',) if provider == 'codex' else ('claude', 'claude.exe')
         apps = ('codex',) if provider == 'codex' else ('claude', 'claude-code')

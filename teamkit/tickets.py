@@ -879,6 +879,24 @@ class TicketStore:
                 self._save(item, 'intervention_required', intervention)
         return item
 
+    def process_replaced(self, ident, attempt_id):
+        """Host proved the old PID ended; preserve the outcome without retaining the session."""
+        from .resources import ResourceLedger
+        with self.transaction():
+            item = self.get(ident)
+            if item.get('attempt') != attempt_id or item['state'] != 'running':
+                raise ValueError('stale process replacement')
+            attempt = self.attempt(attempt_id)
+            attempt.update(phase='process_replaced', stopped_at=self.clock())
+            self._save_attempt(attempt)
+            ResourceLedger(self.db).release_in_transaction(self.db, attempt_id, True, True, True)
+            item.update(state='intervention', intervention=dict(kind='process_replaced', attempt=attempt_id),
+                        reason='이전 실행 프로세스가 종료됐습니다. 기존 산출물을 확인해야 합니다.',
+                        next_action='inspect previous attempt outcome; do not resend')
+            self._save(item, 'process_replaced', {'attempt':attempt_id})
+        self.notify()
+        return item
+
     def recover_intervention(self, ident, attempt_id, native, writer_stopped, reason):
         from .resources import ResourceLedger
         with self.transaction():

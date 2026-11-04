@@ -95,29 +95,39 @@ class NativeRuntime:
         return observe_native()
 
     def executors(self, ticket=None):
-        from .session_pool import _read
+        from .allocation import usage_only
         result = []
-        for slot in _read(self.state)['slots'].values():
-            runtime = slot.get('runtime') or {}
-            if slot.get('phase') not in ('prepared', 'leased', 'uncertain'):
+        from .workspace_sessions import live_executors, space
+        teams = [ticket['product']] if ticket else list(self.config['teams'])
+        for team in teams:
+            try:
+                space(self.config, team)
+            except ValueError:
                 continue
-            if slot['phase'] == 'uncertain' and not (isinstance(slot.get('terminal'), str)
-                                                     and type(slot.get('native_pid')) is int):
-                continue  # The launch never recorded a terminal and PID; nothing to prove, not a candidate.
-            # Uncertain slots stay candidates only through a read-only launch proof in admit();
-            # prepared/leased executor identity is unchanged.
-            proof = dict(pool_phase='uncertain', pool_launch_args=(slot.get('spec') or {}).get('args')) \
-                if slot['phase'] == 'uncertain' else {}
-            result.append(dict(**proof, terminal=slot['terminal'], pid=slot['native_pid'], owner=slot['owner'],
-                               provider=slot['provider'], account=slot['account'], product=slot['team'],
-                               roles=['leader', 'investigator', 'implementer', 'reviewer'], root=slot['root'],
-                               profile_binding=slot['binding'], task=slot['task'], runtime=runtime,
-                               empty_prompt=slot.get('empty_prompt')))
+            result.extend(live_executors(self.config, self.state, team))
+        if not usage_only(self.config):
+            from .session_pool import _read
+            for slot in _read(self.state)['slots'].values():
+                runtime = slot.get('runtime') or {}
+                if slot.get('phase') not in ('prepared', 'leased', 'uncertain'):
+                    continue
+                if slot['phase'] == 'uncertain' and not (isinstance(slot.get('terminal'), str)
+                                                         and type(slot.get('native_pid')) is int):
+                    continue  # The launch never recorded a terminal and PID; nothing to prove, not a candidate.
+                # Uncertain slots stay candidates only through a read-only launch proof in admit();
+                # prepared/leased executor identity is unchanged.
+                proof = dict(pool_phase='uncertain', pool_launch_args=(slot.get('spec') or {}).get('args')) \
+                    if slot['phase'] == 'uncertain' else {}
+                result.append(dict(**proof, terminal=slot['terminal'], pid=slot['native_pid'], owner=slot['owner'],
+                                   provider=slot['provider'], account=slot['account'], product=slot['team'],
+                                   roles=['leader', 'investigator', 'implementer', 'reviewer'], root=slot['root'],
+                                   profile_binding=slot['binding'], task=slot['task'], runtime=runtime,
+                                   empty_prompt=slot.get('empty_prompt')))
         result.extend(self.config.get('operations', {}).get('executors', []))
         from .staffbootstrap import executors as staff_executors
         result.extend(staff_executors(self.state))
         from .workspace_sessions import executors as workspace_executors
-        registered=workspace_executors(self.state)
+        registered=[x for x in workspace_executors(self.state) if x['terminal'] not in {e['terminal'] for e in result}]
         addresses={x['terminal'] for x in registered}
         result=[x for x in result if x['terminal'] not in addresses]+registered
         if ticket is not None:
@@ -204,7 +214,7 @@ class NativeRuntime:
                     runtime=executor['runtime'])
         native = CoreRuntime(task)._native(executor['runtime']['name'], ready=require_idle)
         foreground = native['foreground']
-        if executor.get('workspace_registered'):
+        if executor.get('workspace_registered') or executor.get('workspace_live'):
             from .workspace_sessions import verify_actor
             verify_actor(self.config, executor, native)
         if foreground['pid'] != executor['pid']:
@@ -397,6 +407,18 @@ class NativeRuntime:
         task = dict(id=executor['task'], owner=executor['owner'], provider=executor['provider'],
                     runtime=executor['runtime'])
         return CoreRuntime(task).accept(executor['runtime']['name'], text, before_send=before_send)
+
+    def process_replaced(self, executor):
+        from .core_runtime import _call
+        from .admission import process_dead
+        try:
+            native = _call('get', executor['terminal'])
+            return (native.get('address') == executor['terminal']
+                    and (native.get('state') == 'finished'
+                         or (native.get('foreground') or {}).get('pid') != executor['pid'])
+                    and process_dead(executor['pid']))
+        except (ValueError, OSError, NativeError):
+            return False
 
     def launch(self, config_path, ticket, attempt):
         from .workers import launch
@@ -617,6 +639,9 @@ def reconcile(queue, runtime, config=None):
                         queue.request_intervention(ticket['id'], attempt['id'], 'missing_result',
                             '실행 턴이 끝났지만 결과 제출이 없습니다. 기존 쓰기 중단 확인과 재배정이 필요합니다')
                 except (ValueError, KeyError, OSError, subprocess.SubprocessError, NativeError) as error:
+                    if isinstance(runtime, NativeRuntime) and runtime.process_replaced(attempt['executor']):
+                        queue.process_replaced(ticket['id'], attempt['id'])
+                        continue
                     queue.request_intervention(ticket['id'], attempt['id'], 'observation_failed',
                         '실행자 상태를 확인하지 못했습니다. 원 시도와 실행자 연결을 확인해야 합니다: ' + str(error))
             continue
