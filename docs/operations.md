@@ -207,6 +207,10 @@ GUI core 배정은 실제 응답에 연결된 statusline 자료와 검증된 공
 
 확인 담당은 전달 메시지에 있는 `team-dispatch ack` 명령을 본인의 실제 관리 terminal·owner·attempt로 실행하고 park합니다. acknowledgement는 관측 보고 수신이며 제품 업무나 큐의 완료가 아닙니다. `team-dispatch status`로 담당·이벤트·verification·heartbeat를 조회할 수 있습니다. 전송 시작 후 crash/timeout은 uncertain으로 보존하며 자동 재전송하지 않습니다. UI가 필요하면 기존 UI 검증실 요청 경로를 사용하고 실제 화면은 test-macbook의 개인 Codex 담당이 한 건씩 처리합니다.
 
+팀 간 회신에서 `Operation not permitted`가 발생하면 발신 세션의 sandbox와 기존 HC socket 접근을 확인합니다. host의 `hc get` 성공은 worker sandbox의 접근 성공을 증명하지 않습니다. 현재 도구 정책이 허용할 때만 정확한 읽기 전용 `hc get` 명령 또는 사용자가 승인한 수신 대상·고정 본문의 `hc send` 명령에 한정해 명령 단위 권한을 요청합니다. 거절되거나 도구 정책상 요청할 수 없으면 해당 사유와 미전달 상태를 보고합니다. 전역 sandbox·프로필·권한을 변경하거나 core를 시작·재시작하지 않습니다.
+
+실패한 전송은 연결 단계에서 미전달이 확정됐는지, 입력 후 결과가 불명인지 구분합니다. 시간 초과·결과 불명은 수신 화면·전달 영수증을 대조하기 전까지 재전송하지 않습니다. 실제 점검 결과는 팀·발신 세션·명령·기본 sandbox 결과·명령 단위 권한 결과로 남기며, 연결 성공과 회신 수신 확인을 구분합니다.
+
 새 옵션과 기록 형식의 단위 검사는 실제 native 계정·권한·다건 전달 완주를 증명하지 않습니다. 운영 반영 전에는 현재 소스 fingerprint, 진행 중인 배정·인계, 기존 요청을 대조하고 supervisor만 안전하게 교체해야 합니다. 팀장·제품 세션은 보존합니다.
 
 ### 리뷰·문서 작업의 분리 폴더
