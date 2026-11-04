@@ -11,10 +11,11 @@ function element(){
     return (...args)=>{t.props[k]=args;return proxy};
   }});return proxy;
 }
-let calls=[],reply,resolve;
+let calls=[],reply,resolve,watchCalls=[];
 const theme=new Proxy({},{get:(_,k)=>String(k)});
 const context={View:class{},div:element,h_flex:element,v_flex:element,theme:()=>theme,
   terminals:()=>[],openOverlay:()=>{},closeOverlay:()=>{},appHome:()=>'/example',readTextFile:async()=>null,
+  watchFolder:dir=>{watchCalls.push(dir);return new Promise(()=>{})},
   exec:async(exe,args)=>{calls.push(args);return reply(args)},run:()=>{},modProps:()=>({})};
 vm.createContext(context);
 const target=process.argv[2]??'app-mods/team-queue/main.js';
@@ -37,6 +38,26 @@ function id(x,key){return nodes(x).find(x=>x.value.props.id?.[0]===key)}
 // A click that changes view state must request a redraw (Herdr re-renders only on notify or live-data change).
 function clickNotifies(x,key,label){const before=notifies;id(x,key).value.handlers.click({},cx);assert(notifies>before,label+' must call cx.notify()')}
 (async()=>{
+  assert.equal(vm.runInContext('laneLayout([{id:"first"}],0).cards.length',context),1,'initial unmeasured lane shows one card');
+  const slow=view('strip'),deadlineTimers=[];let late;
+  const deadlineCx={...cx,timer:{...cx.timer,after(ms,fn){deadlineTimers.push({ms,fn});return {cancel(){}}}}};
+  reply=()=>new Promise(resolve=>late=resolve);
+  const refresh=slow.refresh(deadlineCx);
+  assert.equal(deadlineTimers[0].ms,5000,'queue read is bounded to five seconds');
+  deadlineTimers[0].fn(deadlineCx);await refresh;
+  assert.equal(slow.inFlight,false,'timeout releases the in-flight fence');
+  assert(slow.failure.includes('초과'),'timeout is visible');
+  reply=async()=>({code:0,stdout:JSON.stringify({...data,fingerprint:'fresh-after-timeout'})});
+  await slow.refresh(deadlineCx);
+  late({code:0,stdout:JSON.stringify({...data,fingerprint:'obsolete-late-result'})});
+  await Promise.resolve();await Promise.resolve();
+  assert.equal(slow.data.fingerprint,'fresh-after-timeout','late timed-out read cannot overwrite fresh data');
+  const watching=view('strip');watching.config.state='/fixture/state/state.sqlite';watching.watchRequests(cx);
+  await Promise.resolve();
+  assert(watchCalls.includes('/fixture/state'),'SQLite parent folder is watched');
+  assert(watchCalls.includes('/fixture/state/pool-requests'),'legacy request folder is watched');
+  calls=[];
+
   const capacityView=view('operations');
   capacityView.data={...data,capacity:{global_limit:null,available:null,used:4}};
   assert(text(capacityView.render(cx)).includes('상한 없음'),'explicit null global cap renders unlimited');

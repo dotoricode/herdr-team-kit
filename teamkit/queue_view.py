@@ -12,6 +12,7 @@ from .operations import view
 
 
 LABELS = {'pending':'배정 대기', 'dispatching':'배정 시작', 'received':'입력 전달 확인 · 실행 수신 대기', 'running':'결과 제출 대기',
+          'intervention':'실행 종료 · 결과 확인 필요',
           'awaiting_verification':'검증 대기', 'awaiting_review':'리뷰 대기', 'waiting_approval':'승인 대기',
           'waiting_children':'하위 작업 대기', 'waiting_children_stop':'슬롯 반환 확인',
           'backlog':'추가 제안', 'completed':'검증 완료', 'cancelled':'정리됨', 'deferred':'보류',
@@ -21,6 +22,7 @@ LABELS = {'pending':'배정 대기', 'dispatching':'배정 시작', 'received':'
           'needs_clarification':'원 지시 확인 필요', 'unknown':'상태 확인 필요'}
 
 ACTIONS = {
+    'intervention':'이전 실행의 결과와 종료 근거를 확인합니다. 새 세션에 원 업무를 중복 전송하지 마세요.',
     'pending':'승인·선행 작업·가용 자원을 확인한 뒤 자동 배정합니다.',
     'dispatching':'예약된 실행자와 입력 전달 결과를 확인합니다. 중복 전송하지 마세요.',
     'received':'입력 전달은 확인됐습니다. 실행자의 공식 수신 확인을 기다립니다. 재전송하지 마세요.',
@@ -82,7 +84,7 @@ def board(config_path, state):
     for item in payload['tickets']:
         phase = item['state']
         history = phase in ('completed','cancelled')
-        attention = phase in ('uncertain','waiting_handoff','classification_uncertain','classification_unknown','needs_clarification','unknown') or bool(item.get('reason'))
+        attention = phase in ('intervention','uncertain','waiting_handoff','classification_uncertain','classification_unknown','needs_clarification','unknown') or bool(item.get('reason'))
         category = 'history' if history else 'deferred' if phase in ('deferred','backlog') else 'attention' if attention else 'progress' if phase in ('running','received','dispatching','awaiting_review','awaiting_verification') else 'waiting'
         executor = item.get('executor') or {}
         native = next((x for x in (payload.get('native_observation') or {}).get('terminals', [])
@@ -95,7 +97,8 @@ def board(config_path, state):
             and runtime.get('native_pid') == executor.get('pid')
             and native.get('pid') == executor.get('pid')
             and native.get('owner') == executor.get('owner')
-            and native.get('provider') == executor.get('provider'))
+            and native.get('provider') == executor.get('provider')
+            and (not item.get('attempt') or native.get('attempt') in (None,item['attempt'])))
         verified_working = phase == 'running' and receiver_matches and _fresh_native(config, payload) and native.get('status') == 'working'
         team = item['product']
         jobs.append(dict(id=item['id'], team=team, team_label=labels.get(team,team),

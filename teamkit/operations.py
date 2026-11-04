@@ -979,6 +979,11 @@ def view(config_path, state):
         quotas = {p+'/'+a: cached_quota(config, reader, p, a) for p in config['profiles']
                   for a in config['profiles'][p]}
         tasks = [json.loads(row[0]) for row in queue.db.execute('SELECT body FROM tasks')]
+        for item in queue.list():
+            actor = item.get('executor') or {}
+            if actor.get('task') and actor.get('runtime'):
+                tasks.append(dict(id=actor['task'], owner=actor['owner'], provider=actor['provider'],
+                                  account=actor['account'], runtime=actor['runtime']))
         from .workspace_sessions import executors as workspace_executors
         tasks.extend(dict(id=a['task'], owner=a['owner'], provider=a['provider'],
                           account=a['account'], runtime=a['runtime']) for a in workspace_executors(state)

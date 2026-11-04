@@ -23,6 +23,16 @@ class QueueViewTest(unittest.TestCase):
              patch('teamkit.queue_view.view', return_value=payload):
             return board('config','state')
 
+    def test_replaced_attempt_is_attention_and_a_reused_session_is_not_old_working(self):
+        job=self.project(dict(id='OLD',product='example',state='intervention',
+            intervention={'kind':'process_replaced'}))['jobs'][0]
+        self.assertEqual('attention',job['category'])
+        self.assertEqual('실행 종료 · 결과 확인 필요',job['state_label'])
+        ticket,observation,actors=self.receiver('running','working')
+        ticket['attempt']='old-attempt';observation['terminals'][0]['attempt']='new-attempt'
+        job=self.project(ticket,native_observation=observation,task_actors=actors)['jobs'][0]
+        self.assertFalse(job['verified_working'])
+
     def test_unlimited_capacity_round_trips_without_becoming_unknown_or_numeric(self):
         capacity = dict(global_limit=None, available=None, used=4,
                         profile_limits={'codex/team': 3}, profile_used={'codex/team': 1})

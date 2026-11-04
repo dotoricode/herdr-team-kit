@@ -50,7 +50,7 @@ const fifo = (a, b) => {
 // Reserve a small chip before visible cards and retain the oldest FIFO head.
 const LANE_SLOT=352, LANE_CHIP=44;
 const laneLayout = (queued, width) => {
-  const w=Math.max(0,width || 0), total=queued.length;
+  const w=Math.max(0,width || LANE_SLOT), total=queued.length;
   if (!total || !w) return {cards:[], hidden:total, chipWidth:0};
   const overflow=total>1 && total*LANE_SLOT>w;
   const chipWidth=overflow ? Math.min(LANE_CHIP, Math.max(0,w-1)) : 0;
@@ -99,9 +99,13 @@ export default class TeamQueue extends View {
     if(!this.config) return;
     if(this.inFlight) { this.again = true; return; }
     this.inFlight = true;
+    let deadline;
     try {
       const c=this.config;
-      const result=await exec(c.python,[c.cli,"--config",c.config,"--state",c.state,"queue","status","--board"]);
+      const result=await Promise.race([
+        exec(c.python,[c.cli,"--config",c.config,"--state",c.state,"queue","status","--board"]),
+        new Promise((_resolve,reject) => { deadline=cx.timer.after(5000,() => reject(new Error("업무 큐 조회 시간이 초과됐습니다. 다음 조회에서 다시 확인합니다"))); })
+      ]);
       if(result.code !== 0) throw new Error(result.stderr || "요청 큐를 읽을 수 없습니다");
       const incoming=JSON.parse(result.stdout);
       if(incoming.schema_version !== 1 || !Array.isArray(incoming.jobs) || !incoming.counts || !incoming.fingerprint) throw new Error("요청 큐 자료 형식을 확인해 주세요");
@@ -115,15 +119,18 @@ export default class TeamQueue extends View {
       const message=String(error);
       if(this.failure !== message) { this.failure=message; cx.notify(); }
     } finally {
+      deadline?.cancel();
       this.inFlight=false;
       if(this.again) { this.again=false; await this.refresh(cx); }
     }
   }
   // Request files changing means a job came in or was taken: refresh now instead of waiting for the 5s poll.
   async watchRequests(cx) {
-    const dir=String(this.config.state ?? "").replace(/\/[^/]*$/, "") + "/pool-requests";
-    try { for(;;) { await watchFolder(dir); await this.refresh(cx); } }
-    catch(_error) { /* no watch: the 5s poll keeps the strip current */ }
+    const root=String(this.config.state ?? "").replace(/\/[^/]*$/, "");
+    await Promise.all([root,root+"/pool-requests"].map(async dir => {
+      try { for(;;) { await watchFolder(dir); await this.refresh(cx); } }
+      catch(_error) { /* Other watches and the 5s poll remain available. */ }
+    }));
   }
   // Keep departing cards at their last measured position, then move them to the intake.
   trackLane(cx, before, after) {
