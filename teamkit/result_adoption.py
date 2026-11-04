@@ -5,6 +5,8 @@ import os
 import re
 from pathlib import Path
 import stat
+import sqlite3
+from contextlib import contextmanager
 import time
 from datetime import datetime
 
@@ -98,6 +100,26 @@ def _no_leases(db, task):
         overlaps = row['writes_held'] and any(_conflict(root, x) for x in row['resources'])
         if (actor and (row['execution_reserved'] or row['writes_held'])) or overlaps:
             raise ValueError('active execution or write lease prevents historical result adoption')
+
+
+@contextmanager
+def _final_fence(state, task):
+    # Shares SQLite's write lock with every resource reservation and task mutation.
+    db = sqlite3.connect(Path(state).resolve().as_uri()+'?mode=rw', uri=True, timeout=5, isolation_level=None)
+    try:
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute('SELECT body FROM tasks WHERE id=?',(task['id'],)).fetchone()
+        if row is None or json.loads(row[0]) != task:
+            raise ValueError('task or execution attempt changed before result adoption')
+        _no_leases(db,task)
+        yield db
+        db.execute('COMMIT')
+    except BaseException:
+        if db.in_transaction:
+            db.execute('ROLLBACK')
+        raise
+    finally:
+        db.close()
 
 
 def adopt(config_path, state, ident, evidence_file, owner, attempt, operator_approved=False):
@@ -206,28 +228,34 @@ def adopt(config_path, state, ident, evidence_file, owner, attempt, operator_app
             raise ValueError('actual native conversation differs from result author')
         # No input or draft read is performed: this operation only acknowledges an already authored result.
         control._validate_artifacts(packet)
-        original_path = path.with_name(ident+'.before-operator-adoption-'+evidence_digest+'.json')
-        def preserve(destination, raw):
-            try:
-                fd = os.open(destination,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
-            except FileExistsError:
-                if control._file_proof(str(destination)) != hashlib.sha256(raw).hexdigest():
-                    raise ValueError('preserved operator evidence differs')
-                return
-            with os.fdopen(fd,'wb') as output:
-                output.write(raw);output.flush();os.fsync(output.fileno())
-        preserve(original_path,original)
-        evidence_snapshot = path.with_name(ident+'.operator-adoption-evidence-'+evidence_digest+'.json')
-        evidence_bytes = json.dumps(packet,ensure_ascii=False,sort_keys=True).encode()
-        preserve(evidence_snapshot,evidence_bytes)
-        audit = dict(authority='operator', evidence_file=str(Path(evidence_file).absolute()), evidence_sha256=evidence_digest,
-            original_request_file=str(original_path),original_request_sha256=hashlib.sha256(original).hexdigest(),
-            evidence_snapshot=str(evidence_snapshot),evidence_snapshot_sha256=hashlib.sha256(evidence_bytes).hexdigest(),
-            original_phase=job['phase'], original_receiver=receiver, performer=author,
-            native=dict(terminal=task['runtime']['terminal'],pid=task['runtime']['native_pid'],turn=native.get('turn')),
-            verification=packet['verification'],artifacts=packet['artifacts'],writer_stopped=True,at=time.time())
-        job.update(phase='completed',operator_result_adoption=audit,work_resolution=audit,
-                   reason='운영본부가 기존 결과·작성자·범위를 대조해 수령했습니다. 새 입력 전송 없음.',updated_at=time.time())
-        control.write_request(path,job)
-        control.notify(state)
-        return {k:v for k,v in job.items() if k != 'message'}
+        with _final_fence(state,task):
+            final_native = CoreRuntime(task)._native(task['runtime']['name'],ready=True)
+            final_argv = (final_native.get('foreground') or {}).get('argv') or []
+            if final_argv != argv or final_native.get('turn') != native.get('turn'):
+                raise ValueError('native execution changed before result adoption')
+            control._validate_artifacts(packet)
+            original_path = path.with_name(ident+'.before-operator-adoption-'+evidence_digest+'.json')
+            def preserve(destination, raw):
+                try:
+                    fd = os.open(destination,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+                except FileExistsError:
+                    if control._file_proof(str(destination)) != hashlib.sha256(raw).hexdigest():
+                        raise ValueError('preserved operator evidence differs')
+                    return
+                with os.fdopen(fd,'wb') as output:
+                    output.write(raw);output.flush();os.fsync(output.fileno())
+            preserve(original_path,original)
+            evidence_snapshot = path.with_name(ident+'.operator-adoption-evidence-'+evidence_digest+'.json')
+            evidence_bytes = json.dumps(packet,ensure_ascii=False,sort_keys=True).encode()
+            preserve(evidence_snapshot,evidence_bytes)
+            audit = dict(authority='operator', evidence_file=str(Path(evidence_file).absolute()), evidence_sha256=evidence_digest,
+                original_request_file=str(original_path),original_request_sha256=hashlib.sha256(original).hexdigest(),
+                evidence_snapshot=str(evidence_snapshot),evidence_snapshot_sha256=hashlib.sha256(evidence_bytes).hexdigest(),
+                original_phase=job['phase'], original_receiver=receiver, performer=author,
+                native=dict(terminal=task['runtime']['terminal'],pid=task['runtime']['native_pid'],turn=native.get('turn')),
+                verification=packet['verification'],artifacts=packet['artifacts'],writer_stopped=True,at=time.time())
+            job.update(phase='completed',operator_result_adoption=audit,work_resolution=audit,
+                       reason='운영본부가 기존 결과·작성자·범위를 대조해 수령했습니다. 새 입력 전송 없음.',updated_at=time.time())
+            control.write_request(path,job)
+            control.notify(state)
+            return {k:v for k,v in job.items() if k != 'message'}

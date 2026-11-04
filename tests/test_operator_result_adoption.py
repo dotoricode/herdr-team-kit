@@ -175,6 +175,55 @@ class AdoptionTests(fixtures.PoolControlTests):
         self.assertEqual('completed',self.adopt(actor,job,evidence)['phase'])
 
 
+    def test_reservation_inserted_after_authorship_blocks_completion(self):
+        actor,job,path,packet,evidence=self.packet()
+        original=path.read_bytes()
+        from teamkit.result_adoption import _author
+        from teamkit.resources import ResourceLedger
+        from teamkit.store import Store
+        import time
+        def race(*args):
+            proof=_author(*args)
+            store=Store(self.state)
+            ResourceLedger(store.db).reserve('racing-attempt','other-ticket','claude/team',[],{},
+                dict(observed_at=time.time(),complete=True,terminals=[]),
+                session=dict(terminal='trestored',pid=self.fake.rows['trestored']['foreground']['pid'],owner=actor['owner']))
+            store.close()
+            return proof
+        with patch('teamkit.result_adoption._author',side_effect=race):
+            with self.assertRaisesRegex(ValueError,'lease'):self.adopt(actor,job,evidence)
+        self.assertEqual(original,path.read_bytes())
+
+
+    def test_reservation_cannot_enter_while_request_completion_is_committed(self):
+        actor,job,path,packet,evidence=self.packet()
+        import sqlite3
+        import threading
+        import time
+        from teamkit.store import Store
+        from teamkit.resources import ResourceLedger
+        store=Store(self.state);ResourceLedger(store.db);store.close()
+        outcome=[]
+        original_write=control.write_request
+        def reserve():
+            db=sqlite3.connect(self.state,timeout=0.05,isolation_level=None)
+            try:
+                ResourceLedger(db).reserve('concurrent-attempt','other-ticket','claude/team',[],{},
+                    dict(observed_at=time.time(),complete=True,terminals=[]),
+                    session=dict(terminal='trestored',pid=self.fake.rows['trestored']['foreground']['pid'],owner=actor['owner']))
+                outcome.append('reserved')
+            except sqlite3.OperationalError as error:
+                outcome.append(str(error))
+            finally:db.close()
+        def commit(path,value):
+            thread=threading.Thread(target=reserve);thread.start();thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(['database is locked'],outcome)
+            original_write(path,value)
+        with patch('teamkit.pool_control.write_request',side_effect=commit):
+            self.assertEqual('completed',self.adopt(actor,job,evidence)['phase'])
+
+
 def load_tests(loader, tests, pattern):
     import unittest
     return unittest.TestSuite(AdoptionTests(name) for name in AdoptionTests.__dict__ if name.startswith('test_'))
