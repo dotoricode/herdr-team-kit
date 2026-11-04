@@ -60,7 +60,8 @@ def observe(config, state, team, terminal):
                      and _detector_matches(p, status.get('app'))), None)
     if provider is None or type(fg.get('pid')) is not int or fg['pid'] <= 0:
         raise ValueError('workspace process/provider is unverified')
-    if status.get('state') not in ('idle', 'done') or type(native.get('turn')) is not int:
+    if (status.get('state') not in ('idle','done') or type(native.get('turn')) is not int
+            or native.get('waiting_for_person') is True):
         raise ValueError('workspace session is working or its turn is unknown')
     screen = _call('read', '--json', terminal)
     if screen.get('complete') is not True or not empty_input(screen.get('text', '')):

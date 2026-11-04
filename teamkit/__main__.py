@@ -164,6 +164,7 @@ def parser():
     x.add_argument('--priority',type=int,default=0)
     x.add_argument('--depends-on',action='append',default=[])
     x.add_argument('--resource',action='append',default=[])
+    x.add_argument('--read-resource',action='append',default=[])
     x.add_argument('--request')
     x.add_argument('--outcome',choices=('completed','deferred'))
     x.add_argument('--evidence-file')

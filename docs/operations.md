@@ -98,6 +98,8 @@ Receipt waiters record SIGINT/SIGTERM cancellation before exiting. SIGKILL or ho
 
 Supervisor는 매 tick 실제 팀 space의 프로세스·계정 환경·작업 경로·입력·최신 사용량과 예약을 확인합니다. `teamkit.auto=off`는 자동 배정에서 제외합니다. 같은 팀의 미종결 요청이 다른 세션의 비충돌 업무를 막지 않으며, 동일·상하위 쓰기 경로와 명시적으로 예약한 named 쓰기 자원만 충돌합니다. 승인된 경로가 다르면 같은 worktree라는 이유만으로 전체를 잠그지 않습니다.
 
+`pool assign --read-resource FILE`은 코드 업무에서도 외부 파일을 읽기 전용 첨부로 선언합니다. 일반 읽기 업무의 `--resource FILE`도 읽기 첨부로 처리하며 외부 쓰기는 승인된 작업 루트를 벗어날 수 없습니다.
+
 호스트가 팀 루트의 `.herdr/jobs/<ticket>/<attempt>/task.md`와 `contract.json`을 만들고, 외부의 승인된 읽기 파일을 `inputs/`에 복사합니다. 실행자는 이 폴더에 `result.json`과 산출물을 저장하고 턴을 끝냅니다. `receipt`·`submit` CLI 호출과 외부 상태 디렉터리 접근은 필요하지 않습니다. 호스트가 정확한 PID·종료 turn·시도를 대조해 결과를 수거한 뒤 승인된 검증과 독립 리뷰를 수행합니다.
 
 미실행 티켓은 `queue cancel TICKET --reason REASON --user-approved`로 취소합니다. 명령은 트랜잭션 안에서 실행·시도·예약이 없음을 다시 확인하고 원문·예산·감사 이력을 보존합니다. 과거 `pool-requests` JSON은 기존 결과를 대조하는 기록이며 자동 배정 소비 대상이 아닙니다.
@@ -227,6 +229,8 @@ GUI core 배정은 실제 응답에 연결된 statusline 자료와 검증된 공
 
 
 ### 미완료 실행의 운영 확인
+필수 리뷰는 부모의 정확한 수거 산출물 파일만 읽기 자원으로 승계해 `inputs/`로 복사하며 산출물 폴더 전체나 쓰기 권한은 승계하지 않습니다. 작성자 터미널은 PID가 바뀌어도 해당 결과의 리뷰 후보에서 제외합니다.
+
 담당자가 `blocked`·`incomplete`를 제출하면 검증 실패를 수정하는 하위 업무를 자동 생성하지 않고 운영 확인 요청을 기록합니다. 수신 이후 실행 턴이 끝났으나 결과가 제출되지 않은 경우에도 확인 요청을 표시하며 기존 attempt와 쓰기 예약은 보존합니다. 단순 idle은 쓰기 중단 증거가 아닙니다.
 
 운영자는 실제 모든 쓰기 중단을 확인한 뒤 `queue recover <ticket> --attempt <attempt> --user-approved --writer-stopped --reason <확인 근거>`로 같은 업무를 다시 배정 대기 상태로 돌릴 수 있습니다. 명령은 현재 원 실행자의 terminal·PID·owner와 종료된 turn을 다시 확인하고, 기존 미완료 하위 작업이 있으면 거절합니다. 과거 수신·결과·예약 이력은 남으며 기존 attempt를 성공 완료로 기록하지 않습니다. 이 확인을 할 수 없으면 화면의 운영 확인 요청을 유지합니다.

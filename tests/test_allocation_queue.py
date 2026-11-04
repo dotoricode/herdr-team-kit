@@ -35,6 +35,22 @@ class UnifiedQueueTests(unittest.TestCase):
                 'pool','assign','--team','example','--message-file',str(message),'--work','OFFLINE']))
         self.assertEqual('pending',item['state'])
 
+    def test_pool_external_read_file_is_approved_and_staged_without_shared_root(self):
+        import tempfile
+        from pathlib import Path
+        from teamkit.operations import prompt
+        with tempfile.TemporaryDirectory() as external:
+            attachment=Path(external)/'input.txt';attachment.write_text('approved external fixture')
+            message=self.root/'external-request.txt';message.write_text('Read the attached fixture.')
+            item=pool_control.enqueue(self.config,self.state,'example',message,work_id='EXTERNAL',resource_paths=[str(attachment)])
+            self.assertIn(dict(kind='path',name=str(attachment.resolve()),mode='read'),item['resources'])
+            queue=TicketStore(self.state);self.addCleanup(queue.close)
+            actor=dict(self.runtime.executor,root=str(self.root))
+            attempt=queue.reserve(item['id'],actor,{},self.runtime.observation())
+            prompt(self.config,self.state,item,attempt)
+            packet=json.loads((Path(attempt['mailbox'])/'contract.json').read_text())
+            self.assertEqual(str(attachment.resolve()),packet['staged_inputs'][0]['original'])
+
     def test_three_same_team_reads_start_in_one_tick_and_only_same_path_writes_wait(self):
         config=json.loads(self.config.read_text()); config['operations']['resource_policy']={'global_limit':10,'profile_limits':{'codex/personal':10}}
         self.config.write_text(json.dumps(config))

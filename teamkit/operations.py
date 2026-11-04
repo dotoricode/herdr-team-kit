@@ -227,6 +227,8 @@ class NativeRuntime:
             if not observed_cwd or Path(observed_cwd).resolve() != Path(executor['execution_root']).resolve():
                 raise ValueError('split worker cwd changed or cannot be verified')
         if require_idle:
+            if native.get('waiting_for_person') is True:
+                raise ValueError('executor draft, dialog or incomplete screen')
             from .prompt_state import empty_input
             from .core_runtime import _call
             if executor.get('workspace_live') and (native.get('labels') or {}).get('teamkit.auto') == 'off':
@@ -378,8 +380,9 @@ class NativeRuntime:
         gate('working_boundary', False, folder)
 
         def independent():
-            if ticket['role'] == 'reviewer' and ticket.get('exclude_owners'):
-                if executor['owner'] in ticket['exclude_owners']:
+            if ticket['role'] == 'reviewer':
+                if (executor['owner'] in ticket.get('exclude_owners', [])
+                        or executor.get('terminal') in ticket.get('exclude_terminals', [])):
                     raise ValueError('review executor must be independent')
         gate('review_independence', False, independent)
         native_ok = gate('native', False, lambda: self.native(executor))
@@ -657,6 +660,10 @@ def followup(queue, ticket, attempt, relation, goal, *, reviewer=False):
         scope['actions'] = ['read']
         for resource in resources:
             resource['mode'] = 'read'
+        artifact=attempt['submission']['artifact']
+        if artifact not in scope['paths']:scope['paths'].append(artifact)
+        if not any(r['kind']=='path' and r['name']==artifact and r['mode']=='read' for r in resources):
+            resources.append(dict(kind='path',name=artifact,mode='read'))
         checks = ['independent-review-report']
         from .artifact_verifier import command
         commands = {checks[0]: command(attempt['submission'])}
@@ -667,6 +674,7 @@ def followup(queue, ticket, attempt, relation, goal, *, reviewer=False):
                 dependencies=[], profiles=ticket['profiles'], resources=resources, scope=scope,
                 estimated_tokens=ticket.get('estimated_tokens', 4096),
                 exclude_owners=[attempt['executor']['owner']] if reviewer else ticket.get('exclude_owners', []),
+                exclude_terminals=[attempt['executor']['terminal']] if reviewer else ticket.get('exclude_terminals', []),
                 parent_attempt=attempt['id'])
     if ticket.get('workflow_ref'):
         spec['workflow_ref'] = ticket['workflow_ref']

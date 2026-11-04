@@ -133,7 +133,7 @@ def plan(config_path,state,team,provider=None,account=None):
         return {**result,'action':'wait','reason':'preferred session is not prepared; account order was not changed'}
 
 
-def enqueue(config_path,state,team,message_file,provider=None,account=None,work_id=None,completion_file=None,workflow_id=None,priority=0,dependencies=(),resource_paths=()):
+def enqueue(config_path,state,team,message_file,provider=None,account=None,work_id=None,completion_file=None,workflow_id=None,priority=0,dependencies=(),resource_paths=(),read_paths=()):
     """All new pool ingress uses the same ticket/attempt/resource transactions."""
     from .tickets import TicketStore
     from . import queue_policy
@@ -161,8 +161,23 @@ def enqueue(config_path,state,team,message_file,provider=None,account=None,work_
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}',work_id):raise ValueError('bounded stable work identity required')
     ident='POOL-'+hashlib.sha256((team+':'+work_id).encode()).hexdigest()[:40]
     workflow_ref=queue_policy.capture_work(config,state,team,workflow_id)
-    paths=queue_policy.resources(config,team,workflow_ref,resource_paths)
-    if resource_paths:paths=paths[1:] or paths
+    paths=queue_policy.resources(config,team,workflow_ref,resource_paths if workflow_ref else ())
+    if workflow_ref and resource_paths:paths=paths[1:] or paths
+    if not isinstance(read_paths,(list,tuple)) or not isinstance(resource_paths,(list,tuple)):
+        raise ValueError('read resources require explicit path lists')
+    read_files=[]
+    for value in [*(resource_paths if not workflow_ref else ()), *read_paths]:
+        if not isinstance(value,str) or not Path(value).is_absolute():
+            raise ValueError('read resource must be an absolute path')
+        path=str(Path(value).resolve())
+        if not Path(path).is_file():
+            queue_policy.resources(config,team,None,[path])
+            if not Path(path).is_dir():raise ValueError('read resource must exist')
+        if path not in read_files:read_files.append(path)
+    resources=[dict(kind='path',name=p,mode='write' if workflow_ref else 'read') for p in paths]
+    for path in read_files:
+        if path not in paths:paths.append(path)
+        if not any(r['name']==path and r['mode']=='read' for r in resources):resources.append(dict(kind='path',name=path,mode='read'))
     approved=Path(state).resolve().parent/'operation-inputs'/ident/'request.txt'
     approved.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
     content=text+('\n\nCOMPLETION REQUIREMENTS:\n'+completion if completion else '')
@@ -179,7 +194,7 @@ def enqueue(config_path,state,team,message_file,provider=None,account=None,work_
             'import pathlib,sys;sys.exit(not pathlib.Path(sys.argv[1]).is_file() or pathlib.Path(sys.argv[1]).stat().st_size==0)','{artifact}']},
         profiles=[p+'/'+a for p in config['profiles'] for a in config['profiles'][p]],
         scope=dict(paths=paths,actions=['read','write'] if workflow_ref else ['read'],data=['approved request']),
-        resources=[dict(kind='path',name=p,mode='write' if workflow_ref else 'read') for p in paths],
+        resources=resources,
         approval=dict(state='approved',reference=str(approved)),priority=priority,dependencies=sorted(dependencies),
         work_id=work_id,completion_requirements=completion,execution_constraint=requested,review_required=True,
         ingress='pool assign')
@@ -741,7 +756,7 @@ def handle(args):
     if args.action=='assign':
         if not args.team or not args.message_file:raise ValueError('team and approved message file required')
         return enqueue(args.config,args.state,args.team,args.message_file,getattr(args,'provider',None),getattr(args,'account',None),getattr(args,'work',None),getattr(args,'completion_file',None),
-                       getattr(args,'workflow',None),getattr(args,'priority',0),getattr(args,'depends_on',[]),getattr(args,'resource',[]))
+                       getattr(args,'workflow',None),getattr(args,'priority',0),getattr(args,'depends_on',[]),getattr(args,'resource',[]),getattr(args,'read_resource',[]))
     from .core_runtime import require_managed
     require_managed()
     if args.action=='workspace-renew':

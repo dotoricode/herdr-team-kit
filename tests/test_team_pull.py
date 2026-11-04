@@ -51,7 +51,8 @@ class TeamPullTests(unittest.TestCase):
         with patch('teamkit.allocation.refresh_usage'), patch('teamkit.operations.reconcile') as reconcile:
             result = operations.pull(self.config, self.state, 'example', ticket='LATER', runtime=self.runtime)
         self.assertEqual(['LATER'], [x['ticket'] for x in result['started']])
-        reconcile.assert_not_called()
+        reconcile.assert_called_once()
+        self.assertEqual('example',reconcile.call_args.kwargs['team'])
         queue = TicketStore(self.state)
         try:
             self.assertEqual('pending', queue.get('OLD')['state'])

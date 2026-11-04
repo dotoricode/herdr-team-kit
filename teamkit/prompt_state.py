@@ -14,14 +14,12 @@ def empty_input(text, registered_hint=None):
     if rest and not rest[0].strip():
         rest=rest[1:]
     for index,line in enumerate(rest):
-        value=line.strip()
-        if not value or re.fullmatch(r'[─━═-]{3,}',value):
-            return True
-        # Older unframed terminals put metric rows directly below the input.
-        # Recognize metrics without coupling to a CLI/model/version vocabulary.
-        if '%' in value and any(char.isdigit() for char in value):
-            continue
-        if value.startswith(('←','?','/','⚠')) and index:
-            continue
-        return False
-    return True
+        if re.fullmatch(r'[─━═-]{3,}',line.strip()):
+            return not any(value.strip() for value in rest[:index])
+    while rest and not rest[-1].strip():rest.pop()
+    if not rest:return True
+    # A native unframed footer is a final one/two-row block separated from
+    # the composer by a blank row. Any preceding content remains a draft.
+    footer=len(rest)-1
+    while footer and rest[footer-1].strip():footer-=1
+    return footer>0 and len(rest)-footer<=2 and not any(value.strip() for value in rest[:footer])

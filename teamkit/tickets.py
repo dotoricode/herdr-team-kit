@@ -247,19 +247,24 @@ class TicketStore:
                 if parent.get('worktree_split'):
                     from .split_worktree import mapped_scope
                     parent_scope = mapped_scope(parent, parent['worktree_split'])
-                narrowed = (all(set(scope[name]).issubset(parent_scope[name]) for name in ('actions', 'data'))
-                            and all(within(x, parent_scope['paths']) for x in scope['paths'])
-                            and set(spec['profiles']).issubset(parent['profiles'])
-                            and spec['product'] == parent['product'])
                 same_verifiers = spec.get('verification_commands', {}) == parent.get('verification_commands', {})
                 safe_review = False
+                review_artifact = None
                 if spec.get('role') == 'reviewer' and spec.get('kind') == 'review' and parent.get('attempt'):
                     from .artifact_verifier import command
                     parent_attempt = self.attempt(parent['attempt'])
-                    if parent_attempt.get('submission'):
+                    if parent_attempt.get('submission') and spec.get('parent_attempt') == parent_attempt['id']:
                         expected = {'independent-review-report': command(parent_attempt['submission'])}
                         safe_review = spec.get('checks') == ['independent-review-report'] and spec.get('verification_commands') == expected
-                narrowed = narrowed and (same_verifiers or safe_review)
+                        if safe_review:review_artifact = parent_attempt['submission']['artifact']
+                def allowed_review_path(path):
+                    return review_artifact is not None and Path(path).resolve() == Path(review_artifact).resolve()
+                narrowed = (all(set(scope[name]).issubset(parent_scope[name]) for name in ('actions','data'))
+                            and all(within(x,parent_scope['paths']) or allowed_review_path(x) for x in scope['paths'])
+                            and all(r['kind']!='path' or within(r['name'],parent_scope['paths'])
+                                    or r['mode']=='read' and allowed_review_path(r['name']) for r in resources)
+                            and set(spec['profiles']).issubset(parent['profiles'])
+                            and spec['product']==parent['product'] and (same_verifiers or safe_review))
                 # These fields affect routing/approval, rather than the requested
                 # subtask. Descendants cannot weaken a parent's execution policy.
                 for field in ('execution_constraint', 'classification', 'user_decision', 'workflow_ref', 'failures', 'git_base'):
