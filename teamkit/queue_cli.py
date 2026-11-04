@@ -11,7 +11,7 @@ from .tickets import TicketStore
 def parser(commands):
     item = commands.add_parser('queue')
     item.add_argument('action', choices=('create', 'approve', 'show', 'status', 'submit', 'receipt',
-                                        'recover', 'pull', 'wait-children', 'dependencies', 'tick', 'intake', 'classify', 'approval-template', 'organize', 'dismiss', 'candidates', 'send', 'sync', 'action-status'))
+                                        'recover', 'replace-review-child', 'pull', 'wait-children', 'dependencies', 'tick', 'intake', 'classify', 'approval-template', 'organize', 'dismiss', 'candidates', 'send', 'sync', 'action-status'))
     item.add_argument('ticket', nargs='?')
     item.add_argument('--team')
     item.add_argument('--ticket-file')
@@ -96,6 +96,12 @@ def handle(args):
             if not args.user_approved or not args.approval_file:
                 raise ValueError('explicit user-approved action and exact scope approval file required')
             return queue.approve(args.ticket, args.approval_file)
+        if args.action == 'replace-review-child':
+            from .child_review_disposition import replace
+            if not args.result_file:
+                raise ValueError('operator-approved replacement evidence file required')
+            return replace(queue, args.ticket, args.attempt, args.result_file,
+                           operator_approved=args.user_approved)
         if args.action == 'dependencies':
             queue.set_dependencies(args.ticket, args.depends_on)
             return queue.get(args.ticket)

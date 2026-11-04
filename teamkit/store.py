@@ -97,6 +97,22 @@ class Store:
                         (value['id'], event, time.time(), json.dumps(detail or {})))
         return value
 
+    @staticmethod
+    def cancel_unclaimed_in_transaction(db, expected, evidence):
+        """Retain a failed operation's staged task without permitting later claim."""
+        if not db.in_transaction:
+            raise ValueError('staged cancellation requires caller-owned transaction')
+        row = db.execute('SELECT body FROM tasks WHERE id=?', (expected['id'],)).fetchone()
+        current = json.loads(row[0]) if row else None
+        if (current != expected or current.get('state') != 'queued'
+                or current.get('owner') or current.get('runtime')):
+            raise ValueError('only the exact unclaimed staged task may be cancelled')
+        current.update(state='cancelled', operation_preflight_replacement=evidence)
+        db.execute('UPDATE tasks SET body=? WHERE id=?', (json.dumps(current), current['id']))
+        db.execute('INSERT INTO events(task,event,at,body) VALUES (?,?,?,?)',
+                   (current['id'], 'unclaimed_operation_replaced', time.time(), json.dumps(evidence)))
+        return current
+
     def create(self, task, team, role, root, base, goal, basis_kind="git", classification=None, work_id=None, design_digest=None, design_revision=None):
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', task):
             raise ValueError('invalid task ID')

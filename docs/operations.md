@@ -276,3 +276,13 @@ usage 배정 모드의 legacy pool 계획도 현재 팀의 ready workspace actor
 운영자 결과 수령의 최종 기록은 자원 예약과 같은 SQLite `BEGIN IMMEDIATE` 잠금 안에서 현재 task·attempt·활성 lease를 다시 검사한 후 수행합니다. 검증 도중 다른 예약이 생기거나 실행자 신원이 바뀌면 수령을 거절하며, 원 요청은 완료로 바뀌지 않습니다.
 
 HC의 turn 카운터는 명령 처리 중 baseline과 같을 수 있습니다. 등록 확인은 own terminal·nonce·owner·PID·profile·model·workspace·cwd 검사를 그대로 유지하며, awaiting_receipt의 확정 accepted delivery가 terminal/PID/turn_baseline/turn을 정확히 증명하고 현재 detector가 working인 경우에만 같은 turn의 수신을 인정합니다. 같은 turn의 idle/done이나 전달 미확인 상태는 수신으로 승격하지 않습니다. 등록 ready가 되더라도 제품 업무 배정은 별도의 idle·입력·quota 검사 뒤에만 가능합니다. 수신 거부는 profile_binding_changed, profile_namespace_changed, model_changed, workspace_changed, root_changed, turn_not_started, delivery_unconfirmed 등의 고정 코드로 구분하며 인증 값·프로세스 환경 원문은 출력하지 않습니다.
+
+## 전송 전에 막힌 필수 리뷰의 외부 근거 채택
+
+`queue replace-review-child CHILD --attempt ATTEMPT --result-file PACKET --user-approved`는 운영자가 독립 리뷰 원문과 작성자를 직접 대조한 경우에만 사용합니다. 자동 작성자 인증이나 native 수신 확인이 아닙니다. 일반 취소·숨김 명령도 아닙니다.
+
+허용되는 경우는 승인된 읽기 전용 필수 리뷰가 `product execution requires linked approved work`로 **실행자 생성 전** 실패한 경우뿐입니다. launch intent, PID, terminal, runtime, receipt, submission 중 하나라도 있으면 거절합니다. 부모는 현재 결과를 제출하고 native 쓰기 중단 확인을 마친 `review` 업무여야 하며, 별도의 자동 독립 리뷰 gate를 요구하는 업무에는 이 경로를 쓰지 않습니다.
+
+JSON packet에는 child/attempt, parent/parent_attempt, 원 child 계약의 `contract_digest`, `parent_artifact_digest`, 부모 제출과 정확히 같은 `source`, 실제 독립 리뷰 `artifact`/`artifact_digest`, 승인 원문 `approval_reference`/`approval_digest`, reviewer의 provider/account/identity와 `not_parent_author:true`, 운영자가 확인한 `independence_evidence`, `verdict:pass`, 비차단 `findings` 목록, `reason`을 기록합니다. 계약 digest는 `teamkit.child_review_disposition.CONTRACT`에 정한 원 필드의 `tickets.digest`입니다. 실제 독립 수행 근거가 없으면 이 packet을 만들지 않습니다. 승인된 원 검증 명령도 새 artifact에 실행합니다.
+
+원 child는 `cancelled`, 시도는 `preflight_replaced`가 되며 원 delivery와 감사 기록은 보존됩니다. 실행되지 않은 staged task도 원 계약과 unclaimed 상태를 대조한 뒤 취소 기록을 남겨 재실행을 막습니다. actor receipt, submission, completed를 만들지 않으며 부모도 자동 완료하지 않습니다. required edge는 승인·원문·결과·source·부모 연결이 그대로 유효할 때만 충족됩니다. 파일이 바뀌면 다시 대기합니다. 이 기능은 최신 PR head, 실제 기기·서버 검증 공백을 대신하지 않습니다.

@@ -352,8 +352,10 @@ class TicketStore:
             visit(ident, set())
 
     def incomplete_children(self, ident):
+        from .child_review_disposition import satisfied
         return [x['id'] for x in self.list() if x.get('parent_id') == ident
-                and x['relation'] in ('required', 'defect') and x['state'] != 'completed']
+                and x['relation'] in ('required', 'defect') and x['state'] != 'completed'
+                and not satisfied(self, x)]
 
     def gate(self, ident):
         item = self.get(ident)
