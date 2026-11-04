@@ -135,7 +135,7 @@ def observe_native(call=None, clock=time.time):
         status = (native.get('status') or {}).get('state', 'unknown') if name else 'unknown'
         rows.append(dict(terminal=native['address'], pid=foreground.get('pid'), provider=provider,
                          account=None, status=status, owner=labels.get('teamkit.owner'),
-                         attempt=labels.get('teamkit.attempt')))
+                         attempt=labels.get('teamkit.attempt'), space=labels.get('herdr.space')))
     return dict(observed_at=started, finished_at=clock(), complete=True, terminals=rows,
                 outside_controlled=False, coverage=COVERAGE)
 

@@ -142,8 +142,9 @@ def board(config_path, state):
     counts['active'] = sum(j['category'] not in ('history','deferred','archived') for j in jobs)
     teams = list(dict.fromkeys([*config['teams'], *config.get('operations',{}).get('departments',{}), *(x['team'] for x in jobs)]))
     lanes = [dict(team=team,label=labels.get(team,team)) for team in teams]
-    value = dict(allocation_policy=payload.get('allocation_policy', 'role'), schema_version=payload['schema_version'], jobs=jobs, counts=dict(counts), lanes=lanes,
+    value = dict(allocation_policy=payload.get('allocation_policy', 'role'), schema_version=payload['schema_version'], observed_at=payload.get('observed_at'), jobs=jobs, counts=dict(counts), lanes=lanes,
                  capacity=payload['capacity'], supervisor=payload['supervisor'], profiles=payload['profiles'],
+                 native_observation=payload.get('native_observation'), task_actors=payload.get('task_actors',[]),
                  candidate_slots=payload['candidate_slots'], account_profiles=payload['account_profiles'],
                  split_worktrees=payload.get('split_worktrees', []),
                  policy_ready_count=payload['ready_count'], ready_count_boundary=payload['ready_count_boundary'],
@@ -152,6 +153,9 @@ def board(config_path, state):
                      durable=True, wake_is_completion=False))
     # Observation time alone never triggers rebuilding the whole view.
     semantic = dict(value)
+    semantic.pop('native_observation',None)
+    semantic.pop('task_actors',None)
+    semantic.pop('observed_at',None)
     semantic['supervisor'] = {k:v for k,v in value['supervisor'].items() if k not in ('heartbeat_age_seconds','heartbeat')}
     dispatch = semantic['supervisor'].get('dispatch')
     if isinstance(dispatch,dict):
@@ -239,8 +243,8 @@ def organization_card(job):
                 title=job['title'], prompt=job['request'], condition=None)
 
 
-def organize(config_path, state, ident, action, client_request_id, expected_revision):
+def organize(config_path, state, ident, action, client_request_id, expected_revision, rank=None):
     job = next((job for job in board(config_path, state)['jobs'] if job['id'] == ident), None)
     if job is None:
         raise ValueError('현재 업무 카드를 찾을 수 없습니다. 최신 목록을 확인하세요.')
-    return board_action(state, organization_card(job), action, client_request_id, expected_revision)
+    return board_action(state, organization_card(job), action, client_request_id, expected_revision, rank=rank)

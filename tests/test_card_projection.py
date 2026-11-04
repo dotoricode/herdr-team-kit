@@ -1,5 +1,6 @@
 """Consumer regression: journal outcomes must reach board and detail together."""
 from unittest.mock import patch
+import time
 from test_app_feedback import FeedbackFixture
 from teamkit.app_feedback import card_detail
 from teamkit.app_bridge import view
@@ -75,6 +76,67 @@ class ProjectionTests(FeedbackFixture):
             data=view(self.config,self.state,self.links)
         self.assertEqual(data['synchronization']['state'],'partial')
         self.assertFalse(data['actions_enabled'])
+
+    def test_app_view_projects_operation_tickets_and_team_resource_lanes(self):
+        from teamkit import queue_view
+        self.setup_work()
+        observed_at=time.time()
+        payload={'observed_at':observed_at,'jobs':[{'id':'TICKET-1','task_id':'TICKET-1','title':'오늘 작업','short_title':'오늘 작업','team':'alpha','team_label':'Alpha','origin_id':'W1',
+                         'phase':'completed','created_at':1,'updated_at':2,'category':'history','board_state':{'disposition':'visible','revision':'x'},
+                         'current_terminal':'t8','verified_working':False,'result_location':'/result'}],
+                 'capacity':{'available':2,'candidate_slots':1},'candidate_slots':1,'profiles':{'codex/company':{'eligible':True}},
+                 'task_actors':[{'id':'TICKET-1','team':'alpha','role':'implementer','owner':'owner','provider':'codex','account':'company',
+                                 'runtime':{'terminal':'t8','native_pid':88}}],
+                 'native_observation':{'complete':True,'observed_at':observed_at,'terminals':[{'terminal':'t8','pid':88,'provider':'codex','owner':'owner','status':'working'}]}}
+        with patch('teamkit.app_bridge.core_read',return_value={'terminals':[]}), patch.object(queue_view,'board',return_value=payload):
+            data=view(self.config,self.state,self.links)
+        self.assertEqual(data['synchronization']['state'],'ok')
+        self.assertTrue(data['actions_enabled'])
+        self.assertEqual(data['tickets'],[])
+        self.assertEqual(data['works'][0]['linked_tickets']['done'],1)
+        self.assertEqual(data['works'][0]['linked_tickets']['total'],1)
+        lane=data['resource_lanes'][0]
+        self.assertEqual(lane['team'],'alpha')
+        self.assertEqual(lane['working_count'],1)
+        self.assertEqual(lane['active_terminals'][0]['terminal'],'t8')
+
+    def test_unregistered_live_idle_slot_with_unlimited_capacity(self):
+        from teamkit import queue_view
+        now=time.time()
+        payload={'observed_at':now,'jobs':[],'capacity':{'global_limit':None,'available':None,'profile_used':{'codex/company':0},'profile_unknown':{'codex':0},'profile_limits':{'codex/company':1}},
+                 'profiles':{'codex/company':{'eligible':True}},'task_actors':[{'owner':'o','provider':'codex','account':'company','runtime':{'terminal':'t10','native_pid':90}},
+                     {'owner':'reserved','provider':'codex','account':'company','runtime':{'terminal':'t11','native_pid':91}}],
+                 'native_observation':{'complete':True,'observed_at':now,'terminals':[
+                     {'terminal':'t8','pid':88,'provider':'codex','status':'idle'},
+                     {'terminal':'t9','pid':89,'provider':'codex','status':'working','space':'s1'},
+                     {'terminal':'t10','pid':90,'provider':'codex','status':'working','space':'s1','owner':'o'},
+                     {'terminal':'t11','pid':91,'provider':'codex','status':'idle','space':'s1','owner':'reserved'}]}}
+        actor={'terminal':'t8','pid':88,'provider':'codex','account':'company','product':'alpha'}
+        with patch.object(queue_view,'board',return_value=payload), patch('teamkit.operations.NativeRuntime.executors',return_value=[actor]), patch('teamkit.app_bridge.core_read',return_value={'terminals':[]}):
+            lane=view(self.config,self.state,self.links)['resource_lanes'][0]
+        self.assertEqual(lane['idle_eligible_count'],1)
+        self.assertEqual(lane['working_count'],2)
+        self.assertEqual(lane['attention_count'],1)
+        payload['capacity']['profile_used']['codex/company']=1
+        with patch.object(queue_view,'board',return_value=payload), patch('teamkit.operations.NativeRuntime.executors',return_value=[actor]), patch('teamkit.app_bridge.core_read',return_value={'terminals':[]}):
+            self.assertEqual(view(self.config,self.state,self.links)['resource_lanes'][0]['idle_eligible_count'],0)
+        payload['task_actors']=[];payload['native_observation']['terminals']=[]
+        with patch.object(queue_view,'board',return_value=payload), patch('teamkit.operations.NativeRuntime.executors',side_effect=OSError('unavailable')), patch('teamkit.app_bridge.core_read',return_value={'terminals':[]}):
+            self.assertEqual(view(self.config,self.state,self.links)['resource_lanes'][0]['attention_count'],1)
+
+    def test_ticket_detail_and_board_action_use_queue_namespace(self):
+        from teamkit import queue_view
+        job={'id':'TICKET-1','title':'오늘 작업','short_title':'오늘 작업','request':'진행 근거','team':'alpha','team_label':'Alpha',
+             'phase':'running','category':'progress','current_terminal':'t8','verified_working':True,
+             'board_state':{'disposition':'visible','revision':'r1'}}
+        with patch.object(queue_view,'board',return_value={'jobs':[job]}),patch.object(queue_view,'organize',return_value={'rank':8}) as organize:
+            card=__import__('teamkit.app_bridge',fromlist=['card_detail']).card_detail(self.config,self.state,self.links,'ticket','TICKET-1')
+            self.assertEqual(card['kind'],'ticket')
+            self.assertEqual(card['presentation']['column'],'progress')
+            from teamkit.app_bridge import card_board_action
+            result=card_board_action(self.config,self.state,self.links,'ticket','TICKET-1','reorder','board-request-01','r1',rank=8)
+        self.assertEqual(result['board']['rank'],8)
+        organize.assert_called_once_with(self.config,self.state,'TICKET-1','reorder','board-request-01','r1',rank=8)
 
     def test_unverified_team_terminal_is_not_counted_as_working(self):
         with patch('teamkit.app_bridge.core_read',return_value={'terminals':[{'address':'t1','state':'live','status':'working'}]}):

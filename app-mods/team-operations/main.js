@@ -13,6 +13,10 @@ const softBreaks = text => String(text).replace(/\S{28,}/g, token => token.repla
 const shortHash = text => { let h = 5381; for (const ch of String(text)) h = ((h * 33) ^ ch.codePointAt(0)) >>> 0; return h.toString(36); };
 const BOARD_NARROW = 900;
 const SEND_FINAL = new Set(["sent", "not_sent", "unknown"]);
+const kstDayStart = nowSeconds => {
+  const kstDate = new Date((nowSeconds + 9 * 3600) * 1000);
+  return Date.UTC(kstDate.getUTCFullYear(), kstDate.getUTCMonth(), kstDate.getUTCDate()) / 1000 - 9 * 3600;
+};
 function documentPreview(source) {
   return String(source ?? "");
 }
@@ -93,12 +97,14 @@ function teamPresence(status, taskState, teamId = "", observedAt = 0, handoff = 
 
 export default class TeamOperations extends View {
   init(props, cx) {
+    this.boardFocus = cx.focus_handle();
     this.viewProps = props ?? getModProps() ?? {};
     this.role = this.viewProps.role ?? "full";
     this.data = null; this.error = null; this.busy = false; this.seq = 0;
     this.expanded = new Set(); this.doc = null; this.docBusy = false; this.docSource = false;
     this.confirm = null; this.actionBusy = false; this.message = null;
-    this.showAccounts = false; this.showArchived = false; this.boardBusy = false; this.boardMessage = null; this.boardRequestIds = new Map(); this.boardStatusOpen = null; this.docMode = "brief"; this.showCompleted = false; this.coordinatorConfirm = false; this.coordinatorBusy = false; this.coordinatorMessage = null;
+    this.showAccounts = false; this.showArchived = false; this.boardBusy = false; this.boardMessage = null; this.boardRequestIds = new Map(); this.boardStatusOpen = null; this.docMode = "brief"; this.showCompleted = true; this.coordinatorConfirm = false; this.coordinatorBusy = false; this.coordinatorMessage = null;
+    this.period = "today-active"; this.showInventory = false; this.hideSystemChecks = true; this.boardMode = "status"; this.selectedTeam = null; this.drag = null; this.justDroppedUntil = 0; this.columnBounds = {};
     this.usageBusy = false; this.usageMessage = null;
     this.statusOpen = null; this.statusRevealed = false; this.statusEpoch = 0;
     this.detailData = null; this.detailError = null; this.detailBusy = false; this.detailFetching = false; this.detailHeight = null;
@@ -189,7 +195,7 @@ export default class TeamOperations extends View {
     const previous = visibleSnapshot(this.cardData), previousError = this.cardError;
     if (!this.cardData && !this.cardError) cx.notify();
     try {
-      const result = await this.args("card-detail", ["--kind", this.viewProps.kind === "inventory" ? "inventory" : "work", "--work", String(this.viewProps.workId)]);
+      const result = await this.args("card-detail", ["--kind", ["inventory","ticket"].includes(this.viewProps.kind) ? this.viewProps.kind : "work", "--work", String(this.viewProps.workId)]);
       if (result.code !== 0) throw new Error(result.stderr || "카드 정보를 읽지 못했습니다.");
       const next = JSON.parse(result.stdout);
       if (String(next.id) !== String(this.viewProps.workId)) throw new Error("요청한 카드와 다른 정보를 받았습니다.");
@@ -523,26 +529,120 @@ export default class TeamOperations extends View {
       ? "이전 요청의 전달 결과를 확인 중입니다. 새 요청은 보내지 않습니다." : null };
   }
 
-  async organizeCard(kind, card, action, cx) {
+  async organizeCard(kind, card, action, cx, rank = null) {
     if (this.boardBusy || this.error || !this.data?.actions_enabled || !card?.board?.revision) return;
     this.boardBusy = true; this.boardStatusOpen = null; this.boardMessage = null; cx.notify();
-    const key = `${kind}|${card.id}|${action}|${card.board.revision}`;
+    const key = `${kind}|${card.id}|${action}|${card.board.revision}|${rank ?? ""}`;
     if (!this.boardRequestIds.has(key)) this.boardRequestIds.set(key, requestId());
     try {
       const r = await this.args("card-board-action", ["--kind", kind, "--work", card.id, "--board-action", action,
-        "--board-revision", card.board.revision, "--request-id", this.boardRequestIds.get(key)]);
+        "--board-revision", card.board.revision, ...(rank == null ? [] : ["--board-rank", String(rank)]), "--request-id", this.boardRequestIds.get(key)]);
       if (r.code !== 0) throw new Error(r.stderr || "카드 정리 상태를 변경하지 못했습니다.");
       const result = JSON.parse(r.stdout);
       this.boardMessage = result.message;
       if (action === "done") this.showCompleted = true;
-      const title = { waiting: "보드 상태를 대기로 바꿨습니다", progress: "보드 상태를 진행 중으로 바꿨습니다", done: "보드 상태를 완료로 바꿨습니다", archive: "카드를 보관했습니다", restore: "자동 상태로 되돌렸습니다" }[action];
+      const title = { waiting: "보드 상태를 대기로 바꿨습니다", progress: "보드 상태를 진행 중으로 바꿨습니다", done: "보드 상태를 완료로 바꿨습니다", archive: "카드를 보관했습니다", restore: "자동 상태로 되돌렸습니다", reorder: "카드 순서를 바꿨습니다" }[action];
       showNotice({ title, body: "실제 세션 실행과 승인 상태는 유지됩니다.", level: "success", timeout: 3000 });
       // A read started before the write cannot acknowledge the new board status.
       if (this.refreshPromise) await this.refreshPromise;
       await this.refresh(cx);
       if (this.role === "detail") await this.loadCard(cx);
-    } catch (error) { this.boardMessage = String(error); }
+      return true;
+    } catch (error) { this.boardMessage = String(error); return false; }
     finally { this.boardBusy = false; if (!this.closed) cx.notify(); }
+  }
+
+  async persistNormalizedRanks(entries, target, action, cx) {
+    if (this.boardBusy || this.error || !this.data?.actions_enabled) return false;
+    this.boardBusy=true;this.boardStatusOpen=null;this.boardMessage=null;cx.notify();
+    const saved=[];
+    const send=async(entry,rank,revision,actionOverride=null)=>{
+      const rid=requestId();
+      const result=await this.args("card-board-action",["--kind",entry.card.kind,"--work",entry.card.id,"--board-action",actionOverride||(entry===target?action:"reorder"),
+        "--board-revision",revision,...(rank==null?[]:["--board-rank",String(rank)]),"--request-id",rid]);
+      if(result.code!==0)throw new Error(result.stderr||"카드 순서를 저장하지 못했습니다.");
+      return JSON.parse(result.stdout).board;
+    };
+    try {
+      for(const entry of [...entries.filter(entry=>entry!==target),target]) {
+        const board=await send(entry,entry.rank,entry.oldBoard?.revision);
+        saved.push({entry,revision:board.revision});
+      }
+    } catch(error) {
+      for(const item of saved.reverse()) {
+        try {
+          const oldBoard=item.entry.oldBoard??{},oldStatus=oldBoard.manual_status;
+          const restoreAction={waiting:"waiting",progress:"progress",complete:"done"}[oldStatus]??"restore";
+          let restored=await send(item.entry,restoreAction==="restore"?null:oldBoard.rank??null,item.revision,restoreAction);
+          if(restoreAction==="restore"&&oldBoard.rank!=null)restored=await send(item.entry,oldBoard.rank,restored.revision,"reorder");
+          if(oldBoard.disposition==="archived")await send(item.entry,null,restored.revision,"archive");
+        }
+        catch { this.boardMessage=`순서 저장 실패 · 일부 표시 순서를 다시 확인해야 합니다: ${error}`; }
+      }
+      this.boardMessage=this.boardMessage||String(error);
+      for(const entry of entries)entry.card.raw.board=entry.oldBoard;
+      try{await this.refresh(cx);}catch{}
+      this.boardBusy=false;if(!this.closed)cx.notify();
+      return false;
+    }
+    this.boardMessage="카드 순서를 정규화했습니다.";
+    showNotice({title:"카드 순서를 정규화했습니다",body:"실제 세션 실행과 승인 상태는 유지됩니다.",level:"success",timeout:3000});
+    try{if(this.refreshPromise)await this.refreshPromise;await this.refresh(cx);}
+    catch(error){this.boardMessage=`순서를 저장했습니다 · 화면 갱신 대기: ${error}`;}
+    finally{this.boardBusy=false;if(!this.closed)cx.notify();}
+    return true;
+  }
+
+  async dropBoardCard(cx) {
+    const drag=this.drag; this.drag=null;
+    if (!drag?.moved || !drag.target) { cx.notify(); return; }
+    const {card}=drag,target={...drag.target,lane:this.boardMode==="status"?null:drag.target.lane};
+    this.justDroppedUntil=Date.now()+250;
+    if (card.p.decision_required && (target.column !== card.category || target.column === "archived")) {
+      this.openDetail(card.kind,card.raw,true); cx.notify(); return;
+    }
+    const cardTeam=card.raw.team??card.raw.product??"팀 총괄";
+    if (target.column===card.category && (target.lane===null||target.lane===cardTeam) && target.beforeId===card.id) { cx.notify(); return; }
+    if(target.column==="archived"){
+      const old=card.raw.board;card.raw.board={...old,disposition:"archived"};card.disposition="archived";cx.notify();
+      if(!await this.organizeCard(card.kind,card.raw,"archive",cx)){card.raw.board=old;card.disposition=old?.disposition??"visible";cx.notify();}
+      return;
+    }
+    if(target.column==="review"&&!card.p.decision_required){cx.notify();return;}
+    if(target.lane&&target.lane!==cardTeam){cx.notify();return;}
+    const peers=(this.boardCards ?? []).filter(item=>item.category===target.column && item.id!==card.id
+      && (!target.lane||(item.raw.team??item.raw.product??"팀 총괄")===target.lane))
+      .sort((leftCard,rightCard)=>(leftCard.raw.board?.rank ?? Infinity)-(rightCard.raw.board?.rank ?? Infinity)
+        || (Number(rightCard.raw.updated_at ?? rightCard.raw.updatedAt ?? 0)-Number(leftCard.raw.updated_at ?? leftCard.raw.updatedAt ?? 0)) || String(leftCard.id).localeCompare(String(rightCard.id)));
+    const index=target.beforeId ? peers.findIndex(item=>item.id===target.beforeId) : peers.length;
+    const next=peers[index] ?? null, prev=peers[index-1] ?? null;
+    let rank;
+    if (!prev && !next) rank=1000;
+    else if (!prev) rank=(next.raw.board?.rank ?? 1000)-1000;
+    else if (!next) rank=(prev.raw.board?.rank ?? 0)+1000;
+    else {
+      const previousRank=prev.raw.board?.rank ?? 0,nextRank=next.raw.board?.rank ?? previousRank+2000;
+      const gap=nextRank-previousRank;
+      rank=(previousRank+nextRank)/2;
+      if(gap<1e-6)rank=(index+1)*1000;
+    }
+    const action=target.column===card.category ? "reorder" : ({waiting:"waiting",progress:"progress",complete:"done",review:"reorder"}[target.column]);
+    if (!action) { cx.notify(); return; }
+    const old=card.raw.board,oldCategory=card.category;
+    if(prev&&next&&next.raw.board?.rank!=null&&prev.raw.board?.rank!=null&&next.raw.board.rank-prev.raw.board.rank<1e-6) {
+      const ordered=[...peers.slice(0,index),card,...peers.slice(index)];
+      const entries=ordered.map((item,position)=>({card:item,oldBoard:item.raw.board,rank:(position+1)*1000}));
+      for(const entry of entries)entry.card.raw.board={...entry.oldBoard,rank:entry.rank,
+        ...(entry.card===card?{manual_status:action==="waiting"?"waiting":action==="progress"?"progress":action==="done"?"complete":entry.oldBoard?.manual_status}:{})};
+      card.category=target.column;cx.notify();
+      if(!await this.persistNormalizedRanks(entries,entries.find(entry=>entry.card===card),action,cx))card.category=oldCategory;
+      return;
+    }
+    card.raw.board={...old,rank,manual_status:action==="waiting"?"waiting":action==="progress"?"progress":action==="done"?"complete":old?.manual_status};
+    card.category=target.column;
+    cx.notify();
+    const saved=await this.organizeCard(card.kind,card.raw,action,cx,rank);
+    if (!saved) { card.raw.board=old;card.category=oldCategory;cx.notify(); }
   }
 
 
@@ -930,7 +1030,7 @@ export default class TeamOperations extends View {
           .child(div().text_size(10).text_color(t.dim).whitespace_normal().child("입력 중인 내용은 이 앱을 켜 둔 동안만 보존됩니다. 앱을 다시 시작하면 복원되지 않습니다.")));
       const extraButtons = h_flex().flex_none().flex_wrap().gap(6)
         .when(Boolean(card?.board) && card.board.disposition !== "archived", el => el.child(boardStatus(card.kind, card)))
-        .when(this.viewProps.kind !== "inventory" || Boolean(this.viewProps.linkedWorkId), el => el.child(button("review-open-design", this.docBusy ? "읽는 중" : this.docEditor ? "설계 닫기" : designReview ? "설계·승인 보기" : "설계 보기", cx => {
+        .when(this.viewProps.kind !== "ticket" && (this.viewProps.kind !== "inventory" || Boolean(this.viewProps.linkedWorkId)), el => el.child(button("review-open-design", this.docBusy ? "읽는 중" : this.docEditor ? "설계 닫기" : designReview ? "설계·승인 보기" : "설계 보기", cx => {
           if (this.docEditor) this.closeDocument(cx);
           else cx.spawn(async cx => this.document(detailWork, cx));
         }, this.docBusy || this.actionBusy)))
@@ -979,7 +1079,7 @@ export default class TeamOperations extends View {
           .children((card.presentation.sessions ?? []).filter(s => s.can_focus).map(s => button(`current-session-${s.task}`, `${s.role_label} 세션 열기`, () => run("agent.focus", {terminal:s.terminal}))))))
         .when(Boolean(this.boardMessage), el => el.child(words(this.boardMessage).text_size(12).text_color(t.muted)))
         .when(Boolean(card), el => el.child(extraButtons))
-        .when((this.viewProps.kind !== "inventory" || Boolean(this.viewProps.linkedWorkId)) && (this.docBusy || this.docEditor != null || Boolean(this.message)), el => el.child(documentSection))
+        .when(this.viewProps.kind !== "ticket" && (this.viewProps.kind !== "inventory" || Boolean(this.viewProps.linkedWorkId)) && (this.docBusy || this.docEditor != null || Boolean(this.message)), el => el.child(documentSection))
         .when(this.infoOpen, el => el.child(informationSection))
         .when(this.historyOpen, el => el.child(historySection));
       return v_flex().id("team-operations-detail").size_full().min_h(0).gap(8).p(14).bg(t.background).text_color(t.foreground)
@@ -995,98 +1095,78 @@ export default class TeamOperations extends View {
     }
     const narrow = (this.viewWidth ?? Infinity) < BOARD_NARROW;
     const boardColumns = [
-      { id: "waiting", title: "담당자 대기", color: t.idle },
+      { id: "waiting", title: "배정·대기", color: t.idle },
       { id: "progress", title: "진행 중", color: t.working },
       { id: "review", title: "내 결정 필요", color: t.blocked },
-      { id: "complete", title: "완료·정리", color: t.done }
+      { id: "complete", title: this.period === "today-active" || this.period === "today" ? "오늘 완료·정리" : "완료·정리", color: t.done }
     ];
     const asCard = (kind, raw) => {
       const p = raw.presentation ?? {};
-      const original = kind === "work" ? WORK_PHASES[raw.phase]?.column ?? "waiting" : String(raw.status ?? "").startsWith("완료") ? "complete" : "waiting";
+      const original = kind === "work" ? WORK_PHASES[raw.phase]?.column ?? "waiting" : kind === "ticket" ? raw.presentation?.column ?? "waiting" : String(raw.status ?? "").startsWith("완료") ? "complete" : "waiting";
       const disposition = raw.board?.disposition ?? "visible";
       const manual = raw.board?.manual_status;
       const category = manual || (disposition === "done" ? "complete" : p.column ?? original);
       const state = manual ? `직접 변경 · ${{waiting:"대기",progress:"진행 중",complete:"완료"}[manual]}` : disposition === "done" ? "사용자가 보드에서 정리 완료" : p.decision_required ? "사용자 결정 대기" : p.waiting_on || raw.interaction?.label || (kind === "work" ? phaseText(raw.phase) : statusText(raw.status));
-      return {kind,id:raw.id,raw,p,disposition,category,state,title:p.title || raw.title || raw.name};
+      return {kind,id:raw.id,raw,p,disposition,category,state,title:kind === "ticket" ? raw.short_title || raw.title : p.title || raw.title || raw.name};
     };
-    const workCards = works.map(x => asCard("work",x)), inventoryCards = inventory.map(x => asCard("inventory",x));
-    const allCards = [...workCards, ...inventoryCards];
+    const workCards = works.map(x => asCard("work",x)), inventoryCards = (this.showInventory ? inventory : []).map(x => asCard("inventory",x));
+    const ticketCards=(data?.tickets ?? []).filter(ticket=>!this.hideSystemChecks || !ticket.is_system_check).map(ticket=>asCard("ticket",ticket));
+    const allCards = [...workCards, ...ticketCards, ...inventoryCards];
     const archived = allCards.filter(card => card.disposition === "archived");
-    const cardsInView = this.showArchived ? archived : allCards.filter(card => card.disposition !== "archived");
+    const todayStart=kstDayStart(Date.now()/1000),lastSeven=todayStart-6*86400;
+    const activityAt=card=>Math.max(Number(card.raw.updated_at ?? 0),Number(card.raw.completed_at ?? 0),Number(card.raw.created_at ?? 0));
+    const inPeriod=card=>this.period==="all" ? true : this.period==="today" ? activityAt(card)>=todayStart : this.period==="week" ? activityAt(card)>=lastSeven : card.category!=="complete" || activityAt(card)>=todayStart;
+    const teamFiltered=allCards.filter(card=>!this.selectedTeam || (card.raw.team ?? card.raw.product)===this.selectedTeam);
+    const cardsInView=(this.showArchived?archived:teamFiltered.filter(card=>card.disposition!=="archived")).filter(card=>this.showArchived||inPeriod(card));
+    this.boardCards=cardsInView;
     const completedCount = cardsInView.filter(card => card.category === "complete").length;
     const remaining = inventoryCards.filter(card => card.category !== "complete" && card.disposition !== "archived").length;
     const boardCard = card => {
       const sessions = (card.p.sessions ?? []).filter(s => s.terminal);
       const attention = card.p.attention ?? [];
-      return v_flex().id(`board-${card.kind}-${card.id}`).flex_none().min_w(0).gap(10).p(12).rounded(8).bg(t.surface)
-        .hover(el => el.bg(t.raised)).cursor_pointer().on_click(() => this.openDetail(card.kind,card.raw,card.category === "review" && card.kind === "work"))
-        .child(div().min_w(0).whitespace_normal().font_semibold().text_size(14).line_height("22px").child(display(card.title)))
-        .when(Boolean(card.p.summary) && card.p.summary !== card.title, el => el.child(words(card.p.summary.replaceAll("`", "")).text_size(13).line_height("21px").text_color(t.muted)))
-        .child(div().min_w(0).whitespace_normal().text_size(12).text_color(card.category === "review" ? t.blocked : card.category === "complete" ? t.done : t.foreground).child(card.state))
-        .when(Boolean(card.raw.board?.manual_status) && card.p.decision_required, el => el.child(words("사용자 결정은 아직 필요합니다. ‘결정하기’에서 확인하세요.").text_size(12).text_color(t.blocked)))
-        .child(h_flex().flex_wrap().gap_x(14).gap_y(6).text_size(12)
-          .child(pair("담당", card.p.owner_label || card.raw.team || "팀 총괄"))
-          .child(pair("지금", (card.p.current_activity || "현재 실행 기록 확인 중").split(" · 작업 내용: ")[0]))
-          .child(pair("세션", sessions.length ? sessions.map(s => `${s.role_label} · ${s.terminal}`).join(" / ") : "현재 설계에 연결된 세션 없음")))
-        .when(attention.length > 0, el => el.child(words(`담당자 확인 · ${attention[0].reason}`).text_size(12).text_color(t.muted)))
-        .when(card.disposition === "done", el => el.child(words("보드 정리 상태입니다. 실제 업무 완료·승인은 별도로 유지됩니다.").text_size(11).text_color(t.muted)))
-        .child(h_flex().flex_wrap().gap(6)
-          .when(Boolean(card.raw.board) && card.disposition !== "archived", el => el.child(boardStatus(card.kind, card.raw)))
-          .child(button(`open-card-${card.kind}-${card.id}`, card.p.decision_required ? "결정하기" : "자세히", () => this.openDetail(card.kind,card.raw,card.p.decision_required && card.kind === "work")))
-          .children(sessions.filter(s => s.can_focus).map(s => button(`open-session-${card.id}-${s.task}`, "세션 열기", () => run("agent.focus",{terminal:s.terminal}))))
-          .when(Boolean(card.raw.board), el => el
-            .when(card.disposition === "visible" && card.category !== "complete", x => x.child(button(`done-card-${card.kind}-${card.id}`, "정리 완료", cx => cx.spawn(async cx => this.organizeCard(card.kind,card.raw,"done",cx)), this.boardBusy)))
-            .when(card.disposition !== "archived", x => x.child(button(`archive-card-${card.kind}-${card.id}`, "보관", cx => cx.spawn(async cx => this.organizeCard(card.kind,card.raw,"archive",cx)), this.boardBusy)))
-            .when(card.disposition !== "visible", x => x.child(button(`restore-card-${card.kind}-${card.id}`, "복원", cx => cx.spawn(async cx => this.organizeCard(card.kind,card.raw,"restore",cx)), this.boardBusy)))));
+      const latest=Number(card.raw.updated_at ?? card.raw.created_at ?? 0),clockText=latest?new Date(latest*1000).toLocaleTimeString("ko-KR",{timeZone:"Asia/Seoul",hour:"2-digit",minute:"2-digit"}):"—";
+      const role=card.raw.role_label?`${card.raw.role_label} · ${card.p.owner_label||"담당자 미확인"}`:card.p.owner_label||card.raw.team_label||"배정 대기";
+      const startDrag=(e,cx)=>{this.drag={card,fromCol:card.category,at:e.position,grab:e.local_position??{x:0,y:0},x:0,y:0,moved:false,target:null};this.boardFocus.focus();cx.notify();};
+      return v_flex().id(`board-${card.kind}-${card.id}`).relative().flex_none().min_w(0).gap(6).p(9).rounded(8).bg(this.drag?.card.id===card.id?t.selected:t.surface)
+        .hover(el => el.bg(t.raised)).cursor_pointer().on_mouse_down("left",startDrag)
+        .on_mouse_move((e,cx)=>{if(!this.drag)return;const d=this.drag;if(!d.moved&&Math.hypot(e.position.x-d.at.x,e.position.y-d.at.y)<=6)return;d.moved=true;const lane=this.boardMode==="team"?(card.raw.team??card.raw.product??"팀 총괄"):null;const peers=(this.boardCards??[]).filter(item=>item.category===card.category&&(!lane||(item.raw.team??item.raw.product??"팀 총괄")===lane)).sort((left,right)=>(left.raw.board?.rank??Infinity)-(right.raw.board?.rank??Infinity)||Number(right.raw.updated_at??0)-Number(left.raw.updated_at??0));const index=peers.findIndex(item=>item.id===card.id),after=e.local_position?.y>(this.cardHeights?.[`${card.kind}-${card.id}`]??100)/2;d.target={column:card.category,lane,beforeId:after?(peers[index+1]?.id??null):card.id};cx.notify();})
+        .on_click((_e,cx)=>{cx.stop_propagation();if(Date.now()<this.justDroppedUntil)return;this.openDetail(card.kind,card.raw,card.p.decision_required);})
+        .on_size_change((size)=>{this.cardHeights={...(this.cardHeights??{}),[`${card.kind}-${card.id}`]:size.height};})
+        .child(h_flex().min_w(0).items_center().gap(5).text_size(10)
+          .child(badge(display(card.raw.team_label||card.raw.team||card.raw.product||"팀 총괄"),t.accent))
+          .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(role))
+          .child(div().flex_none().text_color(t.dim).child(clockText))
+          .when(Boolean(card.raw.board),el=>el.child(button(`quick-archive-${card.kind}-${card.id}`,card.disposition==="archived"?"↺":"✓",cx=>cx.spawn(async cx=>this.organizeCard(card.kind,card.raw,card.disposition==="archived"?"restore":"archive",cx))).on_mouse_down("left",(_e,cx)=>cx.stop_propagation()).text_size(10))))
+        .child(div().min_w(0).max_h(42).overflow_hidden().font_semibold().text_size(13).line_height("19px").child(display(card.title)))
+        .child(h_flex().min_w(0).items_center().gap(6).text_size(11)
+          .child(div().flex_1().min_w(0).truncate().text_color(card.category==="review"?t.blocked:card.category==="complete"?t.done:t.muted)
+            .child(card.category==="progress"?(card.p.current_activity||"실행 상태 확인 중"):card.category==="review"?(attention[0]?.reason||"결정이 필요합니다"):card.category==="complete"?(card.disposition==="done"?"보드 정리됨":card.raw.result_location?"✓ 결과 기록 있음":"✓ 완료 기록"):card.raw.next_action||card.p.waiting_on||"배정 대기"))
+          .when(Boolean(card.raw.linked_tickets),el=>el.child(div().flex_none().text_color(t.accent).child(`${card.raw.linked_tickets.progress} ${card.raw.linked_tickets.done}/${card.raw.linked_tickets.total}`)))
+          .children(sessions.filter(s=>s.can_focus).slice(0,1).map(s=>button(`open-session-${card.id}-${s.task}`,"세션 ↗",()=>run("agent.focus",{terminal:s.terminal})).on_mouse_down("left",(_e,cx)=>cx.stop_propagation())))
+          .when(card.p.decision_required,el=>el.child(button(`open-card-${card.kind}-${card.id}`,"결정하기",()=>this.openDetail(card.kind,card.raw,true)).on_mouse_down("left",(_e,cx)=>cx.stop_propagation())))
+          .when(card.kind==="ticket"&&card.raw.result_location,el=>el.child(button(`result-${card.id}`,"결과 보기",()=>this.openDetail(card.kind,card.raw)).on_mouse_down("left",(_e,cx)=>cx.stop_propagation())))
+          .when(!card.p.decision_required&&!sessions.some(s=>s.can_focus)&&card.kind!=="ticket",el=>el.child(button(`open-card-${card.kind}-${card.id}`,"자세히",()=>this.openDetail(card.kind,card.raw,false)).on_mouse_down("left",(_e,cx)=>cx.stop_propagation()))))
+        .when(this.drag?.moved&&this.drag.card.id===card.id,el=>el.h(0).overflow_hidden().opacity(0).transition("height",{duration:150,easing:"ease-out"}));
     };
-    const column = definition => {
-      const cards = cardsInView.filter(card => card.category === definition.id);
+    const column = (definition,lane=null) => {
+      const cards = cardsInView.filter(card => card.category === definition.id && (!lane || (card.raw.team??card.raw.product??"팀 총괄")===lane)).sort((a,b)=>(a.raw.board?.rank??Infinity)-(b.raw.board?.rank??Infinity)||Number(b.raw.updated_at??0)-Number(a.raw.updated_at??0)||String(a.id).localeCompare(String(b.id)));
       const visible = definition.id === "complete" && !this.showCompleted && !this.showArchived ? [] : cards;
-      return v_flex().id(`kanban-${definition.id}`).min_w(0).gap(10).p(8).rounded(8).bg(t.chrome)
-        .when(narrow, el => el.w_full().flex_none())
-        .when(!narrow, el => el.h_full().min_h(0).when(visible.length === 0, x => x.w(165).flex_none()).when(visible.length > 0, x => x.flex_1()))
+      const motion={duration:150,easing:"ease-out"};
+      const gap=(id,active)=>div().id(`drop-gap-${lane??"all"}-${definition.id}-${id}`).flex_none().min_w(0).h(active?88:0)
+        .overflow_hidden().rounded(8).when(this.drag?.moved,el=>el.transition("height",motion))
+        .when(active,el=>el.w_full().border_dashed().border_1().border_color(t.accent).bg(t.selected).items_center().justify_center().child("여기에 놓기"));
+      return v_flex().id(`kanban-${lane??"all"}-${definition.id}`).flex_1().min_w(260).gap(8).p(8).rounded(8).bg(t.chrome)
+        .h_full().min_h(0).on_mouse_move((_e,cx)=>{if(this.drag?.moved){this.drag.target=this.drag.target?.column===definition.id&&this.drag.target?.lane===(lane)?this.drag.target:{column:definition.id,lane:lane,beforeId:null};cx.notify();}})
         .child(h_flex().flex_none().items_center().justify_between().gap(6)
           .child(h_flex().items_center().gap(6).child(div().w(7).h(7).rounded_full().bg(definition.color)).child(div().whitespace_nowrap().font_semibold().text_size(13).child(definition.title)).child(badge(String(cards.length),cards.length ? definition.color : t.muted)))
           .when(definition.id === "complete" && cards.length > 0, el => el.child(button("toggle-completed",this.showCompleted ? "접기" : "보기",cx=>{this.showCompleted=!this.showCompleted;cx.notify();}).text_size(11))))
-        .child(v_flex().min_w(0).gap(10).when(!narrow, el => el.flex_1().min_h(0).overflow_y_scrollbar()).children(visible.map(boardCard)))
-        .when(cards.length === 0, el => el.child(words(definition.id === "review" ? "지금 결정할 요청이 없습니다." : definition.id === "progress" ? "실행 중으로 확인된 작업이 없습니다." : "이 상태의 카드가 없습니다.").text_size(12).text_color(t.muted)))
+        .child(v_flex().flex_1().min_w(0).min_h(0).gap(7).overflow_y_scrollbar()
+          .children(visible.flatMap(card=>[gap(card.id,this.drag?.moved&&this.drag.target?.column===definition.id&&this.drag.target?.lane===(lane)&&this.drag.target?.beforeId===card.id),boardCard(card)]))
+          .child(gap("end",this.drag?.moved&&this.drag.target?.column===definition.id&&this.drag.target?.lane===(lane)&&!this.drag.target?.beforeId)))
+        .when(cards.length === 0, el => el.when(this.drag?.moved,empty=>empty.child(gap("empty",true)).on_mouse_move((_e,cx)=>{this.drag.target={column:definition.id,lane:lane,beforeId:null};cx.notify();})))
+        .when(cards.length === 0&&!this.drag?.moved, el => el.child(words(definition.id === "review" ? "지금 결정할 요청이 없습니다." : definition.id === "progress" ? "실행 중으로 확인된 작업이 없습니다." : "이 상태의 카드가 없습니다.").text_size(12).text_color(t.muted)))
         .when(cards.length > 0 && !visible.length, el => el.child(words(`${cards.length}개 완료 기록을 접었습니다.`).text_size(12).text_color(t.muted)));
     };
-    const accountRow = account => {
-      const key = `account-${account.provider}-${account.account}`, open = this.expanded.has(key);
-      const usage = (value, name) => value == null ? (account.windows?.[name]?.status === "not_provided" ? "미제공" : "확인 필요") : `${display(value)}%${account.windows?.[name]?.status === "stale" ? "*" : ""}`;
-      const usageCell = (label, value, name) => {
-        const measured = typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100;
-        const stale = account.windows?.[name]?.status === "stale";
-        const color = stale ? t.dim : value >= 90 ? t.ansi1 : value >= 70 ? t.ansi3 : t.ansi2;
-        return h_flex().w(210).flex_none().gap(6).items_center()
-          .child(div().w(36).flex_none().text_color(t.muted).child(label))
-          .when(measured, el => el.child(div().w(92).h(10).flex_none().rounded(2).bg(t.raised)
-            .child(div().w(92 * value / 100).h(10).rounded(2).bg(color))))
-          .child(div().flex_1().min_w(0).truncate().text_color(measured ? color : t.foreground).child(usage(value, name)));
-      };
-      const meta = [account.coverage == null ? null : `측정 범위 · ${display(account.coverage)}`, account.reason == null ? null : `사유 · ${display(account.reason)}`, account.action == null ? null : `요청 · ${display(account.action)}`].filter(Boolean).join(" · ");
-      return v_flex().id(key).min_w(0).gap(2).py(2).px(8).rounded(6).bg(t.surface).cursor_pointer()
-        .on_click((_e, cx) => { open ? this.expanded.delete(key) : this.expanded.add(key); cx.notify(); })
-        .child(h_flex().min_h(24).flex_wrap().gap(8).items_center().text_size(11)
-          .child(h_flex().w(114).flex_none().gap(6).items_center()
-            .when(["codex", "claude"].includes(account.provider), el => el.child(image(`icons/${account.provider}.svg`).w(16).h(16).flex_none()))
-            .child(div().flex_1().min_w(0).truncate().font_semibold().child(display(account.label))))
-          .child(usageCell("5시간", account.five_hour, "five_hour"))
-          .child(usageCell("주간", account.weekly, "weekly"))
-          .child(div().flex_1().min_w(0).truncate().child(display(account.coverage ?? statusText(account.status))))
-          .child(div().w(92).flex_none().truncate().text_color(t.dim).child(duration(account.age))))
-        .when(open && Boolean(meta), el => el.child(div().text_size(10).text_color(t.muted).child(meta)))
-        .when(Boolean(this.usageMessage), el => el.child(div().text_size(10).text_color(/⚠|실패|오류/i.test(this.usageMessage) ? t.blocked : t.muted).child(this.usageMessage)));
-    };
-    const accountSections = [
-      { id: "team", title: "회사", rows: accounts.filter(account => account.account === "team") },
-      { id: "personal", title: "개인", rows: accounts.filter(account => account.account === "personal") },
-      { id: "other", title: "기타 계정", rows: accounts.filter(account => !["team", "personal"].includes(account.account)) }
-    ].filter(section => section.rows.length > 0).map(section =>
-      v_flex().id(`account-section-${section.id}`).w_full().flex_none().gap(3).p(6).rounded(6).border_1().border_color(t.border)
-        .child(div().whitespace_nowrap().font_semibold().text_size(12).text_color(t.foreground).child(section.title))
-        .children(section.rows.map(accountRow)));
     const actionRows = (data?.actions ?? []).map(action => {
       const failed = /실패|오류|fail|error/i.test(`${action.status ?? ""} ${action.message ?? ""}`);
       return h_flex().gap(8).p(6).rounded(6).bg(t.surface).text_size(11)
@@ -1095,41 +1175,38 @@ export default class TeamOperations extends View {
         .child(words(action.message).flex_1().min_w(0));
     });
     // No horizontal scroll: columns share the window width (min_w 0) or stack vertically when it is narrow.
-    const board = (narrow ? v_flex().id("operations-kanban").w_full().flex_none().gap(8) : h_flex().id("operations-kanban").w_full().min_w(0).h(Math.max(220, (this.viewHeight ?? 700) - (this.headerHeight ?? 48) - (this.controlsHeight ?? 150) - (this.accountHeight ?? 40) - 28)).flex_none().min_h(0).items_stretch().gap(8))
-      .children(boardColumns.map(column));
-    const accountArea = v_flex().id("account-area").on_size_change((size,cx)=>{ const h=Math.ceil(size.height); if(this.accountHeight!==h){this.accountHeight=h;cx.notify();} }).w_full().h(this.showAccounts ? 250 : 40).flex_none().min_h(0).gap(6).overflow_y_scrollbar()
-      .child(h_flex().flex_none().justify_between().items_center()
-        .child(button("toggle-accounts", this.showAccounts ? "계정 사용량 접기" : "계정 사용량 보기", cx => { this.showAccounts = !this.showAccounts; cx.notify(); }))
-        .child(h_flex().flex_1().min_w(0).gap(10).px(12).text_size(10)
-          .child(div().text_color(t.ansi2).child("<70%"))
-          .child(div().text_color(t.ansi3).child("70–<90%"))
-          .child(div().text_color(t.ansi1).child("≥90%"))
-          .child(div().text_color(t.dim).child("지난 기록")))
-        .child(button("refresh-usage", this.usageBusy || data?.usage_refreshing ? "사용량 갱신 중" : "사용량 갱신", cx => cx.spawn(async cx => this.refreshUsage(cx)), this.usageBusy || data?.usage_refreshing).text_size(11)))
-      .when(Boolean(this.usageMessage), x => x.child(div().flex_none().text_size(10).text_color(/⚠|실패|오류/i.test(this.usageMessage) ? t.blocked : t.muted).child(this.usageMessage)))
-      .children(this.showAccounts ? accountSections : []);
+    const laneTeams=[...new Set(cardsInView.map(card=>card.raw.team??card.raw.product??"팀 총괄"))];
+    const board = div().id("operations-kanban").relative().track_focus(this.boardFocus).w_full().min_w(4*260+24).flex_1().min_h(0).overflow_x_scrollbar()
+      .on_mouse_down("left",(e,cx)=>{if(this.drag){this.drag.x=e.local_position?.x??0;this.drag.y=e.local_position?.y??0;cx.notify();}})
+      .on_key_down((e,cx)=>{if(e.keystroke==="escape"&&this.drag){this.drag=null;cx.notify();}})
+      .on_mouse_move((e,cx)=>{const d=this.drag;if(!d)return;if(!d.moved&&Math.hypot(e.position.x-d.at.x,e.position.y-d.at.y)<=6)return;d.moved=true;d.x=e.local_position?.x??d.x;d.y=e.local_position?.y??d.y;cx.notify();})
+      .when(this.boardMode==="status",el=>el.child(h_flex().h_full().min_h(0).min_w(4*260+24).items_stretch().gap(8).children(boardColumns.map(def=>column(def)))))
+      .when(this.boardMode==="team",el=>el.child(v_flex().size_full().min_w(4*260+24).gap(8).overflow_y_scrollbar()
+        .children(laneTeams.map(team=>v_flex().id(`lane-${team}`).min_w(4*260+24).flex_none().gap(4)
+          .child(h_flex().h(24).items_center().child(badge(team,t.accent)))
+          .child(h_flex().id(`lane-columns-${team}`).h(240).min_w(4*260+24).items_stretch().gap(8).children(boardColumns.map(def=>column(def,team))))))))
+      .when(Boolean(this.drag?.moved),el=>el.child(v_flex().id("kanban-drag-ghost").absolute().left(this.drag.x-this.drag.grab.x).top(this.drag.y-this.drag.grab.y).w(260).min_h(72).p(10).rounded(8).border_1().border_color(t.accent).bg(t.selected).shadow_lg()
+        .child(div().font_semibold().child(this.drag.card.title)).child(badge(({waiting:"대기 이동",progress:"진행 이동",review:"결정 필요",complete:"완료 정리",archived:"보관"})[this.drag.target?.column]??"이동",t.accent))));
     const boardControls = v_flex().id("board-controls").w_full().flex_none().gap(6)
       .on_size_change((size,cx)=>{const h=Math.ceil(size.height);if(this.controlsHeight!==h){this.controlsHeight=h;cx.notify();}})
-        .child(v_flex().w_full().flex_none().gap(3)
-          .child(h_flex().flex_wrap().gap(12).text_size(12).font_semibold()
-            .child(statusControl("blocked"))
-            .child(statusControl("working"))
-            .child(statusControl("done"))
-            .child(statusControl("idle"))
-            .when(unknownTeams > 0, el => el.child(badge(`? 미확인 ${unknownTeams}`, t.unknown)))
-            .child(badge(`총괄 · ${coordinatorStateText}`, coordinator?.state === "live" ? t.muted : coordinator?.state === "recovering" ? t.working : t.blocked)))
-          .when(Boolean(coordinator?.reason) && !(coordinator?.state === "live" && ["GUI 체크포인트에서 새 총괄 대화를 열었습니다. 제품 업무는 자동 재개하지 않았습니다.", "GUI 체크포인트를 사용하는 총괄입니다."].includes(coordinator.reason)), el => el.child(words(`총괄 상태 · ${display(coordinator.reason)}`).text_size(11).text_color(t.muted))))
-        .when(waiting.length > 0, el => el.child(v_flex().w_full().flex_none().gap(2)
-          .child(div().whitespace_nowrap().text_size(11).font_semibold().text_color(t.muted).child("대기 이유"))
-          .children(waiting.map((reason, index) => words(`⚠ ${index + 1} · ${reason}`).text_size(11).text_color(t.dim)))))
-        .when(Boolean(this.coordinatorMessage) && (coordinator?.state !== "live" || /⚠|실패|오류/i.test(this.coordinatorMessage)), el => el.child(div().flex_none().text_size(11).text_color(/⚠|실패|오류/i.test(this.coordinatorMessage) ? t.blocked : t.muted).child(this.coordinatorMessage)))
-        .when(actionRows.length > 0, el => el.child(v_flex().flex_none().gap(3).children(actionRows)))
-        .child(v_flex().flex_none().gap(3)
-          .child(div().whitespace_nowrap().text_size(11).font_semibold().text_color(t.muted).child("작업 목록"))
-          .child(h_flex().flex_wrap().items_center().gap(10).text_size(12).text_color(t.muted)
-            .child(div().child(`활성 ${allCards.filter(c => c.category !== "complete" && c.disposition !== "archived").length} · 완료 기록 ${completedCount}`))
-            .child(button("toggle-archived",this.showArchived ? "활성 카드로 돌아가기" : `보관된 카드 ${archived.length}`,cx=>{this.showArchived=!this.showArchived;cx.notify();}))
-            .child(div().child("정리 완료·보관은 실제 업무와 승인 상태를 바꾸지 않습니다."))))
+        .child(h_flex().flex_wrap().items_center().gap(6)
+          .children([["today-active","오늘 · 활성"],["today","오늘 한 일만"],["week","최근 7일"],["all","전체"]].map(([id,label])=>button(`period-${id}`,`${this.period===id?"● ":""}${label}`,cx=>{this.period=id;this.showCompleted=true;cx.notify();})))
+          .child(button("toggle-board-mode",this.boardMode==="status"?"팀별 스윔레인":"상태별 보드",cx=>{this.boardMode=this.boardMode==="status"?"team":"status";cx.notify();}))
+          .child(button("toggle-inventory",this.showInventory?"초기 구축 항목 ✓":"초기 구축 항목",cx=>{this.showInventory=!this.showInventory;cx.notify();}))
+          .child(button("toggle-system-checks",this.hideSystemChecks?"검증 티켓 숨김 ✓":"검증 티켓 표시",cx=>{this.hideSystemChecks=!this.hideSystemChecks;cx.notify();}))
+          .child(button("toggle-archived",this.showArchived?"보관함 보기 종료":`보관함 ${archived.length}`,cx=>{this.showArchived=!this.showArchived;cx.notify();})
+            .on_mouse_move((_e,cx)=>{if(this.drag?.moved){this.drag.target={column:"archived",beforeId:null};cx.notify();}})))
+        .child(h_flex().flex_wrap().items_center().gap(6).text_size(11)
+          .child(badge(`오늘 완료 ${allCards.filter(card=>card.category==="complete"&&activityAt(card)>=todayStart).length}`,t.done))
+          .child(badge(`진행 중 ${allCards.filter(card=>card.category==="progress").length}`,t.working))
+          .child(badge(`내 결정 필요 ${allCards.filter(card=>card.category==="review").length}`,t.blocked))
+          .child(badge(`배정 대기 ${allCards.filter(card=>card.category==="waiting").length}`,t.idle)))
+        .child(h_flex().flex_wrap().items_center().gap(5).children((data?.resource_lanes??[]).map(lane=>h_flex().items_center().gap(3)
+          .child(button(`team-resource-${lane.team}`,`${this.selectedTeam===lane.team?"● ":""}${lane.label} · 작업 ${lane.working_count} · 유휴 ${lane.idle_eligible_count}${lane.attention_count?` · ⚠${lane.attention_count}`:""}`,cx=>{this.selectedTeam=this.selectedTeam===lane.team?null:lane.team;cx.notify();}))
+          .children((lane.active_terminals??[]).slice(0,2).map(slot=>button(`focus-${lane.team}-${slot.terminal}`,"↗",()=>run("agent.focus",{terminal:slot.terminal})))))))
+        .when(data?.synchronization?.state === "partial",el=>el.child(words(`⚠ 일부 동기화 미확인 · ${data.synchronization.reason||"다음 갱신에서 다시 확인합니다"}`).text_size(11).text_color(t.blocked)))
+        .when(coordinator?.state !== "live" && Boolean(coordinator?.reason),el=>el.child(words(`총괄 상태 · ${display(coordinator.reason)}`).text_size(11).text_color(t.blocked)))
+        .when(Boolean(this.coordinatorMessage) && /⚠|실패|오류/i.test(this.coordinatorMessage),el=>el.child(words(this.coordinatorMessage).text_size(11).text_color(t.blocked)))
         .when(Boolean(this.boardMessage),el=>el.child(words(this.boardMessage).text_size(12).text_color(t.muted)));
     const manual = this.manual;
     const manualText = manual?.phase === "running" ? (manual.joined ? "새로고침 중 · 진행 중이던 자동 갱신 결과를 기다립니다" : "새로고침 중")
@@ -1152,8 +1229,9 @@ export default class TeamOperations extends View {
       .when(Boolean(this.configError), el => el.child(div().px(12).py(7).text_color(t.blocked).child(`로컬 backend 설정을 읽을 수 없습니다: ${this.configError}`)))
       .when(this.busy && !data, el => el.child(div().p(14).text_color(t.dim).child("운영 현황을 읽는 중입니다.")))
       .child(v_flex().id("operations-content").w_full().min_w(0).flex_1().min_h(0).gap(6).p(8).when(narrow, el => el.overflow_y_scrollbar())
+        .on_mouse_up("left",(_e,cx)=>{if(this.drag?.moved)cx.spawn(async cx=>this.dropBoardCard(cx));else this.drag=null;cx.notify();})
+        .on_hover((inside,cx)=>{if(inside||!this.drag)return;this.drag=null;cx.notify();})
         .child(boardControls)
-        .child(board)
-        .child(accountArea));
+        .child(board));
   }
 }

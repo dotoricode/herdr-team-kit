@@ -11,8 +11,8 @@ from teamkit.queue_view import board
 from teamkit import queue_view
 
 
-def organize(*args):
-    return queue_view.organize(*args)
+def organize(*args,**kwargs):
+    return queue_view.organize(*args,**kwargs)
 from teamkit.tickets import TicketStore, digest
 
 
@@ -54,6 +54,16 @@ class QueueOrganizationTests(unittest.TestCase):
         organize('config', self.state, 'ONE', 'restore', 'request-three', job['board_state']['revision'])
         self.assertIsNone(board('config', self.state)['jobs'][0]['board_state']['manual_status'])
         self.assertEqual(original, self.payload)
+
+    def test_reorder_rank_only_changes_private_board_journal(self):
+        job=board('config',self.state)['jobs'][0]
+        original=self.state.read_bytes()
+        result=organize('config',self.state,'ONE','reorder','request-rank-one',job['board_state']['revision'],rank=4.25)
+        self.assertEqual(4.25,result['rank'])
+        self.assertEqual(original,self.state.read_bytes())
+        self.assertEqual('running',board('config',self.state)['jobs'][0]['phase'])
+        with self.assertRaisesRegex(ValueError,'같은 요청 ID'):
+            organize('config',self.state,'ONE','reorder','request-rank-one',result['revision'],rank=5)
 
     def test_attachment_summary_is_one_line_but_original_survives(self):
         text='<image name=[Image #1] path="/fixture/paste.png">\n</image>\n[Image #1]\n\n각 스페이스별로 역할이 뭐야?'

@@ -183,6 +183,16 @@ class BoardJournalTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'바뀌었습니다'):
             board_action(self.state,changed,'restore','request-0002',hidden['revision'])
 
+    def test_reorder_after_semantic_change_does_not_replay_old_archive(self):
+        self.action('archive')
+        changed=copy.deepcopy(self.card);changed['title']='새 업무 버전'
+        stale=board_state(self.state,changed)
+        self.assertEqual(stale['disposition'],'visible');self.assertTrue(stale['stale'])
+        saved=board_action(self.state,changed,'reorder','request-fresh-rank-01',stale['revision'],rank=250)
+        self.assertEqual(saved['disposition'],'visible')
+        self.assertIsNone(saved['manual_status'])
+        self.assertEqual(saved['rank'],250)
+
     def test_interrupted_write_is_retryable_without_replaying_business_work(self):
         original=self.state.read_bytes();revision=board_state(self.state,self.card)['revision']
         with patch('teamkit.app_board.os.replace',side_effect=OSError('interrupted')):
@@ -207,6 +217,28 @@ class BoardJournalTests(unittest.TestCase):
         self.assertEqual(semantic_token(value),semantic_token(changed))
         changed['condition']='다른 완료 조건'
         self.assertNotEqual(semantic_token(value),semantic_token(changed))
+
+    def test_reorder_persists_finite_rank_without_changing_manual_column(self):
+        progress=self.action('progress')
+        reordered=board_action(self.state,self.card,'reorder','request-rank-0001',progress['revision'],rank=12.5)
+        self.assertEqual(reordered['rank'],12.5)
+        self.assertEqual(reordered['manual_status'],'progress')
+        self.assertEqual(board_state(self.state,self.card),reordered)
+        self.assertEqual(board_action(self.state,self.card,'reorder','request-rank-0001',progress['revision'],rank=12.5),reordered)
+
+    def test_reorder_rank_validation_and_idempotency_include_rank(self):
+        for invalid in (True,float('inf'),float('nan'),'1'):
+            with self.subTest(rank=invalid),self.assertRaises(ValueError):
+                board_action(self.state,self.card,'reorder','request-rank-0001',board_state(self.state,self.card)['revision'],rank=invalid)
+        revision=board_state(self.state,self.card)['revision']
+        board_action(self.state,self.card,'reorder','request-rank-0001',revision,rank=1)
+        with self.assertRaisesRegex(ValueError,'같은 요청 ID'):
+            board_action(self.state,self.card,'reorder','request-rank-0001',revision,rank=2)
+
+    def test_restore_clears_rank(self):
+        ranked=board_action(self.state,self.card,'reorder','request-rank-0001',board_state(self.state,self.card)['revision'],rank=3)
+        restored=board_action(self.state,self.card,'restore','request-rank-0002',ranked['revision'])
+        self.assertIsNone(restored['rank'])
 
 
 if __name__=='__main__':unittest.main()
