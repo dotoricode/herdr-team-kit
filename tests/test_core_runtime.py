@@ -160,12 +160,22 @@ class CoreTests(unittest.TestCase):
         self.assertIn('t8',sends[0]);self.assertEqual(sends[0][-1],'one task; $(never shell)')
         self.assertIn('--if',sends[0]);self.assertEqual(result['wait']['reason'],'status')
 
-    def test_live_accept_binds_owner_task_and_exact_attempt_before_send(self):
+    def test_unconfirmed_live_accept_preserves_previous_owner_and_attempt_labels(self):
+        self.task['runtime'].update(workspace_live=True,resource_attempt='new-attempt')
+        self.hc.agent['labels'].update({'teamkit.owner':'previous','teamkit.attempt':'previous-attempt'})
+        before=copy.deepcopy(self.hc.agent['labels'])
+        self.hc.send={'started':False,'turn':1}
+        with self.assertRaises(KitError):CoreRuntime(self.task).accept('tk-owner','bounded file job')
+        self.assertEqual(before,self.hc.agent['labels'])
+
+    def test_live_accept_binds_owner_task_and_exact_attempt_after_acceptance(self):
         self.task['runtime'].update(workspace_live=True,resource_attempt='attempt-one')
         self.hc.agent['labels']['teamkit.owner']='previous'
         CoreRuntime(self.task).accept('tk-owner','bounded file job')
         self.assertEqual('attempt-one',self.hc.agent['labels'].get('teamkit.attempt'))
         self.assertEqual('owner',self.hc.agent['labels']['teamkit.owner'])
+        verbs=[a[1] for a,_ in self.hc.calls]
+        self.assertLess(verbs.index('send'),verbs.index('label'))
 
     def test_accept_confirms_input_without_waiting_for_long_work(self):
         self.hc.send={'started':True,'turn':1}

@@ -280,23 +280,23 @@ class CoreRuntime:
         native = self._native(name, ready=True)
         if before_send is not None:
             before_send()
-        if (self.target or {}).get('workspace_live'):
-            # The durable attempt and host send fence precede this relabel.
-            self._native(name, ready=True)
-            _call('label', '--json', native['address'], 'teamkit.owner='+self.task['owner'],
-                  'teamkit.task='+self.task['id'], 'teamkit.name='+name,
-                  'teamkit.attempt='+self.target['resource_attempt'])
-            self.target['workspace_live'] = False
-            native = self._native(name, ready=True)
-        elif (self.target or {}).get('resource_attempt'):
-            _call('label', '--json', native['address'], 'teamkit.attempt='+self.target['resource_attempt'])
-            native = self._native(name, ready=True)
+        # Recheck after the durable send fence, without changing prior ownership.
+        native = self._native(name, ready=True)
         condition = ['--if', 'idle'] if native['status']['state'] == 'idle' else []
         sent = _call('send', '--json', *condition, native['address'], text, timeout=30)
         if (sent.get('started') is not True or type(sent.get('turn')) is not int
                 or sent['turn'] < native.get('turn', 0)):
             raise RuntimeError('Core input acceptance unconfirmed; inspect before further input')
-        # An input can already be working here. Recheck identity, not readiness.
+        # Bind only a confirmed input on the same observed process. An uncertain
+        # send must preserve the previous owner's labels as well as its turn.
+        self._native(name)
+        if (self.target or {}).get('workspace_live'):
+            _call('label', '--json', native['address'], 'teamkit.owner='+self.task['owner'],
+                  'teamkit.task='+self.task['id'], 'teamkit.name='+name,
+                  'teamkit.attempt='+self.target['resource_attempt'])
+            self.target['workspace_live'] = False
+        elif (self.target or {}).get('resource_attempt'):
+            _call('label', '--json', native['address'], 'teamkit.attempt='+self.target['resource_attempt'])
         self._native(name)
         return {'accepted': True, 'terminal': native['address'],
                 'native_pid': native['foreground']['pid'],
