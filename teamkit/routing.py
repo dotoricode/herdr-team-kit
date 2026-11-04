@@ -84,6 +84,12 @@ def execution_preference(config):
 
 def execution_candidates(config, task, role, now):
     """Return ordered flexible candidates, or None for role-fixed execution."""
+    from .allocation import usage_only, profile_candidates
+    cls = task.get('classification', {'kind':'general', 'risks':[]})
+    if (usage_only(config) and task.get('role') in ('leader','implementer')
+            and not task.get('user_decision') and not task.get('team_dispatch_team')
+            and cls['kind'] in ('general','small') and not cls['risks']):
+        return profile_candidates(config, now)
     constraint = task.get('execution_constraint')
     if constraint is not None:
         if (not isinstance(constraint, dict) or set(constraint) != {'provider', 'account'}

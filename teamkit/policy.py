@@ -9,6 +9,13 @@ CODEX_QUOTA_SOURCE = 'codex-native-quota'
 QUOTA_WINDOWS = ('five_hour', 'weekly')
 
 
+def allocation_order(now):
+    weekend = datetime.fromtimestamp(now, ZoneInfo('Asia/Seoul')).weekday() >= 5
+    if weekend:
+        return (('claude','personal'), ('codex','personal'), ('claude','team'), ('codex','team'))
+    return (('claude','team'), ('claude','personal'), ('codex','team'), ('codex','personal'))
+
+
 def number(value):
     return type(value) in (int, float) and math.isfinite(value)
 

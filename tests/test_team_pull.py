@@ -17,10 +17,14 @@ class TeamPullTests(unittest.TestCase):
         self.config.write_text(json.dumps(config))
         return config
 
-    def test_company_first_even_when_weekend_rule_prefers_personal(self):
+    def test_kst_schedule_overrides_old_account_schedule(self):
         config = self.usage()
         config['account_selection'] = {'timezone':'Asia/Seoul', 'weekdays':['personal','team'], 'weekends':['personal','team']}
-        self.assertEqual(['team','team','personal','personal'], [x['account'] for x in allocation.profile_candidates(config)])
+        from datetime import datetime
+        weekday = datetime.fromisoformat('2026-11-04T00:00:00+09:00').timestamp()
+        weekend = datetime.fromisoformat('2026-11-07T00:00:00+09:00').timestamp()
+        self.assertEqual(['team','personal','team','personal'], [x['account'] for x in allocation.profile_candidates(config, weekday)])
+        self.assertEqual(['personal','personal','team','team'], [x['account'] for x in allocation.profile_candidates(config, weekend)])
 
     def test_candidates_exclude_other_team_in_usage_mode(self):
         self.usage()

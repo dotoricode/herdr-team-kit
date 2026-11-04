@@ -1,4 +1,8 @@
 """Optional usage-based allocation, independent of role/model routing."""
+import time
+from .policy import allocation_order
+
+
 def usage_only(config):
     value = config.get('operations', {}).get('allocation_policy', 'role')
     if value not in ('role', 'usage'):
@@ -6,11 +10,11 @@ def usage_only(config):
     return value == 'usage'
 
 
-def profile_candidates(config):
+def profile_candidates(config, now=None):
     return [dict(provider=provider, account=account, model=pr['model'],
                  effort=pr.get('effort', 'medium'))
-            for account in ('team', 'personal')
-            for provider in ('claude', 'codex') if provider in config['profiles']
+            for provider, account in allocation_order(time.time() if now is None else now)
+            if provider in config['profiles'] and account in config['profiles'][provider]
             for pr in [config['profiles'][provider][account]]]
 
 

@@ -361,7 +361,9 @@ def plan(config, state, team):
     if config.get('operations',{}).get('allocation_policy') != 'usage':return None
     store=Store(state,read_only=True)
     try:
-        ordered = sorted(executors(state), key=lambda actor: (actor['account'] != 'team', actor['provider'] != 'claude'))
+        from .allocation import profile_candidates
+        pairs = [(x['provider'], x['account']) for x in profile_candidates(config)]
+        ordered = sorted(executors(state), key=lambda actor: pairs.index((actor['provider'], actor['account'])))
         for actor in ordered:
             if actor['product']!=team:continue
             task=store.get(actor['task'])
