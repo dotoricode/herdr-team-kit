@@ -2,10 +2,38 @@
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import stat
 import time
 from datetime import datetime
+
+
+def _references_result(text, artifact):
+    path = Path(artifact)
+    canonical = path.resolve(strict=True)
+    for candidate in {str(path.absolute()), str(canonical)}:
+        pattern = r"(?:^|[\s(<\[\x60\x22\x27])" + re.escape(candidate) + r"(?=$|[\s)>\]\x60\x22\x27]|[.,:;](?=\s|$))"
+        if re.search(pattern, text):
+            return True
+    # Native final reports can introduce a directory followed by an explicit file list.
+    # A bare filename elsewhere is insufficient to identify the result.
+    directory = None
+    for line in text.splitlines():
+        heading = re.fullmatch(r'Files are in (/.+):', line.strip())
+        if heading:
+            directory = Path(heading.group(1))
+            continue
+        if directory is None or not line.strip():
+            continue
+        entry = re.fullmatch(r'- (?:`([^`/]+)`|([^/]+))', line.strip())
+        if not entry:
+            directory = None
+            continue
+        name = entry.group(1) or entry.group(2)
+        if (directory/name).resolve() == canonical:
+            return True
+    return False
 
 
 def _author(packet, task, job, config):
@@ -54,7 +82,7 @@ def _author(packet, task, job, config):
             or found.get('type') != 'assistant' or message.get('role') != 'assistant'
             or message.get('stop_reason') != 'end_turn' or message.get('model') != task.get('model')
             or (found.get('sessionId') or found.get('session_id')) != session
-            or Path(packet['result_artifact']).name not in text):
+            or not _references_result(text, packet['result_artifact'])):
         raise ValueError('authorship, result reference or original request chronology differs')
     return dict(**claim, authored_at=at, record=found, provider=task['provider'], model=task['model'], owner=task['owner'], task=task['id'])
 

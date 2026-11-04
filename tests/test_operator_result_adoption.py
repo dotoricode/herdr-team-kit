@@ -152,6 +152,29 @@ class AdoptionTests(fixtures.PoolControlTests):
         with self.assertRaisesRegex(ValueError,'chronology'):self.adopt(actor,job,evidence)
 
 
+    def test_different_directory_same_basename_cannot_reuse_author(self):
+        actor,job,path,packet,evidence=self.packet()
+        other=self.root/'unrelated'/Path(packet['result_artifact']).name
+        other.parent.mkdir();other.write_text('An unrelated result with the same filename.')
+        packet['result_artifact']=str(other)
+        packet['artifacts']=[dict(path=str(other),sha256=hashlib.sha256(other.read_bytes()).hexdigest())]
+        evidence.write_text(json.dumps(packet))
+        original=path.read_bytes()
+        with self.assertRaisesRegex(ValueError,'result reference'):self.adopt(actor,job,evidence)
+        self.assertEqual(original,path.read_bytes())
+
+    def test_explicit_directory_with_following_filename_binds_exact_path(self):
+        actor,job,path,packet,evidence=self.packet()
+        transcript=Path(packet['authorship']['transcript'])
+        row=json.loads(transcript.read_text())
+        artifact=Path(packet['result_artifact'])
+        row['message']['content']=[dict(type='text',text='Files are in '+str(artifact.parent)+':\n- '+artifact.name+'\n- evidence')]
+        raw=json.dumps(row);transcript.write_text(raw+'\n')
+        packet['authorship']['record_sha256']=hashlib.sha256(raw.encode()).hexdigest()
+        evidence.write_text(json.dumps(packet))
+        self.assertEqual('completed',self.adopt(actor,job,evidence)['phase'])
+
+
 def load_tests(loader, tests, pattern):
     import unittest
     return unittest.TestSuite(AdoptionTests(name) for name in AdoptionTests.__dict__ if name.startswith('test_'))

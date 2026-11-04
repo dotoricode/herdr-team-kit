@@ -269,6 +269,6 @@ usage 배정 모드의 legacy pool 계획도 현재 팀의 ready workspace actor
 
 증거 packet은 request_id, request_record_sha256(원 요청 파일 전체), request_digest(원문), work_id, owner, attempt, writer_stopped=true, operator_reference, verification(완료 조건별 확인 목록), completion_requirements(원 값 그대로), result_artifact, artifacts(path·sha256), authorship(transcript·record_sha256·timestamp·session_id)를 포함합니다. work_id가 있는 요청은 result_metadata에 같은 artifacts에 포함된 결과 JSON 경로를 지정합니다. 원 수신 터미널이 재시작됐다면 lineage_event_seq로 소유권·상태·대화 보존 사건을 지정합니다.
 
-공식 경로는 원 요청 SHA·원문·범위·결과 해시, 계정 프로필의 실제 Claude 대화에서 작성된 assistant end_turn 기록, 작성 시각과 claim 이력, 현재 ready owner·attempt·native PID와 재개한 같은 대화, 활성 예약·쓰기 및 하위 실행 부재를 대조합니다. 현재 터미널의 다른 미전송 입력은 읽거나 제출·삭제하지 않습니다. 옛 터미널이 목록에서 없어도 재시작 이력과 현재 동일 대화가 입증되면 수령할 수 있지만, 옛 터미널이 아직 live이면 거절합니다. 일반 DB나 손상된 관측을 완료로 해석하지 않습니다.
+공식 경로는 원 요청 SHA·원문·범위·결과 해시, 계정 프로필의 실제 Claude 대화에서 작성된 assistant end_turn 기록, 작성 시각·정확한 결과 절대 경로(또는 명시된 디렉터리와 바로 뒤 파일 목록)·claim 이력, 현재 ready owner·attempt·native PID와 재개한 같은 대화, 활성 예약·쓰기 및 하위 실행 부재를 대조합니다. 현재 터미널의 다른 미전송 입력은 읽거나 제출·삭제하지 않습니다. 옛 터미널이 목록에서 없어도 재시작 이력과 현재 동일 대화가 입증되면 수령할 수 있지만, 옛 터미널이 아직 live이면 거절합니다. 일반 DB나 손상된 관측을 완료로 해석하지 않습니다.
 
 원 요청과 증거 사본, 작성자 기록, 운영자 권한, 원 phase·receiver 및 artifact SHA는 operator_result_adoption 감사 기록으로 보존하며 원 수신·전달·제출 기록은 바꾸지 않습니다. 이는 과거 완료한 읽기 전용 결과를 받는 처리이며 현재 PR head를 다시 검증하거나 외부 게시를 승인하지 않습니다. Codex 등 다른 대화 형식은 이번 경로에서 지원하지 않습니다.
