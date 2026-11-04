@@ -421,9 +421,14 @@ def renew_registration(config_path,state,team,terminal,pid,owner,expected_digest
                   'report the error. Do not execute product work.\n'+shlex.join(command))
             def guard():
                 latest=next((r for r in rows(queue.db) if r['terminal']==terminal),None)
-                if (not latest or latest['phase']!='registering' or latest['nonce']!=nonce
-                        or time.time()>latest['expires_at']):
-                    raise ValueError('workspace renewal changed or expired before delivery')
+                if not latest or latest['phase']!='registering' or latest['nonce']!=nonce:
+                    raise ValueError('workspace renewal changed before delivery')
+                if time.time()>latest['expires_at']:
+                    with queue.transaction():
+                        latest['phase']='expired_before_delivery'
+                        latest['renewal']['outcome']='not_sent_expired'
+                        save(queue.db,latest)
+                    raise ValueError('workspace renewal expired before delivery')
                 after=runtime._native(actor['task'],ready=True)
                 verify_actor(config,actor,after)
                 screen=_call('read','--json',terminal)

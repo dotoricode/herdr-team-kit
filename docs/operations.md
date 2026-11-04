@@ -260,3 +260,5 @@ usage 배정 모드의 legacy pool 계획도 현재 팀의 ready workspace actor
 운영자는 `pool workspace-renew --team TEAM --terminal TERMINAL --expected-pid PID --expected-owner OWNER --registration-digest DIGEST --operator-approved --reason REASON`으로 정확한 만료 awaiting_receipt 등록만 복구할 수 있습니다. 과거 delivery가 확정 accepted이고 현재 같은 PID/owner가 idle이며 원 등록 턴이 끝났고, 수신된 actor task·제품 attempt·실행 lease·진행 중 legacy 전달이 없어야 합니다. 이전 기록·nonce·delivery는 history에 보존하고 등록만 같은 owner의 새 nonce/5분 challenge로 바꿉니다. 이전 업무·완료는 승계하지 않습니다. 기존 전달 결과 불명이나 새 복구 전달 결과 불명이면 다시 보내지 않습니다.
 
 새 안내는 제품 업무 없이 exact workspace-receipt 명령만 한 번 요청합니다. 원 직원이 자신의 세션에서 그 정확한 명령의 샌드박스 밖 1회 실행만 on-request 승인을 요청해야 합니다. 전체 샌드박스 해제·설정 변경·터미널 위장·운영자 대행 수신·명령 변경·실패 후 반복은 허용하지 않습니다. 승인 거부나 실패이면 중지하고 원인을 보고합니다. 실제 새 argv와 승인 이유·허용 범위는 전달 전 registry의 renewal.approval_scope에 남고 성공 반환에도 제공됩니다. 이 승인은 PR 작업·수정·댓글·머지를 포함하지 않습니다.
+
+복구 안내도 실제 입력 전달 전 callback에서 만료를 다시 확인합니다. 이 지점의 만료는 transport 호출 전임을 보장하므로 expired_before_delivery/not_sent_expired로 기록하며 운영자의 새 명시 등록만 허용합니다. transport가 시작된 뒤의 오류·결과 불명은 이 상태로 바꾸지 않으며 원등록 결과를 조사하기 전 재등록·재갱신하지 않습니다.
