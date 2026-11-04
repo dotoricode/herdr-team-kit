@@ -67,6 +67,22 @@ class LiveAllocationTests(fixtures.WorkspaceTests):
 
 
 class ReplacedAttemptTests(unittest.TestCase):
+    def test_dead_pid_of_unconfirmed_delivery_releases_only_that_attempt(self):
+        import test_operations as fixtures
+        fixtures.OperationsTest.setUp(self)
+        fixtures.OperationsTest.enqueue(self,'UNKNOWN')
+        queue=ws.TicketStore(self.state);self.addCleanup(queue.close)
+        actor=dict(self.runtime.executor,task='fixture',runtime={'name':'fixture'})
+        attempt=queue.reserve('UNKNOWN',actor,{},self.runtime.observation())
+        queue.delivery(attempt['id'],False,{'reason':'acceptance was not confirmed'})
+        runtime=NativeRuntime(__import__('json').loads(self.config.read_text()),self.state)
+        from teamkit.operations import reconcile
+        with patch('teamkit.core_runtime._call',return_value={'address':'t1','state':'live','foreground':{'pid':43}}),patch.object(admission.os,'kill',side_effect=ProcessLookupError):
+            reconcile(queue,runtime,{})
+        self.assertEqual('process_replaced',queue.get('UNKNOWN').get('intervention',{}).get('kind'))
+        self.assertFalse(ws.ResourceLedger._rows(queue.db)[0]['execution_reserved'])
+        self.assertNotEqual('completed',queue.get('UNKNOWN')['state'])
+
     def test_only_replaced_attempt_loses_reservations_and_next_ticket_can_use_terminal(self):
         import test_operations as fixtures
         # Reuse the real queue setup; only HC and OS observations are replaced.

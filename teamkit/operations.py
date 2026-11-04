@@ -690,6 +690,12 @@ def reconcile(queue, runtime, config=None, *, team=None):
             continue
         if ticket['role']=='ui':
             continue  # Only the official UI lab result adapter can validate UI work.
+        if ticket['state'] in ('dispatching','received','uncertain') and ticket.get('attempt'):
+            attempt=queue.attempt(ticket['attempt'])
+            if (isinstance(runtime,NativeRuntime) and attempt['executor'].get('pid')
+                    and runtime.process_replaced(attempt['executor'])):
+                queue.process_replaced(ticket['id'],attempt['id'])
+            continue
         if ticket['state'] == 'waiting_children':
             blocked_children = [queue.get(ident) for ident in queue.incomplete_children(ticket['id'])]
             blocked_children = [child for child in blocked_children if child.get('intervention')]

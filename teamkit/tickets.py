@@ -960,7 +960,7 @@ class TicketStore:
         from .resources import ResourceLedger
         with self.transaction():
             item = self.get(ident)
-            if item.get('attempt') != attempt_id or item['state'] != 'running':
+            if item.get('attempt') != attempt_id or item['state'] not in ('running','dispatching','received','uncertain'):
                 raise ValueError('stale process replacement')
             attempt = self.attempt(attempt_id)
             attempt.update(phase='process_replaced', stopped_at=self.clock())
