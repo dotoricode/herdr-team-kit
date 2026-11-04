@@ -224,6 +224,17 @@ class AdoptionTests(fixtures.PoolControlTests):
             self.assertEqual('completed',self.adopt(actor,job,evidence)['phase'])
 
 
+    def test_linked_workflow_cannot_bypass_official_completion_gate(self):
+        actor,job,path,packet,evidence=self.packet()
+        job['workflow_ref']={'work':'WORK-EXAMPLE','revision':1,'digest':'0'*64}
+        context.write(path,job)
+        packet['request_record_sha256']=hashlib.sha256(path.read_bytes()).hexdigest()
+        evidence.write_text(json.dumps(packet))
+        original=path.read_bytes()
+        with self.assertRaisesRegex(ValueError,'workflow'):self.adopt(actor,job,evidence)
+        self.assertEqual(original,path.read_bytes())
+
+
 def load_tests(loader, tests, pattern):
     import unittest
     return unittest.TestSuite(AdoptionTests(name) for name in AdoptionTests.__dict__ if name.startswith('test_'))

@@ -265,7 +265,7 @@ usage 배정 모드의 legacy pool 계획도 현재 팀의 ready workspace actor
 
 
 ### 운영자의 기존 결과 수령
-`pool adopt-result --request <request> --evidence-file <packet.json> --expected-owner <owner> --expected-attempt <attempt> --operator-approved`는 기존 Claude 결과만 운영자 판단으로 수령하는 명시적 경로입니다. 새 제품 입력이나 actor receipt·submission을 만들지 않습니다. 지원 상태는 전달 식별자가 없는 pending·received·done 요청이며 uncertain·전송 중·기존 제출이 있는 요청은 거절합니다. pending도 원 work_id와 결과 JSON의 work_id·완료 선언·작성자 및 결과 경로가 일치해야 합니다.
+`pool adopt-result --request <request> --evidence-file <packet.json> --expected-owner <owner> --expected-attempt <attempt> --operator-approved`는 기존 Claude 결과만 운영자 판단으로 수령하는 명시적 경로입니다. 새 제품 입력이나 actor receipt·submission을 만들지 않습니다. 지원 상태는 전달 식별자가 없는 pending·received·done 요청이며 uncertain·전송 중·기존 제출·workflow_ref가 있는 요청은 거절합니다. workflow 연결 업무는 기존 공식 완료 gate를 통과해야 합니다. pending도 원 work_id와 결과 JSON의 work_id·완료 선언·작성자 및 결과 경로가 일치해야 합니다.
 
 증거 packet은 request_id, request_record_sha256(원 요청 파일 전체), request_digest(원문), work_id, owner, attempt, writer_stopped=true, operator_reference, verification(완료 조건별 확인 목록), completion_requirements(원 값 그대로), result_artifact, artifacts(path·sha256), authorship(transcript·record_sha256·timestamp·session_id)를 포함합니다. work_id가 있는 요청은 result_metadata에 같은 artifacts에 포함된 결과 JSON 경로를 지정합니다. 원 수신 터미널이 재시작됐다면 lineage_event_seq로 소유권·상태·대화 보존 사건을 지정합니다.
 

@@ -148,6 +148,8 @@ def adopt(config_path, state, ident, evidence_file, owner, attempt, operator_app
     lock = hashlib.sha256(initial['team'].encode()).hexdigest()
     with context.locked(control.folder(state)/('team-'+lock)), context.locked(path):
         job = context.read(path)
+        if job.get('workflow_ref'):
+            raise ValueError('linked workflow requires its official completion gate; operator adoption is not supported')
         prior = job.get('operator_result_adoption')
         if prior and prior.get('evidence_sha256') == evidence_digest:
             if (job['phase'] != 'completed' or control._file_proof(prior['original_request_file']) != prior['original_request_sha256']
