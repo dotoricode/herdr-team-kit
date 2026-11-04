@@ -177,12 +177,16 @@ class TicketStore:
         self.db.execute('INSERT OR REPLACE INTO operation_budgets VALUES (?,?)',
                         (origin, json.dumps(budget)))
 
-    def enqueue(self, spec, registration_key, *, user_approved=False):
+    def enqueue(self, spec, registration_key, *, user_approved=False, legacy_request_id=None):
         if type(user_approved) is not bool:
             raise ValueError('user_approved must be explicit boolean')
         spec = json.loads(json.dumps(spec))
-        if any(k in spec for k in ('resource_constraints', 'worktree_split', 'inherited_worktree')):
+        if any(k in spec for k in ('resource_constraints', 'worktree_split', 'inherited_worktree', 'legacy_request_id')):
             raise ValueError('resource constraints and worktree splits are host-derived, not caller permissions')
+        if legacy_request_id is not None:
+            if not isinstance(legacy_request_id,str) or not re.fullmatch(r'[a-f0-9]{32}',legacy_request_id):
+                raise ValueError('host migration requires an exact legacy request identity')
+            spec['legacy_request_id']=legacy_request_id
         ident = spec.get('id', '')
         if not IDENT.fullmatch(ident) or not isinstance(registration_key, str) or not registration_key:
             raise ValueError('ticket identity and idempotency key required')

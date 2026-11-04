@@ -971,6 +971,8 @@ def view(config_path, state):
         except Exception as error:
             native_observation = None
             capacity = {'available': None, 'reason': str(error), 'outside_controlled': False}
+        current=queue.list()
+        represented={item['legacy_request_id'] for item in current if item.get('legacy_request_id')}
         legacy = [dict(id=x['id'], origin_id=x.get('work_id') or x['id'],
                        source='legacy', product=x['team'], state=x['phase'],
                        error_code=x.get('error_code'), error_stage=x.get('error_stage'), error_type=x.get('error_type'),
@@ -978,7 +980,7 @@ def view(config_path, state):
                        created_at=x.get('created_at'), updated_at=x.get('updated_at'),
                        executor=x.get('receiver') or {},
                        reason=x.get('reason'), next_action='reconcile original evidence',
-                       managed=True) for x in pool_control.requests(state)]
+                       managed=True) for x in pool_control.requests(state) if x['id'] not in represented]
         from types import SimpleNamespace
         def quota(key):
             row = queue.db.execute('SELECT body FROM quotas WHERE profile=?', (key,)).fetchone()
@@ -1008,7 +1010,7 @@ def view(config_path, state):
                 path = intent['worktree']
                 split_worktrees.append(dict(ticket=ident, path=path, phase=phase, exists=Path(path).exists()))
         return {'schema_version': SCHEMA_VERSION, 'observed_at': time.time(),
-                'tickets': queue.list() + legacy, 'ready_count': len(queue.ready()),
+                'tickets': current + legacy, 'ready_count': len(queue.ready()),
                 'allocation_policy': config.get('operations', {}).get('allocation_policy', 'role'),
                 'split_worktrees': split_worktrees,
                 'intake_pending': pending(queue.db),

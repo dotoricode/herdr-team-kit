@@ -51,6 +51,24 @@ class UnifiedQueueTests(unittest.TestCase):
             packet=json.loads((Path(attempt['mailbox'])/'contract.json').read_text())
             self.assertEqual(str(attachment.resolve()),packet['staged_inputs'][0]['original'])
 
+    def test_host_prepared_legacy_ticket_is_displayed_once_and_cannot_be_forged_by_cli_spec(self):
+        from teamkit import operations
+        from teamkit.store import Store
+        original=self.enqueue('ORIGINAL')
+        spec={k:original[k] for k in ('product','role','kind','goal','completion','checks','verification_commands','profiles','scope','resources')}
+        spec['id']='MIGRATED'
+        queue=TicketStore(self.state);self.addCleanup(queue.close)
+        legacy='a'*32
+        item=queue.enqueue(spec,'migration',legacy_request_id=legacy)
+        self.assertEqual('waiting_approval',item['state'])
+        Store(self.state).close()
+        old=dict(id=legacy,team='example',phase='pending')
+        with patch('teamkit.pool_control.requests',return_value=[old]),patch('teamkit.service.status',return_value={}),patch('teamkit.operations.observe_native',return_value=self.runtime.observation()):
+            payload=operations.view(self.config,self.state)
+        self.assertEqual(['MIGRATED','ORIGINAL'],sorted(x['id'] for x in payload['tickets']))
+        with self.assertRaisesRegex(ValueError,'host-derived'):
+            queue.enqueue(dict(spec,id='FORGED',legacy_request_id=legacy),'forged')
+
     def test_three_same_team_reads_start_in_one_tick_and_only_same_path_writes_wait(self):
         config=json.loads(self.config.read_text()); config['operations']['resource_policy']={'global_limit':10,'profile_limits':{'codex/personal':10}}
         self.config.write_text(json.dumps(config))
