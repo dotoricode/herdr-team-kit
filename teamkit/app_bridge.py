@@ -829,7 +829,7 @@ def main():
     parser.add_argument('--config', default=str(Path.home()/'.config/herdr-team-kit-app/config.json'))
     parser.add_argument('--state', default=str(Path.home()/'.local/state/herdr-team-kit-app/state.sqlite'))
     parser.add_argument('--bindings', default=str(Path.home()/'.config/herdr-team-kit-app/bindings.json'))
-    parser.add_argument('action', choices=('view','document','work-detail','approve','resume','resume-job','recover-coordinator','coordinator-job','refresh-usage','usage-job','card-detail','card-answer','card-question-set','card-send','card-send-job','card-send-status','card-receipt','card-board-action'))
+    parser.add_argument('action', choices=('knowledge-hub','view','document','work-detail','approve','resume','resume-job','recover-coordinator','coordinator-job','refresh-usage','usage-job','card-detail','card-answer','card-question-set','card-send','card-send-job','card-send-status','card-receipt','card-board-action'))
     parser.add_argument('--work'); parser.add_argument('--revision', type=int); parser.add_argument('--digest')
     parser.add_argument('--task'); parser.add_argument('--owner'); parser.add_argument('--request')
     parser.add_argument('--attempt',type=int)
@@ -843,7 +843,10 @@ def main():
     parser.add_argument('--confirmed', action='store_true')
     args = parser.parse_args()
     try:
-        if args.action == 'view': result = view(args.config, args.state, args.bindings)
+        if args.action == 'knowledge-hub':
+            from .knowledge_hub import view as knowledge_view
+            result = knowledge_view(args.config,args.state,args.bindings)
+        elif args.action == 'view': result = view(args.config, args.state, args.bindings)
         elif args.action == 'document': result = document_view(args.config, args.state, args.work,args.bindings)
         elif args.action == 'work-detail': result = work_detail(args.config,args.state,args.bindings,args.work)
         elif args.action == 'card-detail':result=card_detail(args.config,args.state,args.bindings,args.kind,args.work)
