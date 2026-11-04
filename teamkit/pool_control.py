@@ -14,6 +14,7 @@ from .config import load, cached_quota
 from .store import Store, ACTIVE
 from . import session_pool as pool
 from .wake import notify
+from .result_adoption import adopt as adopt_result
 
 
 def folder(state):
@@ -759,6 +760,8 @@ def handle(args):
         for provider in config['profiles']:
             for account in ('team','personal'):refresh_candidates(args.config,args.state,[(provider,account)])
         return {'refreshed':'configured account observations; unknown or failed readings remain ineligible','model_requests':0}
+    if args.action=='adopt-result':
+        return adopt_result(args.config,args.state,args.request,args.evidence_file,args.expected_owner,args.expected_attempt,args.operator_approved)
     if args.action=='resolve':
         return resolve(args.config,args.state,args.request,args.outcome,args.evidence_file,args.expected_owner,args.expected_attempt)
     if args.action=='submit':

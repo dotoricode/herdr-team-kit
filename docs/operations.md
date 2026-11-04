@@ -262,3 +262,13 @@ usage 배정 모드의 legacy pool 계획도 현재 팀의 ready workspace actor
 새 안내는 제품 업무 없이 exact workspace-receipt 명령만 한 번 요청합니다. 원 직원이 자신의 세션에서 그 정확한 명령의 샌드박스 밖 1회 실행만 on-request 승인을 요청해야 합니다. 전체 샌드박스 해제·설정 변경·터미널 위장·운영자 대행 수신·명령 변경·실패 후 반복은 허용하지 않습니다. 승인 거부나 실패이면 중지하고 원인을 보고합니다. 실제 새 argv와 승인 이유·허용 범위는 전달 전 registry의 renewal.approval_scope에 남고 성공 반환에도 제공됩니다. 이 승인은 PR 작업·수정·댓글·머지를 포함하지 않습니다.
 
 복구 안내도 실제 입력 전달 전 callback에서 만료를 다시 확인합니다. 이 지점의 만료는 transport 호출 전임을 보장하므로 expired_before_delivery/not_sent_expired로 기록하며 운영자의 새 명시 등록만 허용합니다. transport가 시작된 뒤의 오류·결과 불명은 이 상태로 바꾸지 않으며 원등록 결과를 조사하기 전 재등록·재갱신하지 않습니다.
+
+
+### 운영자의 기존 결과 수령
+`pool adopt-result --request <request> --evidence-file <packet.json> --expected-owner <owner> --expected-attempt <attempt> --operator-approved`는 기존 Claude 결과만 운영자 판단으로 수령하는 명시적 경로입니다. 새 제품 입력이나 actor receipt·submission을 만들지 않습니다. 지원 상태는 전달 식별자가 없는 pending·received·done 요청이며 uncertain·전송 중·기존 제출이 있는 요청은 거절합니다. pending도 원 work_id와 결과 JSON의 work_id·완료 선언·작성자 및 결과 경로가 일치해야 합니다.
+
+증거 packet은 request_id, request_record_sha256(원 요청 파일 전체), request_digest(원문), work_id, owner, attempt, writer_stopped=true, operator_reference, verification(완료 조건별 확인 목록), completion_requirements(원 값 그대로), result_artifact, artifacts(path·sha256), authorship(transcript·record_sha256·timestamp·session_id)를 포함합니다. work_id가 있는 요청은 result_metadata에 같은 artifacts에 포함된 결과 JSON 경로를 지정합니다. 원 수신 터미널이 재시작됐다면 lineage_event_seq로 소유권·상태·대화 보존 사건을 지정합니다.
+
+공식 경로는 원 요청 SHA·원문·범위·결과 해시, 계정 프로필의 실제 Claude 대화에서 작성된 assistant end_turn 기록, 작성 시각과 claim 이력, 현재 ready owner·attempt·native PID와 재개한 같은 대화, 활성 예약·쓰기 및 하위 실행 부재를 대조합니다. 현재 터미널의 다른 미전송 입력은 읽거나 제출·삭제하지 않습니다. 옛 터미널이 목록에서 없어도 재시작 이력과 현재 동일 대화가 입증되면 수령할 수 있지만, 옛 터미널이 아직 live이면 거절합니다. 일반 DB나 손상된 관측을 완료로 해석하지 않습니다.
+
+원 요청과 증거 사본, 작성자 기록, 운영자 권한, 원 phase·receiver 및 artifact SHA는 operator_result_adoption 감사 기록으로 보존하며 원 수신·전달·제출 기록은 바꾸지 않습니다. 이는 과거 완료한 읽기 전용 결과를 받는 처리이며 현재 PR head를 다시 검증하거나 외부 게시를 승인하지 않습니다. Codex 등 다른 대화 형식은 이번 경로에서 지원하지 않습니다.

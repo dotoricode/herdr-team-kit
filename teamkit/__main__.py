@@ -155,7 +155,7 @@ def parser():
     x.add_argument('--publish',action='store_true');x.add_argument('--interval',type=float,default=3)
     x.add_argument('--color',choices=['auto','always','never'],default='auto')
     x=commands.add_parser('pool')
-    x.add_argument('action',choices=('prepare','recheck','present','status','plan','bootstrap','assign','refresh','resolve','submit','rebind-receiver','workspace-status','workspace-register','workspace-receipt','resume-preparation','workspace-registration-status','workspace-renew'))
+    x.add_argument('action',choices=('prepare','recheck','present','status','plan','bootstrap','assign','refresh','resolve','submit','adopt-result','rebind-receiver','workspace-status','workspace-register','workspace-receipt','resume-preparation','workspace-registration-status','workspace-renew'))
     x.add_argument('--team')
     x.add_argument('--message-file')
     x.add_argument('--work')
