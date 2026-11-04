@@ -387,3 +387,18 @@ class WorkspaceTests(Fixture):
         with self.assertRaises(NativeError):
             ws.renew_registration(self.config,self.state,'alpha','t1',123,row['actor']['owner'],expected,True,'Recover fixture.')
         self.assertEqual(ws.registration_status(self.state,'t1')['record_digest'],expected)
+
+    def test_renewal_expiry_in_pre_send_callback_is_explicitly_not_sent(self):
+        row,expected=self.expired_registration();now=[100.0];sent=[]
+        def accept(runtime,name,text,before_send=None):
+            now[0]=500.0
+            if before_send:before_send()
+            sent.append(text)
+        with patch.object(ws.time,'time',side_effect=lambda:now[0]),patch.object(ws.CoreRuntime,'accept',new=accept):
+            with self.assertRaisesRegex(ValueError,'expired'):
+                ws.renew_registration(self.config,self.state,'alpha','t1',123,row['actor']['owner'],expected,True,'Recover fixture.')
+        self.assertEqual(sent,[])
+        q=TicketStore(self.state);new=ws.rows(q.db)[0];q.close()
+        self.assertEqual(new['phase'],'expired_before_delivery')
+        self.assertEqual(new['renewal']['outcome'],'not_sent_expired')
+        self.assertNotEqual(new['nonce'],row['nonce'])
