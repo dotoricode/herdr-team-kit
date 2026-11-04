@@ -94,15 +94,13 @@ Receipt waiters record SIGINT/SIGTERM cancellation before exiting. SIGKILL or ho
 
 ## 팀장 작업 큐
 
-`pool assign --team TEAM --work WORK-ID --message-file FILE --provider codex --account team`은 요청을 디스크 큐에 넣습니다. `--completion-file FILE`로 최종 보고 주체·검증·산출물 등 완료 조건을 함께 고정할 수 있습니다. 같은 팀의 같은 work ID와 동일한 본문·계정 제약·완료 조건은 기존 요청으로 합칩니다. 다른 내용으로 같은 ID를 덮어쓰지 않습니다. 서로 다른 작업은 접수 순서대로 보존합니다. work ID 생략 시 본문 해시를 키로 사용하며, 같은 본문을 새로운 업무로 요청하려면 새 work ID를 지정합니다.
+`pool assign --team TEAM --message-file FILE`과 `queue create`는 모두 SQLite `operation_tickets`로 접수합니다. `pool assign`은 정적 풀 준비나 Supervisor 시작을 요구하지 않습니다. 같은 work ID의 원문·완료 조건·범위가 달라지면 재접수하지 않고 충돌을 알립니다. 코드 변경은 연결된 제품 설계 승인과 독립 리뷰를 통과해야 합니다. 일반 문장으로 접수된 보고 업무도 결과 파일 존재 검사와 독립 리뷰를 구분합니다.
 
-`received`는 전달과 수신 확인이며 업무 완료가 아닙니다. 기존 `done` 기록도 수신만 확인한 것으로 보존하고 다음 작업을 막습니다. 앞선 업무가 `completed` 또는 `deferred`로 확인되기 전에는 native가 idle이어도 다음 요청을 보내지 않습니다. `uncertain` 요청은 자동 재전송하거나 resolve하지 않으며 이후 작업도 기다립니다. 기존 기록은 삭제하거나 업무 완료로 승격하지 않습니다.
+Supervisor는 매 tick 실제 팀 space의 프로세스·계정 환경·작업 경로·입력·최신 사용량과 예약을 확인합니다. `teamkit.auto=off`는 자동 배정에서 제외합니다. 같은 팀의 미종결 요청이 다른 세션의 비충돌 업무를 막지 않으며, 동일·상하위 쓰기 경로와 명시적으로 예약한 named 쓰기 자원만 충돌합니다. 승인된 경로가 다르면 같은 worktree라는 이유만으로 전체를 잠그지 않습니다.
 
-`pool resolve --request REQUEST-ID --outcome completed|deferred --evidence-file JSON --expected-owner OWNER --expected-attempt N`은 수신된 업무만 정리합니다. 현재 장부와 수신자의 owner·attempt·terminal이 일치하고 native가 idle이며 입력 초안이 없어야 합니다. JSON에는 `work_id`, `owner`, `attempt`, `writer_stopped: true`, 비어 있지 않은 `verification` 문자열 배열을 넣습니다. 고정 완료 조건이 있으면 동일한 `completion_requirements` 원문과 그 조건을 실제 검증한 근거가 필요합니다. `deferred`에는 인계할 `next`도 필요합니다. 팀장 초안만 있는 것을 다른 담당자의 최종 보고 완료로 선언해서는 안 됩니다. 이 명령은 검증 결과의 명시 기록이며 서버·모델·게시 승인 범위를 확대하지 않습니다.
+호스트가 팀 루트의 `.herdr/jobs/<ticket>/<attempt>/task.md`와 `contract.json`을 만들고, 외부의 승인된 읽기 파일을 `inputs/`에 복사합니다. 실행자는 이 폴더에 `result.json`과 산출물을 저장하고 턴을 끝냅니다. `receipt`·`submit` CLI 호출과 외부 상태 디렉터리 접근은 필요하지 않습니다. 호스트가 정확한 PID·종료 turn·시도를 대조해 결과를 수거한 뒤 승인된 검증과 독립 리뷰를 수행합니다.
 
-긴 제품 작업이 native 전달 대기 시간을 넘겨 `uncertain`이 되면 자동 재전송하지 않습니다. 총괄이 실제 ACK·화면·소유권을 대조해 수동으로 정합화해야 하며, 이 최소 큐는 그 결과를 추정하지 않습니다. 업무 수신 뒤 auto-context 등으로 owner가 바뀐 경우에도 기존 receiver와 현재 owner가 달라 resolve를 거절하고 수동 확인을 기다립니다. 소유권 인계 chain의 자동 추적과 불명 수신 정합화 인터페이스는 이번 범위에 포함하지 않습니다.
-
-`pool status`는 요청별 work ID·계정 제약·완료 조건과 안전한 오류 단계·코드를 표시합니다. 오류 원문은 저장하지 않으므로 이 코드만으로 과거 native 실패의 정확한 원인을 단정하지 않습니다. supervisor와 현재 Python 소스의 fingerprint가 다르면 새 assign은 거절합니다. active jobs와 전달 불명을 먼저 확인하고 supervisor만 안전하게 재기동해야 하며 기존 팀장 세션은 재시작하지 않습니다. 새 supervisor는 실행 중 소스 변경을 감지하면 다음 tick을 중단하고 진행 중 작업이 끝나기를 기다립니다.
+미실행 티켓은 `queue cancel TICKET --reason REASON --user-approved`로 취소합니다. 명령은 트랜잭션 안에서 실행·시도·예약이 없음을 다시 확인하고 원문·예산·감사 이력을 보존합니다. 과거 `pool-requests` JSON은 기존 결과를 대조하는 기록이며 자동 배정 소비 대상이 아닙니다.
 
 ## 담당자 우선 전송
 
@@ -233,31 +231,17 @@ GUI core 배정은 실제 응답에 연결된 statusline 자료와 검증된 공
 
 운영자는 실제 모든 쓰기 중단을 확인한 뒤 `queue recover <ticket> --attempt <attempt> --user-approved --writer-stopped --reason <확인 근거>`로 같은 업무를 다시 배정 대기 상태로 돌릴 수 있습니다. 명령은 현재 원 실행자의 terminal·PID·owner와 종료된 turn을 다시 확인하고, 기존 미완료 하위 작업이 있으면 거절합니다. 과거 수신·결과·예약 이력은 남으며 기존 attempt를 성공 완료로 기록하지 않습니다. 이 확인을 할 수 없으면 화면의 운영 확인 요청을 유지합니다.
 
-### 현재 워크스페이스 세션 등록
+### 실시간 워크스페이스 배정과 과거 등록 기록
 
-`pool workspace-status --team TEAM`은 팀 binding의 실제 space 소속 세션을 조회합니다. 이름이나 cwd만으로 계정을 추정하지 않으며 foreground 프로세스·모델·프로필 환경·공식 신원·최신 사용량·입력 초안을 확인합니다. 이 조회는 등록이나 제품 요청 전달을 하지 않습니다. 검증 실패는 후보로 확정하지 않습니다.
+`pool workspace-status --team TEAM`은 현재 팀 space의 세션을 직접 검증합니다. 검증된 유휴 세션은 수동 등록과 workspace receipt 없이 즉시 후보가 됩니다. 후보 조회는 라벨·owner를 바꾸지 않습니다. 호스트는 durable attempt를 먼저 예약한 뒤 동일 PID와 준비 상태를 다시 확인하고 owner·task·attempt 라벨을 갱신합니다. 이전 실행의 결과나 소유권을 새 PID로 옮기지 않습니다.
 
-현재 세션을 새 실행자로 연결할 때는 `pool workspace-register --team TEAM --terminal TERMINAL --operator-approved`를 사용합니다. 이전 활성 task나 execution lease가 있으면 거절합니다. 새로운 owner와 기존 라벨·PID 이력을 먼저 기록하고 등록 명령만 한 번 전달합니다. 세션이 받은 정확한 `pool workspace-receipt` 명령을 자신의 터미널에서 실행해야 ready 후보가 됩니다. 등록 nonce는 5분 만료이며 전송 실패·수신 불명은 다시 보내지 않습니다. 이전 owner의 업무·완료는 승계하지 않습니다. 실제 제품 전송 직전에도 기존 native·profile·quota 검사를 수행합니다.
+새 PID가 보인다는 사실만으로 이전 프로세스가 종료됐다고 추정하지 않습니다. 기존 PID가 OS에서 소멸했고 HC의 foreground가 교체됐거나 종료된 경우에 이전 실행·쓰기 예약을 해제합니다. 원 티켓은 `process_replaced` 확인 상태로 보존하며 새 PID의 유휴 세션은 다른 준비된 업무를 받을 수 있습니다. 결과 파일이 없는 종료 턴은 `missing_result`를 표시하고 실행 예약만 반환합니다.
 
-기존 요청이 `preparation_failed`이고 실패 단계가 pending/waiting_handoff이며 receiver·delivery ID·receipt·submission이 모두 없는 경우에만 운영자가 `pool resume-preparation --request REQUEST --operator-approved`로 같은 요청을 다시 pending으로 돌릴 수 있습니다. 기존 내용과 실패 이력은 보존됩니다. 이 명령은 제품 요청을 직접 보내지 않으며 다음 공식 소비기가 현재 상태를 확인합니다. 그 외 uncertain 요청은 기존 전달 결과를 대조해야 합니다.
-
-`queue pull --team <팀>`은 지정 팀의 준비된 업무를 가져옵니다. `queue pull <업무 ID> --team <팀>`으로 뒤에 등록된 준비 업무를 명시적으로 고를 수 있습니다. 다른 팀 업무는 거부하며, 앞 업무가 배정 불가여도 뒤의 준비 업무를 계속 시도합니다. 우선순위 정렬은 탐색 순서이며 FIFO 실행 의무가 아닙니다. 선행 작업·승인·중복 실행·자원 충돌 검사는 그대로 적용됩니다.
-
-등록 intent는 기존 legacy 소비기의 model-start lock과 같은 경계를 쓰며, 활성 legacy 수신 요청이 있는 터미널은 등록하지 않습니다. DB 자원 예약도 등록 중인 세션이나 다른 owner로 재등록된 세션을 사용할 수 없습니다. 준비 중 전달 전 nonce가 만료되면 expired_before_delivery로 남기고 새 명시 승인 등록에서만 새 owner/nonce를 생성합니다. 원 등록 이력은 보존됩니다. 전달 결과가 불명이면 재등록하지 않습니다.
-
-usage 배정 모드의 legacy pool 계획도 현재 팀의 ready workspace actor를 확인합니다. 기존 request ID와 canonical task 필드는 보존하고 실제 수신 actor task를 receiver.task에 기록하여 공식 tell·제출·검증이 같은 owner/attempt를 따르게 합니다. 이 연결은 기존 canonical owner의 업무나 완료를 새 actor에게 승계하지 않습니다. 전달 직전에도 workspace 소속·프로필 환경·모델·cwd·최신 quota·빈 입력을 다시 확인합니다.
-
-사용량 기준 팀 pull 모드에서는 `queue send`와 `--override-eligibility`로 담당자를 지정할 수 없습니다. 후보 조회는 가능하지만 `send_allowed`와 각 후보의 `override_allowed`는 false이며, `pull_allowed`가 현재 팀 pull 가능 여부를 나타냅니다. 사용량 검사는 이 모드에서 우회 불가이고 전송 직전에도 재확인합니다. 전환 전에 접수됐으나 실행되지 않은 수동 선택은 소비 단계에서 거절하고, 실행·수신 결과가 불명인 시도는 그대로 보존합니다. 이 정책 때문에 거절한 새 수동 요청은 팀 pull을 막는 선택 잠금을 만들지 않습니다.
-
-기존 수신 업무의 완료·보류 인계 확인은 새 배정의 quota 적격성과 구분합니다. workspace actor의 identity·owner·PID·profile·workspace·cwd·정지된 입력과 writer-stopped 근거는 계속 확인하지만, 수행 후 사용량이 한도에 도달했다는 이유로 결과 정합화를 막지 않습니다. 신규 tell·자동 배정·전송 직전에는 최신 quota 검사를 유지합니다.
-
-사용량 모드로 전환하기 전 수동 요청이 전송 사전 검사에서 거절된 경우, 자동 소비기와 팀 pull은 과거 실행 여부를 대조합니다. 요청이 blocked이며 소비기에 진입한 시각·결과·실행 attempt가 없고, 원 업무가 pending이며 다른 queued/running/uncertain 전송도 없을 때만 사용량 모드의 지정 전송 거절로 감사 기록을 남겨 해당 선택 잠금을 해제합니다. 원 거절 사유는 보존합니다. 소비기 진입 또는 과거 실행이 있거나 결과가 불명인 기록은 자동 해제하지 않습니다.
-
-기존 pool 요청에서도 사용량 모드는 검증된 워크스페이스 직원들을 같은 KST 평일·주말 순서로 검토하며, 등록 순서가 개인 계정을 우선시키지 않습니다. 명시적으로 뒤의 준비 요청을 진행할 수 있고 앞의 pending 요청은 이를 막지 않습니다. 같은 팀의 전달·실행·결과 불명 요청과 승인·소유권·자원 경계는 계속 보호합니다.
-
-사용량 모드의 기존 pool 경로에서 검증·수신된 워크스페이스 담당자가 없으면 `workspace verification and registration required`로 대기합니다. 이때 이전 역할 정책·주말 계정 순서나 canonical owner로 되돌아가 전달하지 않습니다. 운영본부는 회사·개인 세션의 현재 사용량과 실행 신원을 확인해 공식 워크스페이스 등록·수신을 마친 뒤 같은 요청을 이어갑니다.
+`workspace_actors`, `workspace-register`, `workspace-receipt`, `workspace-renew`는 개편 전 등록 기록을 조회·관리하는 호환 경로입니다. 신규 배정의 선행 조건이 아닙니다. 기존 owner·nonce·원문·실패 기록은 삭제하지 않습니다.
 
 ### 만료된 workspace 등록의 제한적 복구
+
+이 절은 개편 전 등록 안내의 관리 절차입니다. 신규 메일박스 배정에는 등록·갱신이 필요하지 않습니다.
 
 기존 등록 안내가 수신됐으나 worker 샌드박스의 로컬 HC Unix 소켓 차단으로 확인 명령이 실패한 경우, 기존 명령이나 nonce를 재사용하지 않습니다. `pool workspace-registration-status --terminal TERMINAL`은 nonce를 제외한 현재 등록 신원·만료·record_digest를 읽기 전용으로 제공합니다.
 

@@ -26,6 +26,33 @@ class LiveAllocationTests(fixtures.WorkspaceTests):
         self.assertEqual(124, runtime.native(live[0])['pid'])
         self.assertEqual('old', self.native['labels']['teamkit.owner'], 'preview must not relabel')
 
+    def test_enabled_pool_plan_uses_live_actor_without_registration(self):
+        self.c['operations']={'enabled':True,'allocation_policy':'usage'}
+        plan=ws.plan(self.c,self.state,'alpha')
+        self.assertEqual('t1',plan['terminal'])
+        self.assertFalse(plan.get('registration_required',False))
+        self.assertEqual('old',self.native['labels']['teamkit.owner'])
+
+    def test_discovery_survives_one_terminal_disappearing_during_listing(self):
+        original=ws._call
+        def call(*args,**kwargs):
+            if args[0]=='ls':return {'terminals':[{'address':'tbad'},{'address':'t1'}]}
+            if args[:2]==('get','tbad'):raise ws.NativeError('terminal disappeared')
+            return original(*args,**kwargs)
+        with patch.object(ws,'_call',side_effect=call):
+            found=ws.discover(self.c,self.state,'alpha')
+        self.assertEqual(['t1'],[x['terminal'] for x in found])
+
+    def test_failed_live_verification_cannot_fall_back_to_cached_registration(self):
+        actor=ws.live_executors(self.c,self.state,'alpha')[0]
+        queue=ws.TicketStore(self.state)
+        try:
+            with queue.transaction():ws.save(queue.db,dict(terminal='t1',phase='ready',actor=actor))
+        finally:queue.close()
+        self.native['status']['state']='working'
+        self.c['operations']={'enabled':True,'allocation_policy':'usage'}
+        self.assertEqual([],NativeRuntime(self.c,self.state).executors())
+
     def test_dead_old_pid_releases_even_when_terminal_is_live_with_new_owner(self):
         with patch.object(admission, 'native_get', return_value=copy.deepcopy(self.native)), \
              patch.object(admission.os, 'kill', side_effect=ProcessLookupError):

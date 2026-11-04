@@ -251,18 +251,19 @@ def candidates(config_path, state, ident, runtime=None):
                     and all(x['bypassable'] for x in issues),
                 planned=executor.get('new') is True))
         for item in view.get('unregistered', []):
+            reason=item.get('reason') or '실시간 신원·입력·사용량 검증을 통과하지 못했습니다. 다음 관측에서 다시 확인합니다.'
             rows.append(dict(id=digest(dict(unregistered=item['terminal'], ticket=ident)),
                 alias=item.get('label') or '이름 미확인', name_source='label' if item.get('label') else 'generated',
                 terminal=item['terminal'], other_team=False, hidden_by_default=False, account=None, provider=None, role=ticket['role'], preferred=False,
-                eligible=False, reason='unregistered terminal in team space',
-                reason_ko=reason_ko('unregistered terminal in team space'), override_allowed=False,
-                reasons=[dict(code='unregistered', bypassable=False, reason='unregistered terminal in team space',
-                              reason_ko=reason_ko('unregistered terminal in team space'))],
+                eligible=False, reason=reason,
+                reason_ko=reason, override_allowed=False,
+                reasons=[dict(code=item.get('reason_code','workspace_unverified'), bypassable=False, reason=reason,
+                              reason_ko=reason)],
                 planned=False, unregistered=True))
         return dict(ticket=ident, expected_ticket=digest(ticket), candidates=rows, excluded=excluded,
                     send_allowed=not usage_only(config) and any(row['eligible'] for row in rows),
                     pull_allowed=usage_only(config) and any(row['eligible'] for row in rows),
-                    reason=_manual_send_reason(config) or ('' if any(row['eligible'] for row in rows) else 'no eligible registered executor or approved worker plan'))
+                    reason=_manual_send_reason(config) or ('' if any(row['eligible'] for row in rows) else 'no eligible live executor or approved worker plan'))
     finally:
         queue.close()
 

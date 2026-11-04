@@ -99,6 +99,9 @@ def plan(config_path,state,team,provider=None,account=None):
     if current is not None:return current
     from .allocation import usage_only
     if usage_only(config):
+        if config.get('operations',{}).get('enabled') is True:
+            return dict(team=team,action='wait',workspace=True,registration_required=False,
+                        reason='현재 신원·입력·사용량·예약 검증을 통과한 팀 유휴 세션이 없습니다. 다음 tick에서 다시 확인합니다.')
         store=Store(state,read_only=True)
         try:
             task=store.get(pool.task_id(config,team))
@@ -735,6 +738,10 @@ def handle(args):
                 accounts.append(row)
         return {**pool.status(config,args.state),'accounts':accounts,'requests':[{k:j.get(k) for k in ('id','team','task','work_id','phase','reason','receiver','execution_constraint','completion_requirements','error_type','error_stage','error_code','workflow_ref','priority','dependencies','resources')} for j in requests(args.state)]}
     if args.action=='plan':return plan(args.config,args.state,args.team,getattr(args,'provider',None),getattr(args,'account',None))
+    if args.action=='assign':
+        if not args.team or not args.message_file:raise ValueError('team and approved message file required')
+        return enqueue(args.config,args.state,args.team,args.message_file,getattr(args,'provider',None),getattr(args,'account',None),getattr(args,'work',None),getattr(args,'completion_file',None),
+                       getattr(args,'workflow',None),getattr(args,'priority',0),getattr(args,'depends_on',[]),getattr(args,'resource',[]))
     from .core_runtime import require_managed
     require_managed()
     if args.action=='workspace-renew':
@@ -764,12 +771,6 @@ def handle(args):
         return submit(args.config,args.state,args.request,args.evidence_file,args.expected_owner,args.expected_attempt,args.delivery_id)
     if args.action=='rebind-receiver':
         return rebind_receiver(args.config,args.state,args.request,args.evidence_file,args.expected_owner,args.expected_attempt,args.operator_approved)
-    if args.action=='assign':
-        if not args.team or not args.message_file:raise ValueError('team and approved message file required')
-        from .context_handoff import ensure
-        ensure(args.config,args.state)
-        return enqueue(args.config,args.state,args.team,args.message_file,getattr(args,'provider',None),getattr(args,'account',None),getattr(args,'work',None),getattr(args,'completion_file',None),
-                       getattr(args,'workflow',None),getattr(args,'priority',0),getattr(args,'depends_on',[]),getattr(args,'resource',[]))
     if not args.team:raise ValueError('team required')
     store=Store(args.state)
     try:task=store.get(pool.task_id(config,args.team))

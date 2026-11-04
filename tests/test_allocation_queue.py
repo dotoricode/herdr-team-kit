@@ -27,6 +27,14 @@ class UnifiedQueueTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'immutable|conflict'):
             pool_control.enqueue(self.config,self.state,'example',message,work_id='WORK-ONE')
 
+    def test_pool_cli_persists_without_starting_or_contacting_a_supervisor(self):
+        import os
+        message=self.root/'offline-request.txt';message.write_text('Read fixture only.')
+        with patch.dict(os.environ,{'HC_TERMINAL_ID':''}),patch('teamkit.core_runtime._call',side_effect=AssertionError('ingress must not contact HC')):
+            item=run(parser().parse_args(['--config',str(self.config),'--state',str(self.state),
+                'pool','assign','--team','example','--message-file',str(message),'--work','OFFLINE']))
+        self.assertEqual('pending',item['state'])
+
     def test_three_same_team_reads_start_in_one_tick_and_only_same_path_writes_wait(self):
         config=json.loads(self.config.read_text()); config['operations']['resource_policy']={'global_limit':10,'profile_limits':{'codex/personal':10}}
         self.config.write_text(json.dumps(config))

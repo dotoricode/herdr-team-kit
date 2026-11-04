@@ -98,39 +98,32 @@ class NativeRuntime:
     def executors(self, ticket=None):
         from .allocation import usage_only
         result = []
-        from .workspace_sessions import live_executors, space
+        from .workspace_sessions import live_executors, space, discover
+        workspace_teams, workspace_terminals = set(), set()
         teams = [ticket['product']] if ticket else list(self.config['teams'])
         for team in teams:
             try:
                 space(self.config, team)
             except ValueError:
                 continue
-            result.extend(live_executors(self.config, self.state, team))
-        if not usage_only(self.config):
-            from .session_pool import _read
-            for slot in _read(self.state)['slots'].values():
-                runtime = slot.get('runtime') or {}
-                if slot.get('phase') not in ('prepared', 'leased', 'uncertain'):
-                    continue
-                if slot['phase'] == 'uncertain' and not (isinstance(slot.get('terminal'), str)
-                                                         and type(slot.get('native_pid')) is int):
-                    continue  # The launch never recorded a terminal and PID; nothing to prove, not a candidate.
-                # Uncertain slots stay candidates only through a read-only launch proof in admit();
-                # prepared/leased executor identity is unchanged.
-                proof = dict(pool_phase='uncertain', pool_launch_args=(slot.get('spec') or {}).get('args')) \
-                    if slot['phase'] == 'uncertain' else {}
-                result.append(dict(**proof, terminal=slot['terminal'], pid=slot['native_pid'], owner=slot['owner'],
-                                   provider=slot['provider'], account=slot['account'], product=slot['team'],
-                                   roles=['leader', 'investigator', 'implementer', 'reviewer'], root=slot['root'],
-                                   profile_binding=slot['binding'], task=slot['task'], runtime=runtime,
-                                   empty_prompt=slot.get('empty_prompt')))
-        result.extend(self.config.get('operations', {}).get('executors', []))
+            workspace_teams.add(team)
+            discovered=discover(self.config,self.state,team)
+            workspace_terminals.update(row['terminal'] for row in discovered)
+            result.extend(live_executors(self.config, self.state, team, discovered))
+        from . import docsstaff
+        specialized = ticket is not None and docsstaff.policy(self.config,ticket)
+        cached = list(self.config.get('operations', {}).get('executors', []))
         from .staffbootstrap import executors as staff_executors
-        result.extend(staff_executors(self.state))
+        cached.extend(staff_executors(self.state))
         from .workspace_sessions import executors as workspace_executors
         registered=[x for x in workspace_executors(self.state) if x['terminal'] not in {e['terminal'] for e in result}]
-        addresses={x['terminal'] for x in registered}
-        result=[x for x in result if x['terminal'] not in addresses]+registered
+        cached.extend(registered)
+        seen={x['terminal'] for x in result}
+        if specialized or not workspace_teams:
+            for actor in cached:
+                if actor['terminal'] not in seen:
+                    result.append(actor)
+                    seen.add(actor['terminal'])
         if ticket is not None:
             queue = TicketStore(self.state, read_only=True)
             try:
@@ -139,7 +132,8 @@ class NativeRuntime:
                     if item['state'] != 'completed' or not item.get('attempt'):
                         continue
                     previous = queue.attempt(item['attempt'])['executor']
-                    if previous.get('operation_actor') and previous['terminal'] not in seen:
+                    if (previous.get('operation_actor') and previous['terminal'] not in seen
+                            and previous['terminal'] not in workspace_terminals):
                         result.append(previous)
                         seen.add(previous['terminal'])
             finally:
@@ -206,7 +200,13 @@ class NativeRuntime:
                 except Exception:
                     continue
                 if labels.get('herdr.space') == space:
-                    unregistered.append(dict(terminal=address, label=labels.get('ui.display-name')))
+                    from .workspace_sessions import observe, discovery_failure
+                    try:
+                        observe(self.config,self.state,ticket['product'],address)
+                        detail=dict(reason_code='changed',reason='실시간 관측이 바뀌었습니다. 다음 후보 조회에서 다시 확인합니다.')
+                    except (ValueError, RuntimeError, NativeError, OSError) as error:
+                        detail=discovery_failure(error)
+                    unregistered.append(dict(terminal=address,label=labels.get('ui.display-name'),**detail))
         return dict(info=info, unregistered=unregistered)
 
     def native(self, executor, require_idle=True):
@@ -417,13 +417,10 @@ class NativeRuntime:
 
     def process_replaced(self, executor):
         from .core_runtime import _call
-        from .admission import process_dead
+        from .admission import process_ended
         try:
             native = _call('get', executor['terminal'])
-            return (native.get('address') == executor['terminal']
-                    and (native.get('state') == 'finished'
-                         or (native.get('foreground') or {}).get('pid') != executor['pid'])
-                    and process_dead(executor['pid']))
+            return process_ended(executor, native)
         except (ValueError, OSError, NativeError):
             return False
 
@@ -679,8 +676,10 @@ def followup(queue, ticket, attempt, relation, goal, *, reviewer=False):
     return queue.enqueue(spec, key)
 
 
-def reconcile(queue, runtime, config=None):
+def reconcile(queue, runtime, config=None, *, team=None):
     for ticket in queue.list():
+        if team is not None and ticket['product'] != team:
+            continue
         if ticket['role']=='ui':
             continue  # Only the official UI lab result adapter can validate UI work.
         if ticket['state'] == 'waiting_children':
@@ -828,12 +827,13 @@ def tick(config_path, state, runtime=None, *, selection=None, team=None, ticket_
                 intake['classification'] = intake_dispatch.tick(config_path, state)
             except (ValueError, KeyError, OSError, NativeError, subprocess.SubprocessError) as error:
                 intake['classification'] = {'reason':str(error)}
-        from .admission import configure
+        from .admission import configure, reconcile_stopped
         configure(queue.db, policy(config))
+        reconcile_stopped(queue.db)
         from .queue_actions import reject_unstarted_selections
         reject_unstarted_selections(queue, config, team=team, ticket=ticket_id)
-        if automatic:
-            reconcile(queue, runtime, config)
+        if automatic or team is not None:
+            reconcile(queue, runtime, config, team=team)
             queue.resume_parents()
         ui = None
         if automatic and any(t['role']=='ui' and t['state'] not in ('completed','cancelled','backlog') for t in queue.list()):
@@ -943,7 +943,7 @@ def tick(config_path, state, runtime=None, *, selection=None, team=None, ticket_
                                     **({'override': dict(bypassed=bypassed)} if override else {})))
                 break
             else:
-                queue.block(ticket['id'], '; '.join(sorted(set(reasons))) or 'no registered executor supports this ticket')
+                queue.block(ticket['id'], '; '.join(sorted(set(reasons))) or 'no verified live executor supports this ticket')
         return {'enabled': True, 'started': started, 'intake': intake, 'ui':ui, 'usage_refresh': usage_refresh}
     finally:
         queue.close()
@@ -1009,7 +1009,8 @@ def view(config_path, state):
                 'native_observation': native_observation,
                 'capacity': capacity, 'supervisor': status(config_path, state),
                 'terminology': {'user': '사용자'}, 'account_profiles': 4,
-                'candidate_slots': len(__import__('teamkit.session_pool', fromlist=['_read'])._read(state)['slots'])}
+                'candidate_slots': len({x.get('terminal') for x in (native_observation or {}).get('terminals', [])
+                                        if x.get('status') in ('idle','done')})}
     finally:
         queue.close()
 

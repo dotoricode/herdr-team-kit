@@ -65,7 +65,8 @@ def observe(config, state, team, terminal):
     screen = _call('read', '--json', terminal)
     if screen.get('complete') is not True or not empty_input(screen.get('text', '')):
         raise ValueError('workspace session has a draft, dialog or incomplete screen')
-    root = config['teams'][team]['root']
+    from .departments import organization
+    root = organization(config,team)['root']
     if Path(fg.get('cwd') or native.get('cwd') or '').resolve() != Path(root).resolve():
         raise ValueError('workspace session working root differs from team root')
     model, effort = _model_effort(provider, fg.get('argv'))
@@ -86,7 +87,8 @@ def observe(config, state, team, terminal):
             raise ValueError('workspace session quota is missing, expired or limited')
         from .admission import process_dead
         active = [t for t in store.list() if (t.get('runtime') or {}).get('terminal') == terminal
-                  and not process_dead((t.get('runtime') or {}).get('native_pid'))
+                  and not ((t.get('runtime') or {}).get('native_pid') != fg['pid']
+                           and process_dead((t.get('runtime') or {}).get('native_pid')))
                   and t.get('state') not in ('ready', 'queued', 'handed_off', 'completed', 'cancelled', 'retired')]
         if active:
             raise ValueError('workspace session has an existing active task owner')
@@ -105,6 +107,7 @@ def observe(config, state, team, terminal):
 
 
 DISCOVERY_REASONS = {
+    'workspace automatic allocation is disabled': ('auto_disabled','teamkit.auto=off 라벨로 자동 배정에서 제외했습니다.'),
     'session is not live in the requested team workspace': ('workspace', '해당 팀 워크스페이스의 열린 세션으로 확인되지 않았습니다.'),
     'workspace process/provider is unverified': ('process', '실제 프로세스와 실행 도구를 확인하지 못했습니다.'),
     'workspace session is working or its turn is unknown': ('working', '현재 작업 중이거나 턴 종료 여부를 확인하지 못했습니다.'),
@@ -133,7 +136,10 @@ def discover(config, state, team):
         address = item.get('address')
         if not isinstance(address, str) or '/' in address:
             continue
-        native = _call('get', address)
+        try:
+            native = _call('get', address)
+        except (ValueError, RuntimeError, NativeError, OSError):
+            continue
         if ((native.get('labels') or {}).get('herdr.space') != workspace
                 or (native.get('labels') or {}).get('teamkit.auto') == 'off'):
             continue
@@ -145,10 +151,10 @@ def discover(config, state, team):
     return result
 
 
-def live_executors(config, state, team):
+def live_executors(config, state, team, discovered=None):
     """Read current HC evidence; preview never writes labels or registration rows."""
     result = []
-    for proof in discover(config, state, team):
+    for proof in discover(config, state, team) if discovered is None else discovered:
         if proof.get('reason_code'):
             continue
         owner = uuid.uuid5(uuid.NAMESPACE_OID, 'teamkit:'+proof['terminal']+':'+str(proof['pid'])).hex
@@ -357,6 +363,15 @@ def registration_fence(db, terminal, owner, pid=None):
 def plan(config, state, team):
     """Use a receipted current workspace actor without inheriting the canonical owner."""
     if config.get('operations',{}).get('allocation_policy') != 'usage':return None
+    if config.get('operations',{}).get('enabled') is True:
+        from .allocation import profile_candidates
+        pairs=[(x['provider'],x['account']) for x in profile_candidates(config)]
+        actors=sorted(live_executors(config,state,team),key=lambda a:pairs.index((a['provider'],a['account'])))
+        if not actors:return None
+        actor=actors[0]
+        return dict(team=team,task=actor['task'],owner=actor['owner'],terminal=actor['terminal'],
+                    selection=dict(action='dispatch',**{k:actor[k] for k in ('provider','account','model','effort')}),
+                    state='ready',attempt=0,action='assign',workspace=True,registration_required=False)
     store=Store(state,read_only=True)
     try:
         from .allocation import profile_candidates

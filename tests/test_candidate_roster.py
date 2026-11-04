@@ -75,7 +75,7 @@ class CandidateRosterTest(unittest.TestCase):
         self.assertRegex(names['t2'], r'\((개인|팀)\)$')
         self.assertNotEqual('박과장 (팀)', names['t2'])
 
-    def test_unregistered_team_terminal_is_listed_but_never_sendable(self):
+    def test_unverified_team_terminal_shows_live_verification_reason(self):
         result = self.candidates([self.executor('t1', 'own')], {'t1': dict(state='live')},
                                  [dict(terminal='t174', label='권대리 (팀)')])
         row = next(row for row in result['candidates'] if row['terminal'] == 't174')
@@ -83,7 +83,8 @@ class CandidateRosterTest(unittest.TestCase):
         self.assertFalse(row['eligible'])
         self.assertFalse(row['override_allowed'])
         self.assertFalse(row['other_team'])
-        self.assertIn('등록', row['reason_ko'])
+        self.assertIn('실시간', row['reason_ko'])
+        self.assertNotIn('등록 필요',row['reason_ko'])
 
 
 class UncertainSlotTest(unittest.TestCase):
@@ -97,12 +98,9 @@ class UncertainSlotTest(unittest.TestCase):
         os.chmod(pool._path(self.state), 0o600)
         return NativeRuntime(json.loads(self.config.read_text()), self.state)
 
-    def test_uncertain_slot_is_listed_as_executor_with_launch_proof_inputs(self):
-        runtime = self.runtime_with(slot('t7', 'uncertain', 'a' * 32), slot('t8', 'preparing', 'b' * 32))
-        found = [e for e in runtime.executors() if e['task'] == 'POOL-LEADER-EXAMPLE']
-        self.assertEqual(['t7'], [e['terminal'] for e in found])
-        self.assertEqual('uncertain', found[0]['pool_phase'])
-        self.assertEqual(['--model', 'm'], found[0]['pool_launch_args'])
+    def test_static_uncertain_slot_is_not_an_executor(self):
+        runtime = self.runtime_with(slot('t7','uncertain','a'*32),slot('t8','preparing','b'*32))
+        self.assertEqual([],runtime.executors())
 
     def test_uncertain_slot_without_terminal_or_pid_is_skipped_not_fatal(self):
         # R1-1: the launch can fail before a terminal or PID is recorded; such a slot is not a candidate.
@@ -112,7 +110,7 @@ class UncertainSlotTest(unittest.TestCase):
         text_pid = slot('t6', 'uncertain', 'd' * 32, native_pid='700')
         runtime = self.runtime_with(no_pid, no_terminal, text_pid, slot('t9', 'uncertain', 'c' * 32))
         found = [e['terminal'] for e in runtime.executors() if e['task'] == 'POOL-LEADER-EXAMPLE']
-        self.assertEqual(['t9'], found)
+        self.assertEqual([], found)
 
     def test_automatic_tick_is_not_blocked_by_an_incomplete_uncertain_slot(self):
         from unittest.mock import patch
@@ -129,11 +127,9 @@ class UncertainSlotTest(unittest.TestCase):
         finally:
             queue.close()
 
-    def test_prepared_slot_identity_is_unchanged(self):
-        runtime = self.runtime_with(slot('t7', 'prepared', 'a' * 32))
-        found = [e for e in runtime.executors() if e['task'] == 'POOL-LEADER-EXAMPLE'][0]
-        self.assertNotIn('pool_phase', found)
-        self.assertNotIn('pool_launch_args', found)
+    def test_static_prepared_slot_is_not_an_executor(self):
+        runtime = self.runtime_with(slot('t7','prepared','a'*32))
+        self.assertEqual([],runtime.executors())
 
     def proof(self, provider='codex', **native):
         from teamkit.operations import prove_uncertain_slot

@@ -84,7 +84,7 @@ def observe(state_or_connection, native_observation=None):
     if not isinstance(observation, dict) or not isinstance(observation.get('terminals'), list):
         raise ResourceUnavailable('observation_invalid', 'HC native observation is unavailable')
     with _connection(state_or_connection) as connection:
-        recorded = {r['attempt'] for r in _reservations(connection) if r['execution_reserved']}
+        recorded = {r['attempt'] for r in _reservations(connection)}
         for task in _tasks(connection):
             runtime = task.get('runtime') or {}
             if task['state'] not in ACTIVE or runtime.get('resource_attempt') in recorded:
@@ -102,7 +102,7 @@ def observe(state_or_connection, native_observation=None):
 
 
 def _legacy_resource_conflicts(connection, ticket, resources):
-    reserved = {r['attempt'] for r in _reservations(connection) if r['writes_held']}
+    reserved = {r['attempt'] for r in _reservations(connection)}
     for task in _tasks(connection):
         if (task['id'] == ticket or task['state'] not in ACTIVE
                 or (task.get('runtime') or {}).get('resource_attempt') in reserved):
@@ -176,13 +176,20 @@ def process_dead(pid):
     return False
 
 
-def _stopped(session, profile):
+def process_ended(session, native):
+    return bool(session and native.get('address') == session['terminal']
+                and (native.get('state') == 'finished'
+                     or (native.get('foreground') or {}).get('pid') != session['pid'])
+                and process_dead(session.get('pid')))
+
+
+def _stopped(session, profile, native=None):
     if not session:
         return False
     try:
-        native = native_get(session['terminal'])
+        native = native_get(session['terminal']) if native is None else native
         foreground = native.get('foreground') or {}
-        if (native.get('state') == 'finished' or foreground.get('pid') != session.get('pid')) and process_dead(session.get('pid')):
+        if process_ended(session, native):
             return True
         if (native.get('address') != session['terminal']
                 or (native.get('labels') or {}).get('teamkit.owner') != session['owner']):
@@ -217,14 +224,25 @@ def reconcile_stopped(state_or_connection):
             tasks = {(t.get('runtime') or {}).get('resource_attempt'): t for t in _tasks(connection)}
             for reservation in _reservations(connection):
                 task = tasks.get(reservation['attempt'])
-                if task is None or task['state'] not in STOPPABLE or not _stopped(reservation.get('session'), reservation['profile']):
+                if task is None or not (reservation['execution_reserved'] or reservation['writes_held']):
+                    continue
+                session = reservation.get('session')
+                if not session: continue
+                try: native = native_get(session['terminal'])
+                except Exception: continue
+                ended = process_ended(session, native)
+                if not ended and (task['state'] not in STOPPABLE or not _stopped(session, reservation['profile'], native)):
                     continue
                 runtime = task.get('runtime') or {}
                 has_writes = any(r['mode'] == 'write' for r in reservation['resources'])
-                stopped_writer = runtime.get('resource_writer_stopped') is True or not has_writes
+                stopped_writer = ended or runtime.get('resource_writer_stopped') is True or not has_writes
                 if reservation['execution_reserved'] or reservation['writes_held'] and stopped_writer:
                     ledger.release_in_transaction(connection, reservation['attempt'], True,
                                                    release_writes=stopped_writer, writer_stopped=stopped_writer)
+                    if ended:
+                        row = next(r for r in _reservations(connection) if r['attempt'] == reservation['attempt'])
+                        row['process_end_observation'] = native
+                        ResourceLedger._write(connection, row)
                     released.append(reservation['attempt'])
         return released
 
