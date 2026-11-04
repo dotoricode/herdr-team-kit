@@ -327,3 +327,116 @@ def verify_task(config,state,task,*,for_delivery=True):
     screen=_call('read','--json',actor['terminal'])
     if screen.get('complete') is not True or not empty_input(screen.get('text','')):
         raise ValueError('workspace input changed before delivery')
+
+
+def registration_status(state, terminal):
+    """Read-only recovery preview; nonce and transcript are never returned."""
+    from .tickets import digest
+    queue=TicketStore(state,read_only=True)
+    try:
+        row=next((r for r in rows(queue.db) if r['terminal']==terminal),None)
+        if row is None:raise ValueError('workspace registration does not exist')
+        return dict(terminal=terminal,phase=row['phase'],actor=row['actor'],expires_at=row['expires_at'],
+                    record_digest=digest(row),received_at=row.get('received_at'))
+    finally:queue.close()
+
+
+def _renewal_contract(db,record,terminal,pid,owner,expected_digest,team):
+    from .tickets import digest
+    if (not record or record['terminal']!=terminal or record['phase']!='awaiting_receipt'
+            or record['actor']['pid']!=pid or type(pid) is not int or record['actor']['owner']!=owner
+            or record['actor']['product']!=team or digest(record)!=expected_digest
+            or record.get('received_at') is not None or time.time()<=record['expires_at']):
+        raise ValueError('workspace renewal requires the exact expired unreceipted registration')
+    delivery=record.get('delivery') or {}
+    if (delivery.get('accepted') is not True or delivery.get('terminal')!=terminal
+            or delivery.get('native_pid')!=pid or type(delivery.get('turn')) is not int):
+        raise ValueError('workspace prior delivery is unknown; never renew or resend')
+    if db.execute('SELECT 1 FROM tasks WHERE id=?',(record['actor']['task'],)).fetchone():
+        raise ValueError('workspace receipt/task already exists; cannot renew')
+    for (body,) in db.execute('SELECT body FROM operation_attempts'):
+        executor=json.loads(body).get('executor') or {}
+        if executor.get('owner')==owner or executor.get('task')==record['actor']['task']:
+            raise ValueError('workspace product attempt exists; cannot renew')
+    held=ResourceLedger._rows(db) if db.execute("SELECT 1 FROM sqlite_master WHERE name='resource_reservations'").fetchone() else []
+    if any(r['execution_reserved'] and (r.get('session') or {}).get('terminal')==terminal for r in held):
+        raise ValueError('workspace has an active execution lease; cannot renew')
+
+
+def renew_registration(config_path,state,team,terminal,pid,owner,expected_digest,approved=False,reason=None):
+    """Renew a proven delivered but unreceipted registration; never replay a product request."""
+    require_managed()
+    if (approved is not True or not isinstance(reason,str) or not 1<=len(reason.strip())<=300
+            or not reason.isprintable()):
+        raise ValueError('explicit operator approval and bounded recovery reason required')
+    from .context_handoff import locked,directory
+    from .tickets import digest
+    from .pool_control import requests
+    config=load(config_path)
+    with locked(directory(state)/'model-start'):
+        queue=TicketStore(state)
+        try:
+            record=next((r for r in rows(queue.db) if r['terminal']==terminal),None)
+            _renewal_contract(queue.db,record,terminal,pid,owner,expected_digest,team)
+            actor=record['actor']
+            runtime=CoreRuntime(dict(id=actor['task'],owner=owner,provider=actor['provider'],runtime=actor['runtime']))
+            native=runtime._native(actor['task'],ready=True)
+            proof=observe(config,state,team,terminal)
+            if (proof['pid']!=pid or type(native.get('turn')) is not int
+                    or native['turn']<=record['proof']['turn']):
+                raise ValueError('workspace original registration turn has not ended')
+            if any((j.get('receiver') or {}).get('terminal')==terminal
+                   and j['phase'] not in ('pending','completed','deferred','cancelled') for j in requests(state)):
+                raise ValueError('workspace legacy delivery exists; cannot renew')
+            with queue.transaction():
+                current=next((r for r in rows(queue.db) if r['terminal']==terminal),None)
+                _renewal_contract(queue.db,current,terminal,pid,owner,expected_digest,team)
+                previous={k:v for k,v in current.items() if k!='history'}
+                current['history']=current.get('history',[])+[previous]
+                current.update(phase='registering',nonce=uuid.uuid4().hex,created_at=time.time(),
+                    expires_at=time.time()+TTL,proof=proof,renewal=dict(reason=reason.strip(),
+                    previous_digest=digest(previous),operator_approved=True))
+                current.pop('delivery',None)
+                save(queue.db,current)
+            nonce=current['nonce']
+            command=[sys.executable,str(Path(__file__).resolve().parent.parent/'teamkit_cli.py'),
+                '--config',str(config_path),'--state',str(state),'pool','workspace-receipt',
+                '--team',team,'--terminal',terminal,'--expected-owner',owner,'--delivery-id',nonce]
+            approval_scope=dict(terminal=terminal,pid=pid,owner=owner,command=command,
+                reason='confirm this workspace registration through the existing local HC socket',
+                permission='one exact command outside the worker sandbox; no persistent permission or settings changes')
+            with queue.transaction():
+                planned=next(r for r in rows(queue.db) if r['terminal']==terminal)
+                if planned['phase']!='registering' or planned['nonce']!=nonce:
+                    raise ValueError('workspace renewal changed before recording approval scope')
+                planned['renewal']['approval_scope']=approval_scope
+                save(queue.db,planned)
+            text=('REGISTRATION RECOVERY ONLY; no product work. Your prior exact receipt failed because local HC '
+                  'Unix socket access was blocked in the worker sandbox. A fresh receipt challenge replaces the '
+                  'expired challenge; the old nonce is invalid. Run only the exact command below once as yourself. '
+                  'Request on-request approval for this exact command outside the sandbox, with reason: '
+                  'confirm this workspace registration through the existing local HC socket. '
+                  'Do not change settings, disable the sandbox globally, add permissions, impersonate another '
+                  'terminal, modify the command, or retry. If approval is denied or the command fails, stop and '
+                  'report the error. Do not execute product work.\n'+shlex.join(command))
+            def guard():
+                latest=next((r for r in rows(queue.db) if r['terminal']==terminal),None)
+                if (not latest or latest['phase']!='registering' or latest['nonce']!=nonce
+                        or time.time()>latest['expires_at']):
+                    raise ValueError('workspace renewal changed or expired before delivery')
+                after=runtime._native(actor['task'],ready=True)
+                verify_actor(config,actor,after)
+                screen=_call('read','--json',terminal)
+                if (after.get('turn')!=proof['turn'] or screen.get('complete') is not True
+                        or not empty_input(screen.get('text',''))):
+                    raise ValueError('workspace actor or input changed before renewal delivery')
+            guard()
+            accepted=runtime.accept(actor['task'],text,before_send=guard)
+            with queue.transaction():
+                latest=next(r for r in rows(queue.db) if r['terminal']==terminal)
+                if latest['phase']=='registering' and latest['nonce']==nonce:
+                    latest.update(phase='awaiting_receipt',delivery=accepted)
+                    save(queue.db,latest)
+            return dict(terminal=terminal,owner=owner,phase=latest['phase'],expires_at=latest['expires_at'],
+                        renewal_sent=True,product_request_sent=False,approval_scope=approval_scope)
+        finally:queue.close()

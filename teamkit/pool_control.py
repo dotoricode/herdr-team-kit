@@ -717,6 +717,9 @@ def reconcile(config_path,state,ident):
 
 def handle(args):
     config=load(args.config)
+    if args.action=='workspace-registration-status':
+        from .workspace_sessions import registration_status
+        return registration_status(args.state,args.terminal)
     if args.action=='workspace-status':
         from .workspace_sessions import discover
         return {'team':args.team,'sessions':discover(config,args.state,args.team)}
@@ -737,6 +740,9 @@ def handle(args):
     if args.action=='plan':return plan(args.config,args.state,args.team,getattr(args,'provider',None),getattr(args,'account',None))
     from .core_runtime import require_managed
     require_managed()
+    if args.action=='workspace-renew':
+        from .workspace_sessions import renew_registration
+        return renew_registration(args.config,args.state,args.team,args.terminal,args.expected_pid,args.expected_owner,args.registration_digest,args.operator_approved,args.reason)
     if args.action=='workspace-register':
         from .workspace_sessions import register
         return register(args.config,args.state,args.team,args.terminal,args.operator_approved)
