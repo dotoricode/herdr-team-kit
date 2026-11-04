@@ -37,7 +37,7 @@ class HcFixture:
         elif argv[:2]==['hc','wait']:value=self.wait
         elif argv[:2]==['hc','send']:value=self.send
         elif argv[:2]==['hc','label']:
-            self.agent['labels'].update(item.split('=',1) for item in argv[4:]);value={'ok':True}
+            self.agent['labels'].update(item.split('=',1) for item in argv[4 if argv[2]=='--json' else 3:]);value={'ok':True}
         else:raise AssertionError(argv)
         return subprocess.CompletedProcess(argv,0,json.dumps(value),'')
 
@@ -159,6 +159,13 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(sends),1)
         self.assertIn('t8',sends[0]);self.assertEqual(sends[0][-1],'one task; $(never shell)')
         self.assertIn('--if',sends[0]);self.assertEqual(result['wait']['reason'],'status')
+
+    def test_live_accept_binds_owner_task_and_exact_attempt_before_send(self):
+        self.task['runtime'].update(workspace_live=True,resource_attempt='attempt-one')
+        self.hc.agent['labels']['teamkit.owner']='previous'
+        CoreRuntime(self.task).accept('tk-owner','bounded file job')
+        self.assertEqual('attempt-one',self.hc.agent['labels'].get('teamkit.attempt'))
+        self.assertEqual('owner',self.hc.agent['labels']['teamkit.owner'])
 
     def test_accept_confirms_input_without_waiting_for_long_work(self):
         self.hc.send={'started':True,'turn':1}

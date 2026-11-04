@@ -98,7 +98,8 @@ def board(config_path, state):
             and native.get('pid') == executor.get('pid')
             and native.get('owner') == executor.get('owner')
             and native.get('provider') == executor.get('provider')
-            and (not item.get('attempt') or native.get('attempt') in (None,item['attempt'])))
+            and (native.get('attempt') == item.get('attempt') if executor.get('workspace_live')
+                 else not item.get('attempt') or native.get('attempt') in (None,item['attempt'])))
         verified_working = phase == 'running' and receiver_matches and _fresh_native(config, payload) and native.get('status') == 'working'
         team = item['product']
         jobs.append(dict(id=item['id'], team=team, team_label=labels.get(team,team),

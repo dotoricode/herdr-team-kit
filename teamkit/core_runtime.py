@@ -283,9 +283,13 @@ class CoreRuntime:
         if (self.target or {}).get('workspace_live'):
             # The durable attempt and host send fence precede this relabel.
             self._native(name, ready=True)
-            _call('label', native['address'], 'teamkit.owner='+self.task['owner'],
-                  'teamkit.task='+self.task['id'], 'teamkit.name='+name)
+            _call('label', '--json', native['address'], 'teamkit.owner='+self.task['owner'],
+                  'teamkit.task='+self.task['id'], 'teamkit.name='+name,
+                  'teamkit.attempt='+self.target['resource_attempt'])
             self.target['workspace_live'] = False
+            native = self._native(name, ready=True)
+        elif (self.target or {}).get('resource_attempt'):
+            _call('label', '--json', native['address'], 'teamkit.attempt='+self.target['resource_attempt'])
             native = self._native(name, ready=True)
         condition = ['--if', 'idle'] if native['status']['state'] == 'idle' else []
         sent = _call('send', '--json', *condition, native['address'], text, timeout=30)

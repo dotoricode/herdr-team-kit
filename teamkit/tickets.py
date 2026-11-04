@@ -560,8 +560,11 @@ class TicketStore:
             attempt = dict(id=uuid.uuid4().hex, ticket=ident, ordinal=item['attempt_count'] + 1,
                            executor=executor, phase='reserved', created_at=self.clock(),
                            delivery_id=uuid.uuid4().hex, estimated_tokens=estimate)
-            if executor.get('workspace_live'):
+            if not planned:
                 executor = json.loads(json.dumps(executor))
+                executor.setdefault('runtime', {})['resource_attempt'] = attempt['id']
+                attempt['executor'] = executor
+            if executor.get('workspace_live'):
                 executor['task'] = 'OP-' + attempt['id']
                 executor['runtime'].update(name=executor['task'], labels_bound=False)
                 attempt['executor'] = executor

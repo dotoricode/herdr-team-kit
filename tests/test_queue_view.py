@@ -32,6 +32,9 @@ class QueueViewTest(unittest.TestCase):
         ticket['attempt']='old-attempt';observation['terminals'][0]['attempt']='new-attempt'
         job=self.project(ticket,native_observation=observation,task_actors=actors)['jobs'][0]
         self.assertFalse(job['verified_working'])
+        ticket['executor']['workspace_live']=True;observation['terminals'][0].pop('attempt')
+        job=self.project(ticket,native_observation=observation,task_actors=actors)['jobs'][0]
+        self.assertFalse(job['verified_working'])
 
     def test_unlimited_capacity_round_trips_without_becoming_unknown_or_numeric(self):
         capacity = dict(global_limit=None, available=None, used=4,
