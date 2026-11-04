@@ -42,7 +42,7 @@ class CoordinatorPolicyRebindTest(unittest.TestCase):
                 'herdr.space':'spfixture','herdr.tab':'tbfixture'},
             'foreground':{'name':'codex','pid':42,'cwd':str(self.root),
                           'argv':['codex','resume',self.sid,'--no-daemon','--no-alt-screen']}}
-        self.screen = {'complete':True,'text':'›\nContext 80% left\n'}
+        self.screen = {'complete':True,'text':'›\n\nContext 80% left\n'}
         self.layout = {'spaces':[{'id':'spfixture','tabs':[{'id':'tbfixture','terminals':[{'terminal':'tfixture'}]}]}]}
         self.calls = []; self.old_gone = False
         def hc(*argv,**kwargs):
@@ -134,7 +134,7 @@ class CoordinatorPolicyRebindTest(unittest.TestCase):
         with self.assertRaises(ValueError):self.complete(prepared)
         self.old_gone=True;original=copy.deepcopy(self.native)
         for change in ('owner','session','effort','draft','profile'):
-            self.native=copy.deepcopy(original);self.screen['text']='›\nContext 80% left\n';self.env['CODEX_HOME']=str(self.root/'personal')
+            self.native=copy.deepcopy(original);self.screen['text']='›\n\nContext 80% left\n';self.env['CODEX_HOME']=str(self.root/'personal')
             if change=='owner':self.native['labels']['teamkit.owner']='another-owner'
             if change=='session':self.native['foreground']['argv'][2]='another-session'
             if change=='effort':self.native['foreground']['argv']=[x.replace('"low"','"medium"') for x in self.native['foreground']['argv']]
