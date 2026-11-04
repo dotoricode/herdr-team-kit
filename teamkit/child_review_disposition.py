@@ -4,8 +4,11 @@ No actor receipt or submission is manufactured. Only the required-child edge is
 satisfied, and only while the exact operator-approved evidence remains valid.
 """
 import json
+import hashlib
+import re
+import subprocess
 from pathlib import Path
-from .tickets import digest, file_digest
+from .tickets import digest, file_digest, within
 
 CONTRACT = ('goal', 'scope', 'resources', 'checks', 'verification_commands', 'approval',
             'execution_constraint', 'exclude_owners', 'parent_id', 'parent_attempt', 'relation')
@@ -16,6 +19,35 @@ def _packet(path):
     if Path(path).stat().st_size > 256*1024:
         raise ValueError('bounded replacement evidence required')
     return json.loads(Path(path).read_text())
+
+
+def _source(source, proof, scope):
+    """Verify the pinned historical diff without consulting current HEAD/dirty files."""
+    if (not isinstance(source, dict) or not isinstance(proof, dict)
+            or proof.get('method') != 'git-diff-sha256-v1'
+            or any(not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{40}', value)
+                   for value in (source.get('head'), proof.get('base')))
+            or not isinstance(source.get('fingerprint'), str)
+            or not re.fullmatch(r'[0-9a-f]{64}', source['fingerprint'])
+            or not isinstance(source.get('root'), str) or not Path(source['root']).is_absolute()
+            or not within(source['root'], scope)):
+        raise ValueError('bounded Git source and historical diff proof required')
+    root = str(Path(source['root']).resolve())
+    def git(*args):
+        try:
+            return subprocess.check_output(['git','-C',root,*args],stderr=subprocess.PIPE,timeout=15)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ValueError('pinned source Git proof unavailable') from error
+    if git('rev-parse','--show-toplevel').decode().strip() != root:
+        raise ValueError('source root must be the exact Git worktree')
+    base, head = proof['base'], source['head']
+    for commit in (base, head):
+        if git('rev-parse','--verify',commit+'^{commit}').decode().strip() != commit:
+            raise ValueError('pinned source commit differs')
+    git('merge-base','--is-ancestor',base,head)
+    actual = hashlib.sha256(git('diff','--no-ext-diff','--no-textconv',base,head)).hexdigest()
+    if actual != source['fingerprint']:
+        raise ValueError('historical source diff fingerprint differs')
 
 
 def _validate(queue, child, attempt, packet):
@@ -55,6 +87,15 @@ def _validate(queue, child, attempt, packet):
             or any(not isinstance(f, dict) or f.get('blocking') is not False for f in packet['findings'])
             or not isinstance(packet.get('reason'), str) or not packet['reason'].strip()):
         raise ValueError('explicit operator-attested independent reviewer provenance required')
+    _source(submitted['source'], packet.get('source_proof'), child['scope']['paths'])
+    # The approved command validates schema, including a valid fail verdict.
+    # Read the actual review against the parent submission, not packet claims.
+    from .artifact_verifier import review
+    actual = review(packet['artifact'], submitted['artifact_digest'], digest(submitted['source']))
+    if (actual['verdict'] != 'pass' or actual['verdict'] != packet['verdict']
+            or actual['findings'] != packet['findings']
+            or any(finding.get('blocking') is True for finding in actual['findings'])):
+        raise ValueError('actual independent review verdict/findings do not permit replacement')
     return parent, origin
 
 
