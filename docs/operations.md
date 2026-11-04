@@ -252,3 +252,11 @@ usage 배정 모드의 legacy pool 계획도 현재 팀의 ready workspace actor
 기존 pool 요청에서도 사용량 모드는 검증·수신된 워크스페이스 직원들을 회사 계정부터 검토하며, 등록 순서가 개인 계정을 우선시키지 않습니다. 명시적으로 뒤의 준비 요청을 진행할 수 있고 앞의 pending 요청은 이를 막지 않습니다. 같은 팀의 전달·실행·결과 불명 요청과 승인·소유권·자원 경계는 계속 보호합니다.
 
 사용량 모드의 기존 pool 경로에서 검증·수신된 워크스페이스 담당자가 없으면 `workspace verification and registration required`로 대기합니다. 이때 이전 역할 정책·주말 계정 순서나 canonical owner로 되돌아가 전달하지 않습니다. 운영본부는 회사·개인 세션의 현재 사용량과 실행 신원을 확인해 공식 워크스페이스 등록·수신을 마친 뒤 같은 요청을 이어갑니다.
+
+### 만료된 workspace 등록의 제한적 복구
+
+기존 등록 안내가 수신됐으나 worker 샌드박스의 로컬 HC Unix 소켓 차단으로 확인 명령이 실패한 경우, 기존 명령이나 nonce를 재사용하지 않습니다. `pool workspace-registration-status --terminal TERMINAL`은 nonce를 제외한 현재 등록 신원·만료·record_digest를 읽기 전용으로 제공합니다.
+
+운영자는 `pool workspace-renew --team TEAM --terminal TERMINAL --expected-pid PID --expected-owner OWNER --registration-digest DIGEST --operator-approved --reason REASON`으로 정확한 만료 awaiting_receipt 등록만 복구할 수 있습니다. 과거 delivery가 확정 accepted이고 현재 같은 PID/owner가 idle이며 원 등록 턴이 끝났고, 수신된 actor task·제품 attempt·실행 lease·진행 중 legacy 전달이 없어야 합니다. 이전 기록·nonce·delivery는 history에 보존하고 등록만 같은 owner의 새 nonce/5분 challenge로 바꿉니다. 이전 업무·완료는 승계하지 않습니다. 기존 전달 결과 불명이나 새 복구 전달 결과 불명이면 다시 보내지 않습니다.
+
+새 안내는 제품 업무 없이 exact workspace-receipt 명령만 한 번 요청합니다. 원 직원이 자신의 세션에서 그 정확한 명령의 샌드박스 밖 1회 실행만 on-request 승인을 요청해야 합니다. 전체 샌드박스 해제·설정 변경·터미널 위장·운영자 대행 수신·명령 변경·실패 후 반복은 허용하지 않습니다. 승인 거부나 실패이면 중지하고 원인을 보고합니다. 실제 새 argv와 승인 이유·허용 범위는 전달 전 registry의 renewal.approval_scope에 남고 성공 반환에도 제공됩니다. 이 승인은 PR 작업·수정·댓글·머지를 포함하지 않습니다.

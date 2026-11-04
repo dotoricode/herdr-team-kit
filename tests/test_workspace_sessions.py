@@ -313,3 +313,77 @@ class WorkspaceTests(Fixture):
                 pool_control.advance(self.config,self.state,job['id'])
             self.assertEqual([company['task']],sent)
             self.assertEqual('received',pool_control.requests(self.state)[0]['phase'])
+
+    def expired_registration(self):
+        from teamkit.tickets import digest
+        with patch.object(ws.CoreRuntime,'accept',return_value={'accepted':True,'terminal':'t1','native_pid':123,'turn':4}):
+            ws.register(self.config,self.state,'alpha','t1',True)
+        q=TicketStore(self.state);row=ws.rows(q.db)[0]
+        with q.transaction():row['expires_at']=0;ws.save(q.db,row)
+        q.close();self.native['turn']=5
+        return row,digest(row)
+
+    def test_expired_receipt_can_be_renewed_once_and_only_new_actor_receipt_is_valid(self):
+        row,expected=self.expired_registration();messages=[]
+        def accept(runtime,name,text,before_send=None):
+            if before_send:before_send()
+            messages.append(text)
+            return dict(accepted=True,terminal='t1',native_pid=123,turn=5)
+        with patch.object(ws.CoreRuntime,'accept',new=accept),patch('teamkit.core_runtime.require_managed'):
+            result=self.call('pool','workspace-renew','--team','alpha','--terminal','t1',
+                '--expected-pid','123','--expected-owner',row['actor']['owner'],'--registration-digest',expected,
+                '--operator-approved','--reason','Recover the expired fixture registration after sandbox IPC failure.')
+        self.assertTrue(result['renewal_sent']);self.assertFalse(result['product_request_sent'])
+        self.assertEqual(len(messages),1);self.assertIn('on-request approval',messages[0])
+        q=TicketStore(self.state);new=ws.rows(q.db)[0];q.close()
+        self.assertEqual(new['actor']['owner'],row['actor']['owner'])
+        self.assertNotEqual(new['nonce'],row['nonce'])
+        self.assertEqual(result['approval_scope']['command'][-1],new['nonce'])
+        self.assertEqual(new['renewal']['approval_scope'],result['approval_scope'])
+        self.assertNotIn(row['nonce'],messages[0])
+        self.assertEqual(new['history'][-1]['delivery'],row['delivery'])
+        self.native['turn']=6
+        with patch.dict(os.environ,{'HC_TERMINAL_ID':'t1'}):
+            with self.assertRaisesRegex(ValueError,'expired'):ws.receipt(self.config,self.state,'t1',row['actor']['owner'],row['nonce'])
+            ws.receipt(self.config,self.state,'t1',row['actor']['owner'],new['nonce'])
+        self.assertEqual(ws.executors(self.state)[0]['owner'],row['actor']['owner'])
+
+    def test_renewal_requires_exact_registration_digest_and_owner(self):
+        row,expected=self.expired_registration()
+        for pid,owner,key in ((124,row['actor']['owner'],expected),(123,'wrong',expected),(123,row['actor']['owner'],'changed')):
+            with self.assertRaisesRegex(ValueError,'exact expired'):
+                ws.renew_registration(self.config,self.state,'alpha','t1',pid,owner,key,True,'Recover fixture.')
+            self.assertEqual(ws.registration_status(self.state,'t1')['record_digest'],expected)
+
+    def test_renewal_rejects_unknown_delivery_and_product_attempts(self):
+        from teamkit.tickets import digest
+        row,expected=self.expired_registration();q=TicketStore(self.state)
+        with q.transaction():row['delivery']['accepted']=False;ws.save(q.db,row)
+        with self.assertRaisesRegex(ValueError,'unknown'):
+            ws.renew_registration(self.config,self.state,'alpha','t1',123,row['actor']['owner'],digest(row),True,'Recover fixture.')
+        with q.transaction():
+            row['delivery']['accepted']=True;ws.save(q.db,row)
+            q.db.execute('INSERT INTO operation_attempts VALUES (?,?,?)',('prior-attempt','prior-ticket',json.dumps({'executor':row['actor']})))
+        with self.assertRaisesRegex(ValueError,'product attempt'):
+            ws.renew_registration(self.config,self.state,'alpha','t1',123,row['actor']['owner'],digest(row),True,'Recover fixture.')
+        q.close()
+
+    def test_renewal_transport_failure_is_fenced_against_repetition(self):
+        row,expected=self.expired_registration()
+        with patch.object(ws.CoreRuntime,'accept',side_effect=NativeError('unconfirmed')):
+            with self.assertRaises(NativeError):ws.renew_registration(self.config,self.state,'alpha','t1',123,row['actor']['owner'],expected,True,'Recover fixture.')
+        with self.assertRaisesRegex(ValueError,'exact expired'):
+            ws.renew_registration(self.config,self.state,'alpha','t1',123,row['actor']['owner'],ws.registration_status(self.state,'t1')['record_digest'],True,'Recover fixture.')
+        self.assertEqual(ws.executors(self.state),[])
+
+    def test_renewal_rejects_existing_execution_lease_or_actor_replacement(self):
+        row,expected=self.expired_registration();q=TicketStore(self.state)
+        ledger=ws.ResourceLedger(q.db)
+        with q.transaction():ledger._write(q.db,dict(attempt='lease',ticket='fixture',execution_reserved=True,session={'terminal':'t1','pid':123,'owner':'other'}))
+        with self.assertRaisesRegex(ValueError,'active execution lease'):
+            ws.renew_registration(self.config,self.state,'alpha','t1',123,row['actor']['owner'],expected,True,'Recover fixture.')
+        with q.transaction():q.db.execute('DELETE FROM resource_reservations')
+        q.close();self.native['foreground']['pid']=124
+        with self.assertRaises(NativeError):
+            ws.renew_registration(self.config,self.state,'alpha','t1',123,row['actor']['owner'],expected,True,'Recover fixture.')
+        self.assertEqual(ws.registration_status(self.state,'t1')['record_digest'],expected)
