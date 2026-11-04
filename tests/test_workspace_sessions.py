@@ -402,3 +402,69 @@ class WorkspaceTests(Fixture):
         self.assertEqual(new['phase'],'expired_before_delivery')
         self.assertEqual(new['renewal']['outcome'],'not_sent_expired')
         self.assertNotEqual(new['nonce'],row['nonce'])
+
+    def same_turn_registration(self):
+        delivered=dict(accepted=True,terminal='t1',native_pid=123,turn_baseline=4,turn=4)
+        with patch.object(ws.CoreRuntime,'accept',return_value=delivered):ws.register(self.config,self.state,'alpha','t1',True)
+        q=TicketStore(self.state);row=ws.rows(q.db)[0];q.close()
+        self.native['status']['state']='working'
+        return row
+
+    def test_public_workspace_receipt_accepts_fenced_same_turn_working(self):
+        row=self.same_turn_registration()
+        with patch.dict(os.environ,{'HC_TERMINAL_ID':'t1'}),patch('teamkit.core_runtime.require_managed'):
+            result=self.call('pool','workspace-receipt','--team','alpha','--terminal','t1',
+                '--expected-owner',row['actor']['owner'],'--delivery-id',row['nonce'])
+        self.assertEqual(result['phase'],'ready')
+        self.c['operations']={'allocation_policy':'usage'}
+        self.assertIsNone(ws.plan(self.c,self.state,'alpha'),'registration is not product execution readiness')
+        with patch.dict(os.environ,{'HC_TERMINAL_ID':'t1'}):
+            with self.assertRaisesRegex(ValueError,'consumed'):
+                ws.receipt(self.config,self.state,'t1',row['actor']['owner'],row['nonce'])
+
+    def test_same_turn_receipt_rejects_idle_and_unconfirmed_delivery(self):
+        row=self.same_turn_registration();self.native['status']['state']='idle'
+        with patch.dict(os.environ,{'HC_TERMINAL_ID':'t1'}):
+            with self.assertRaisesRegex(ValueError,'turn_not_started'):
+                ws.receipt(self.config,self.state,'t1',row['actor']['owner'],row['nonce'])
+        self.native['status']['state']='working';q=TicketStore(self.state)
+        with q.transaction():row['delivery']['accepted']=False;ws.save(q.db,row)
+        q.close()
+        with patch.dict(os.environ,{'HC_TERMINAL_ID':'t1'}):
+            with self.assertRaisesRegex(ValueError,'delivery_unconfirmed'):
+                ws.receipt(self.config,self.state,'t1',row['actor']['owner'],row['nonce'])
+
+    def test_same_turn_receipt_keeps_profile_model_space_and_process_fences(self):
+        row=self.same_turn_registration()
+        with patch.dict(os.environ,{'HC_TERMINAL_ID':'t1'}):
+            self.native['labels']['herdr.space']='another'
+            with self.assertRaisesRegex(ValueError,'workspace_changed'):
+                ws.receipt(self.config,self.state,'t1',row['actor']['owner'],row['nonce'])
+            self.native['labels']['herdr.space']='space-a'
+            self.native['foreground']['argv'][2]='other-model'
+            with self.assertRaisesRegex(ValueError,'model_changed'):
+                ws.receipt(self.config,self.state,'t1',row['actor']['owner'],row['nonce'])
+            self.native['foreground']['argv'][2]='fixture'
+            with patch.object(ws,'_namespace_matches',return_value=False):
+                with self.assertRaisesRegex(ValueError,'profile_namespace_changed'):
+                    ws.receipt(self.config,self.state,'t1',row['actor']['owner'],row['nonce'])
+            self.native['foreground']['pid']=124
+            with self.assertRaisesRegex(NativeError,'native_owner_or_process_changed'):
+                ws.receipt(self.config,self.state,'t1',row['actor']['owner'],row['nonce'])
+
+    def test_same_turn_receipt_requires_exact_delivery_metadata_and_detector(self):
+        row=self.same_turn_registration();original=json.loads(json.dumps(row))
+        for field,value in (('native_pid',124),('terminal','t2'),('turn_baseline',3),('turn',5)):
+            changed=json.loads(json.dumps(original));changed['delivery'][field]=value
+            q=TicketStore(self.state)
+            with q.transaction():ws.save(q.db,changed)
+            q.close()
+            with patch.dict(os.environ,{'HC_TERMINAL_ID':'t1'}):
+                with self.assertRaisesRegex(ValueError,'delivery_unconfirmed'):
+                    ws.receipt(self.config,self.state,'t1',row['actor']['owner'],row['nonce'])
+        q=TicketStore(self.state)
+        with q.transaction():ws.save(q.db,original)
+        q.close();self.native['status']['app']='unknown'
+        with patch.dict(os.environ,{'HC_TERMINAL_ID':'t1'}):
+            with self.assertRaisesRegex(ValueError,'detector_changed'):
+                ws.receipt(self.config,self.state,'t1',row['actor']['owner'],row['nonce'])

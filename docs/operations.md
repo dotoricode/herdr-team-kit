@@ -274,3 +274,5 @@ usage 배정 모드의 legacy pool 계획도 현재 팀의 ready workspace actor
 원 요청과 증거 사본, 작성자 기록, 운영자 권한, 원 phase·receiver 및 artifact SHA는 operator_result_adoption 감사 기록으로 보존하며 원 수신·전달·제출 기록은 바꾸지 않습니다. 이는 과거 완료한 읽기 전용 결과를 받는 처리이며 현재 PR head를 다시 검증하거나 외부 게시를 승인하지 않습니다. Codex 등 다른 대화 형식은 이번 경로에서 지원하지 않습니다.
 
 운영자 결과 수령의 최종 기록은 자원 예약과 같은 SQLite `BEGIN IMMEDIATE` 잠금 안에서 현재 task·attempt·활성 lease를 다시 검사한 후 수행합니다. 검증 도중 다른 예약이 생기거나 실행자 신원이 바뀌면 수령을 거절하며, 원 요청은 완료로 바뀌지 않습니다.
+
+HC의 turn 카운터는 명령 처리 중 baseline과 같을 수 있습니다. 등록 확인은 own terminal·nonce·owner·PID·profile·model·workspace·cwd 검사를 그대로 유지하며, awaiting_receipt의 확정 accepted delivery가 terminal/PID/turn_baseline/turn을 정확히 증명하고 현재 detector가 working인 경우에만 같은 turn의 수신을 인정합니다. 같은 turn의 idle/done이나 전달 미확인 상태는 수신으로 승격하지 않습니다. 등록 ready가 되더라도 제품 업무 배정은 별도의 idle·입력·quota 검사 뒤에만 가능합니다. 수신 거부는 profile_binding_changed, profile_namespace_changed, model_changed, workspace_changed, root_changed, turn_not_started, delivery_unconfirmed 등의 고정 코드로 구분하며 인증 값·프로세스 환경 원문은 출력하지 않습니다.

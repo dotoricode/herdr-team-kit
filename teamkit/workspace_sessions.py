@@ -4,6 +4,7 @@ import hashlib
 import os
 from pathlib import Path
 import shlex
+import subprocess
 import sys
 import time
 import uuid
@@ -210,6 +211,29 @@ def _register(config_path, state, team, terminal, approved=False):
         queue.close()
 
 
+def _receipt_turn(record,actor,native):
+    """HC completion counters may stay at baseline while the acknowledged turn is working."""
+    turn,baseline=native.get('turn'),record['proof']['turn']
+    status=native.get('status') or {}
+    if not _detector_matches(actor['provider'],status.get('app')):
+        raise ValueError('workspace receipt denied: detector_changed')
+    if type(turn) is not int or type(baseline) is not int or turn<baseline:
+        raise ValueError('workspace receipt denied: turn_unverified')
+    if turn==baseline:
+        if status.get('state')!='working':
+            raise ValueError('workspace receipt denied: turn_not_started')
+        delivery=record.get('delivery') or {}
+        if (record['phase']!='awaiting_receipt' or delivery.get('accepted') is not True
+                or delivery.get('terminal')!=actor['terminal'] or delivery.get('native_pid')!=actor['pid']
+                or type(delivery.get('turn_baseline')) is not int or delivery['turn_baseline']!=baseline
+                or type(delivery.get('turn')) is not int or delivery['turn']!=baseline):
+            raise ValueError('workspace receipt denied: delivery_unconfirmed')
+        mode='accepted_same_turn_working'
+    else:
+        mode='turn_counter_advanced'
+    return dict(turn=turn,baseline=baseline,status=status.get('state'),mode=mode)
+
+
 def receipt(config_path, state, terminal, owner, nonce):
     require_managed()
     if os.environ.get('HC_TERMINAL_ID') != terminal:
@@ -219,19 +243,38 @@ def receipt(config_path, state, terminal, owner, nonce):
     try:
         with queue.transaction():
             record = next((r for r in rows(queue.db) if r['terminal'] == terminal), None)
-            if (not record or record['actor']['owner'] != owner or record['nonce'] != nonce
-                    or record['phase'] not in ('registering', 'awaiting_receipt') or time.time() > record['expires_at']):
-                raise ValueError('workspace receipt is missing, expired or already consumed')
-            actor = record['actor']
-            native = CoreRuntime(dict(id=actor['task'], owner=owner, provider=actor['provider'], runtime=actor['runtime']))._native(actor['task'])
-            env = _process_environment(actor['pid'])
-            if (binding(profile(config, actor['provider'], actor['account'])) != actor['profile_binding']
-                    or not _namespace_matches(actor['provider'], profile(config, actor['provider'], actor['account']), env)
-                    or any(env.get(k) for k in AUTH_ENV)
-                    or _model_effort(actor['provider'], native['foreground'].get('argv')) != (actor['model'], actor['effort'])
-                    or (native.get('labels') or {}).get('herdr.space') != space(config, actor['product'])
-                    or native.get('turn', -1) <= record['proof']['turn']):
-                raise ValueError('workspace receipt profile/model/workspace/turn changed')
+            if record is None:raise ValueError('workspace receipt denied: registration_missing')
+            if record['actor']['owner']!=owner:raise ValueError('workspace receipt denied: owner_changed')
+            if record['nonce']!=nonce:raise ValueError('workspace receipt denied: nonce_invalid_or_expired')
+            if record['phase'] not in ('registering','awaiting_receipt'):
+                raise ValueError('workspace receipt denied: already_consumed')
+            if time.time()>record['expires_at']:raise ValueError('workspace receipt denied: challenge_expired')
+            actor=record['actor']
+            try:
+                native=CoreRuntime(dict(id=actor['task'],owner=owner,provider=actor['provider'],runtime=actor['runtime']))._native(actor['task'])
+            except NativeError as error:
+                code='native_owner_or_process_changed' if str(error)=='Core terminal owner/process changed; preserve it and inspect' else 'native_observation_failed'
+                raise NativeError('workspace receipt denied: '+code) from None
+            try:env=_process_environment(actor['pid'])
+            except (ValueError,OSError,subprocess.SubprocessError):
+                raise ValueError('workspace receipt denied: process_environment_unverified') from None
+            if binding(profile(config,actor['provider'],actor['account']))!=actor['profile_binding']:
+                raise ValueError('workspace receipt denied: profile_binding_changed')
+            if not _namespace_matches(actor['provider'],profile(config,actor['provider'],actor['account']),env):
+                raise ValueError('workspace receipt denied: profile_namespace_changed')
+            if any(env.get(k) for k in AUTH_ENV):
+                raise ValueError('workspace receipt denied: authentication_namespace_changed')
+            try:observed_model=_model_effort(actor['provider'],native['foreground'].get('argv'))
+            except (RuntimeError,NativeError,ValueError):
+                raise ValueError('workspace receipt denied: model_metadata_unverified') from None
+            if observed_model!=(actor['model'],actor['effort']):
+                raise ValueError('workspace receipt denied: model_changed')
+            if (native.get('labels') or {}).get('herdr.space')!=space(config,actor['product']):
+                raise ValueError('workspace receipt denied: workspace_changed')
+            cwd=native['foreground'].get('cwd') or native.get('cwd')
+            if not cwd or Path(cwd).resolve()!=Path(actor['root']).resolve():
+                raise ValueError('workspace receipt denied: root_changed')
+            receipt_turn=_receipt_turn(record,actor,native)
             store=object.__new__(Store);store.db=queue.db;store.path=Path(state)
             if queue.db.execute('SELECT 1 FROM tasks WHERE id=?',(actor['task'],)).fetchone():
                 raise ValueError('workspace actor task already exists')
@@ -244,7 +287,7 @@ def receipt(config_path, state, terminal, owner, nonce):
                 model=actor['model'],effort=actor['effort'],runtime=runtime,
                 workspace_registered=True,workspace_product=actor['product'])
             store._save(value,'workspace_receipted',{'terminal':terminal,'pid':actor['pid']})
-            record.update(phase='ready', received_at=time.time())
+            record.update(phase='ready', received_at=time.time(),receipt_native=receipt_turn)
             save(queue.db, record)
             return dict(terminal=terminal, phase='ready', owner=owner)
     finally:
