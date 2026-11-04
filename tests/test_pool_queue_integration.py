@@ -1,3 +1,4 @@
+from legacy_requests import historical_request
 """Queue consumer checks use actual files/SQLite and a doubled native boundary."""
 import fcntl
 import json
@@ -33,7 +34,7 @@ class QueueIntegrationTests(unittest.TestCase):
 
     def test_current_workflow_gate_cannot_be_replaced_by_free_text_resolution(self):
         actor=self.f.dispatched();work=self.work()
-        job=control.enqueue(self.f.config,self.f.state,'alpha',self.message,work_id='WORK-1')
+        job=historical_request(self.f.config,self.f.state,'alpha',self.message,work_id='WORK-1')
         from teamkit.workflow import document
         _,_,digest=document(load(self.f.config),work)
         path=control.folder(self.f.state)/(job['id']+'.json')
@@ -52,7 +53,7 @@ class QueueIntegrationTests(unittest.TestCase):
 
     def test_long_transport_wait_does_not_hold_global_start_lock(self):
         actor=self.f.dispatched()
-        job=control.enqueue(self.f.config,self.f.state,'alpha',self.message,work_id='WAIT')
+        job=historical_request(self.f.config,self.f.state,'alpha',self.message,work_id='WAIT')
         def transport(*args):
             fd=os.open(context.directory(self.f.state)/'model-start.lock',os.O_CREAT|os.O_WRONLY,0o600)
             try:
@@ -66,8 +67,8 @@ class QueueIntegrationTests(unittest.TestCase):
 
     def test_priority_selects_waiting_work_without_preempting_received_work(self):
         actor=self.f.dispatched()
-        first=control.enqueue(self.f.config,self.f.state,'alpha',self.message,work_id='LOW',priority=0)
-        urgent=control.enqueue(self.f.config,self.f.state,'alpha',self.message,work_id='HIGH',priority=9)
+        first=historical_request(self.f.config,self.f.state,'alpha',self.message,work_id='LOW',priority=0)
+        urgent=historical_request(self.f.config,self.f.state,'alpha',self.message,work_id='HIGH',priority=9)
         with patch.object(context,'capacity_available',return_value=True),patch.object(control,'official',return_value=actor) as sent:
             control.advance(self.f.config,self.f.state,first['id']);self.assertEqual(sent.call_count,0)
             control.advance(self.f.config,self.f.state,urgent['id']);self.assertEqual(sent.call_count,1)
@@ -76,8 +77,8 @@ class QueueIntegrationTests(unittest.TestCase):
 
     def test_urgent_dependent_does_not_starve_its_lower_priority_prerequisite(self):
         actor=self.f.dispatched()
-        first=control.enqueue(self.f.config,self.f.state,'alpha',self.message,work_id='BASE',priority=0)
-        dependent=control.enqueue(self.f.config,self.f.state,'alpha',self.message,work_id='URGENT',
+        first=historical_request(self.f.config,self.f.state,'alpha',self.message,work_id='BASE',priority=0)
+        dependent=historical_request(self.f.config,self.f.state,'alpha',self.message,work_id='URGENT',
                                    priority=9,dependencies=[first['id']])
         with patch.object(context,'capacity_available',return_value=True),patch.object(control,'official',return_value=actor) as sent:
             control.advance(self.f.config,self.f.state,dependent['id'])
@@ -88,9 +89,9 @@ class QueueIntegrationTests(unittest.TestCase):
 
     def test_dependency_deferred_does_not_count_as_completed(self):
         self.f.dispatched()
-        first=control.enqueue(self.f.config,self.f.state,'alpha',self.message,work_id='FIRST')
+        first=historical_request(self.f.config,self.f.state,'alpha',self.message,work_id='FIRST')
         path=control.folder(self.f.state)/(first['id']+'.json');value=context.read(path);value['phase']='deferred';context.write(path,value)
-        second=control.enqueue(self.f.config,self.f.state,'alpha',self.message,work_id='SECOND',dependencies=[first['id']])
+        second=historical_request(self.f.config,self.f.state,'alpha',self.message,work_id='SECOND',dependencies=[first['id']])
         with patch.object(control,'official') as sent:
             control.advance(self.f.config,self.f.state,second['id'])
         sent.assert_not_called()
@@ -99,7 +100,7 @@ class QueueIntegrationTests(unittest.TestCase):
 
     def test_changed_approved_document_waits_before_native_transport(self):
         self.f.dispatched();self.work()
-        job=control.enqueue(self.f.config,self.f.state,'alpha',self.message,work_id='LINK',workflow_id='WORK-1')
+        job=historical_request(self.f.config,self.f.state,'alpha',self.message,work_id='LINK',workflow_id='WORK-1')
         private=self.f.root/'plans'/'WORK-1'/'r1'/'plan.md';private.write_text(private.read_text()+'\nChanged after approval.')
         with patch.object(control,'official') as sent:
             control.advance(self.f.config,self.f.state,job['id'])
@@ -113,7 +114,7 @@ class QueueIntegrationTests(unittest.TestCase):
         self.work()
         requirements=self.f.root/'additional.txt'
         requirements.write_text('Actual device verification must be independently reported.')
-        job=control.enqueue(self.f.config,self.f.state,'alpha',self.message,work_id='WORK-1',
+        job=historical_request(self.f.config,self.f.state,'alpha',self.message,work_id='WORK-1',
             workflow_id='WORK-1',completion_file=requirements if extra else None)
         evidence=self.f.root/'verified.json';evidence.write_text(json.dumps({'verification':['Fixture behavior checked']}))
         self.f.call('work','record','WORK-1','--step','behavior','--evidence-file',str(evidence))

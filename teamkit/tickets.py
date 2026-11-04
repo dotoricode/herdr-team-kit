@@ -71,8 +71,8 @@ def _resource_contract(ticket):
             if not path.is_relative_to(source):
                 raise ValueError('workflow worktree constraint is outside inherited source')
             root = str(Path(inherited['worktree']) / path.relative_to(source))
-        constraints=[dict(kind='named',name='worktree:'+str(Path(root).resolve()),
-                          mode='write' if 'write' in ticket['scope']['actions'] else 'read')]
+        # The pinned root is an approval boundary, not a whole-worktree lease.
+        # Only explicitly declared writes take locks; disjoint files may run together.
     return constraints,normalize_resources([*ticket['resources'],*constraints])
 
 
@@ -324,6 +324,26 @@ class TicketStore:
     def notify(self):
         from .wake import notify
         notify(self.path)
+
+    def cancel(self, ident, reason, user_approved=False):
+        from .resources import ResourceLedger
+        if user_approved is not True or not isinstance(reason, str) or not reason.strip():
+            raise ValueError('cancellation requires explicit user approval and reason')
+        with self.transaction():
+            item=self.get(ident)
+            if item['state']=='cancelled' and item.get('cancellation',{}).get('reason')==reason.strip():
+                return item
+            reservations=ResourceLedger._rows(self.db) if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='resource_reservations'").fetchone() else []
+            if (item['state'] not in ('pending','waiting_approval','backlog') or item.get('attempt')
+                    or item.get('attempt_count',0) or item.get('executor') or item.get('result')
+                    or self.db.execute('SELECT 1 FROM operation_attempts WHERE ticket=?',(ident,)).fetchone()
+                    or any(r['ticket']==ident and (r['execution_reserved'] or r['writes_held']) for r in reservations)):
+                raise ValueError('only never-executed tickets without reservations may be cancelled')
+            evidence=dict(reason=reason.strip(),user_approved=True,at=self.clock())
+            item.update(state='cancelled',reason=reason.strip(),next_action='preserve cancelled instruction and audit history',cancellation=evidence)
+            self._save(item,'cancelled',evidence)
+        self.notify()
+        return item
 
     def set_dependencies(self, ident, dependencies):
         strings(dependencies, 'dependencies', False)

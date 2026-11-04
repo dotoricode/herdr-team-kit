@@ -11,7 +11,7 @@ from .tickets import TicketStore
 def parser(commands):
     item = commands.add_parser('queue')
     item.add_argument('action', choices=('create', 'approve', 'show', 'status', 'submit', 'receipt',
-                                        'recover', 'replace-review-child', 'pull', 'wait-children', 'dependencies', 'tick', 'intake', 'classify', 'approval-template', 'organize', 'dismiss', 'candidates', 'send', 'sync', 'action-status'))
+                                        'cancel', 'recover', 'replace-review-child', 'pull', 'wait-children', 'dependencies', 'tick', 'intake', 'classify', 'approval-template', 'organize', 'dismiss', 'candidates', 'send', 'sync', 'action-status'))
     item.add_argument('ticket', nargs='?')
     item.add_argument('--team')
     item.add_argument('--ticket-file')
@@ -90,6 +90,8 @@ def handle(args):
             raise ValueError('ticket identity required')
         if args.action == 'show':
             return queue.get(args.ticket)
+        if args.action == 'cancel':
+            return queue.cancel(args.ticket,args.reason,args.user_approved)
         if args.action == 'approval-template':
             return queue.approval_template(args.ticket)
         if args.action == 'approve':

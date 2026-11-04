@@ -755,7 +755,8 @@ def reconcile(queue, runtime, config=None):
                            and x.get('parent_attempt') == attempt['id'] and x['role'] == 'reviewer']
                 if not reviews:
                     followup(queue, ticket, attempt, 'required',
-                             'Independently inspect the submitted artifact ' + attempt['submission']['artifact'] +
+                             'Assess the original goal '+ticket['goal']+' and completion conditions '+json.dumps(ticket['completion'])+
+                             '. Independently inspect the submitted artifact ' + attempt['submission']['artifact'] +
                              ' and exact source ' + json.dumps(attempt['submission'].get('source')) +
                              '. Produce JSON {verdict:pass|fail, artifact_digest, source, findings:[{blocking,problem,evidence,impact}]}. '
                              'Do not modify product source or approve your own implementation.', reviewer=True)

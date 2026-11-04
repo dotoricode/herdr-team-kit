@@ -854,16 +854,8 @@ def tick(config_path, state, pool=None, futures=None, operations_consumer=True):
                 del futures[job['id']]
             if job['id'] not in futures:
                 futures[job['id']]=pool.submit(advance,config_path,state,job)
-    from . import session_pool
-    if session_pool.enabled(config):
-        from . import pool_control
-        for assignment in pool_control.requests(state):
-            recoverable = bool(assignment.get('delivery_id')) and assignment['phase'] in ('sending','uncertain')
-            if assignment['phase'] in ('completed','deferred','cancelled') or assignment['phase']=='uncertain' and not recoverable:continue
-            operation=pool_control.reconcile if assignment['phase'] in ('done','received') or recoverable else pool_control.advance
-            key='assignment-'+assignment['id']
-            if pool is None:operation(config_path,state,assignment['id'])
-            elif key not in futures:futures[key]=pool.submit(operation,config_path,state,assignment['id'])
+    # Historical pool JSON is display/reconciliation evidence only. All new work
+    # is consumed by the single operation_tickets dispatcher above.
     from . import team_dispatch
     dispatch_state=team_dispatch.tick(config_path,state)
     for team in dispatch_state.get('teams',[]):

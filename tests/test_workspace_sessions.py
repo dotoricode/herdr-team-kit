@@ -1,3 +1,4 @@
+from legacy_requests import historical_request
 import copy
 import json
 import os
@@ -175,7 +176,7 @@ class WorkspaceTests(Fixture):
         with patch.dict(os.environ,{'HC_TERMINAL_ID':'t1'}):ws.receipt(self.config,self.state,'t1',record['actor']['owner'],record['nonce'])
         message=self.root/'request.txt';message.write_text('Read the approved fixture only.')
         with patch.object(pool_control,'notify'):
-            job=pool_control.enqueue(self.config,self.state,'alpha',message)
+            job=historical_request(self.config,self.state,'alpha',message)
         def official(config,state,*args):
             self.assertEqual(args[0],'tell');self.assertEqual(args[1],record['actor']['task'])
             store=ws.Store(state);actor=store.get(args[1]);store.close()
@@ -303,7 +304,7 @@ class WorkspaceTests(Fixture):
                 with patch.dict(os.environ,{'HC_TERMINAL_ID':terminal}):ws.receipt(self.config,self.state,terminal,record['actor']['owner'],record['nonce'])
             company=next(a for a in ws.executors(self.state) if a['account']=='team')
             message=self.root/'pull-order.txt';message.write_text('Read fixture only.')
-            with patch.object(pool_control,'notify'):job=pool_control.enqueue(self.config,self.state,'alpha',message)
+            with patch.object(pool_control,'notify'):job=historical_request(self.config,self.state,'alpha',message)
             sent=[]
             def official(config,state,*args):
                 sent.append(args[1]);store=ws.Store(state)
