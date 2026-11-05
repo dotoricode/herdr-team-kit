@@ -238,6 +238,40 @@ class ActualHandoffFlowTests(Fixture):
         with patch.object(context,'_call',return_value={'terminals':terminals}):
             self.assertFalse(context.capacity_available(self.state))
 
+    def test_capacity_counts_pool_and_team_dispatch_sends_in_flight(self):
+        import json as _json
+        terminals=[{'address':'outside0','agent':'codex','status':'working'}]
+        with patch.object(context,'_call',return_value={'terminals':terminals}):
+            # Running T1 + one outside model leaves one slot.
+            self.assertTrue(context.capacity_available(self.state))
+        pool=self.state.resolve().parent/'pool-requests'
+        pool.mkdir()
+        (pool/'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1.json').write_text(_json.dumps(
+            {'id':'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1','phase':'sending','task':'T2'}),encoding='utf-8')
+        with patch.object(context,'_call',return_value={'terminals':terminals}):
+            # A pool request already sending to T2 holds that slot until its turn starts.
+            self.assertFalse(context.capacity_available(self.state))
+        (pool/'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1.json').unlink()
+        events=self.state.resolve().with_name('team-dispatch')/'events'
+        events.mkdir(parents=True)
+        ident='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2'
+        (events/(ident+'.json')).write_text(_json.dumps(
+            {'id':ident,'phase':'sending','created_at':1,'receiver':{'task':'T3'}}),encoding='utf-8')
+        with patch.object(context,'_call',return_value={'terminals':terminals}):
+            self.assertFalse(context.capacity_available(self.state))
+
+    def test_capacity_is_unavailable_when_pending_send_records_cannot_be_listed(self):
+        import os
+        terminals=[{'address':'outside0','agent':'codex','status':'working'}]
+        pool=self.state.resolve().parent/'pool-requests'
+        pool.mkdir()
+        os.chmod(pool,0)
+        try:
+            with patch.object(context,'_call',return_value={'terminals':terminals}):
+                self.assertFalse(context.capacity_available(self.state))
+        finally:
+            os.chmod(pool,0o700)
+
     def test_budget_and_context_crossing_cannot_create_two_jobs_for_one_owner(self):
         config=load(self.config)
         self.assertIsNone(context.request(config,self.state,self.target,

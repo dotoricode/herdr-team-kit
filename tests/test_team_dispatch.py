@@ -97,6 +97,27 @@ class TeamDispatchTests(Fixture):
             self.assertEqual(sent.call_count, 1)
         self.assertEqual(dispatch.status(load(self.config), self.state)['events'][0]['phase'], 'uncertain')
 
+    def test_capacity_check_and_sending_save_share_the_model_start_lock(self):
+        import fcntl, os
+        from teamkit import context_handoff
+        self.ready(); self.observe()
+        lock = str(context_handoff.directory(self.state)/'model-start') + '.lock'
+        held = []
+        def capacity(state, *a, **k):
+            fd = os.open(lock, os.O_CREAT | os.O_WRONLY, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held.append(False)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except BlockingIOError:
+                held.append(True)
+            finally:
+                os.close(fd)
+            return True
+        with patch('teamkit.core_runtime.CoreRuntime._native', return_value=self.native()), patch('teamkit.context_handoff.clean_prompt', return_value=True), patch('teamkit.context_handoff.capacity_available', side_effect=capacity), patch('teamkit.pool_control.official', side_effect=TimeoutError):
+            dispatch.advance(self.config, self.state, 'alpha')
+        self.assertEqual(held, [True])
+
     def test_quota_binding_and_expiry_block_delivery(self):
         self.ready(); self.observe()
         store = Store(self.state)
