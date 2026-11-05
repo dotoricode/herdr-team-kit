@@ -1038,6 +1038,19 @@ def capacity_available(state, target=None, current_job=None, config=None):
         if job['id']==current_job:continue
         if job['phase'] in ('requesting','requested','dispatching'):
             t=job['target'];active.add('task:'+t['id'] if t['kind']=='task' else 'coordinator')
+    # Sends committed but not yet started also hold a slot; the model-start lock is released before they run.
+    try:
+        from .pool_control import requests as pool_requests
+        from .team_dispatch import _events as dispatch_events
+        for job in pool_requests(state):
+            if job.get('phase') in ('sending','dispatching') and isinstance(job.get('task'),str):
+                active.add('task:'+job['task'])
+        for event in dispatch_events(state):
+            receiver=event.get('receiver') or {}
+            if event.get('phase')=='sending' and isinstance(receiver.get('task'),str):
+                active.add('task:'+receiver['task'])
+    except (OSError,ValueError):
+        return False
     key=('task:'+target['id'] if target['kind']=='task' else 'coordinator') if target else None
     return len(active)<=3 if key in active else len(active)<3
 
