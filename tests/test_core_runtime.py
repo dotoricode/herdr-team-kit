@@ -69,11 +69,56 @@ class CoreTests(unittest.TestCase):
         self.assertIn('teamkit.owner=owner',argv)
         self.assertEqual(argv[-2:],['codex','--no-daemon'])
         self.assertFalse(any(a[:2]==['hc','send'] for a,_ in self.hc.calls))
+    def test_background_launch_preserves_identity_readiness_without_kept_presentation(self):
+        recorded=[]
+        result=CoreRuntime().launch(self.task,self.spec,'tk-owner',recorded.append,keep=False)
+        argv=next(a for a,_ in self.hc.calls if a[:2]==['hc','run'])
+        self.assertNotIn('--keep',argv)
+        self.assertIn('--bg',argv)
+        self.assertIn('--outlive-parent',argv)
+        self.assertIn('teamkit.owner=owner',argv)
+        self.assertEqual(88,result['native_pid'])
+        self.assertEqual('t8',recorded[0]['terminal'])
+        self.assertFalse(any(a[:2]==['hc','send'] for a,_ in self.hc.calls))
+
     def launched_env(self,env):
         spec={'kind':'codex','env':{'TEAMKIT_OWNER':'owner',**env},'args':['--model','m']}
         CoreRuntime().launch(self.task,spec,'tk-owner')
         argv=next(a for a,_ in self.hc.calls if a[:2]==['hc','run'])
         return argv[argv.index('--')+1:]
+    def test_launch_repairs_dumb_terminal_environment_at_hc_boundary(self):
+        with patch.dict(os.environ, {'TERM':'dumb','COLORTERM':''}, clear=True):
+            with patch('teamkit.core_runtime.require_managed'):
+                argv=self.launched_env({})
+        self.assertIn('TERM=xterm-256color',argv)
+        self.assertIn('COLORTERM=truecolor',argv)
+
+    def test_launch_preserves_explicit_terminal_capabilities_and_no_color(self):
+        with patch.dict(os.environ, {'TERM':'dumb','COLORTERM':''}, clear=True):
+            with patch('teamkit.core_runtime.require_managed'):
+                argv=self.launched_env({'TERM':'screen-256color','COLORTERM':'24bit','NO_COLOR':''})
+        self.assertIn('TERM=screen-256color',argv)
+        self.assertIn('COLORTERM=24bit',argv)
+        self.assertIn('NO_COLOR=',argv)
+        self.assertNotIn('FORCE_COLOR=1',argv)
+
+    def test_launch_forwards_normal_parent_terminal_and_no_color(self):
+        with patch.dict(os.environ, {'TERM':'tmux-256color','COLORTERM':'24bit','NO_COLOR':'1'}, clear=True):
+            with patch('teamkit.core_runtime.require_managed'):
+                argv=self.launched_env({})
+        self.assertIn('TERM=tmux-256color',argv)
+        self.assertIn('COLORTERM=24bit',argv)
+        self.assertIn('NO_COLOR=1',argv)
+
+    def test_launch_color_fallback_handles_missing_and_explicit_dumb_values(self):
+        for env in ({}, {'TERM':'dumb','COLORTERM':''}, {'TERM':''}):
+            with self.subTest(env=env),patch.dict(os.environ,{},clear=True):
+                self.hc.calls.clear()
+                with patch('teamkit.core_runtime.require_managed'):
+                    argv=self.launched_env(env)
+                self.assertIn('TERM=xterm-256color',argv)
+                self.assertIn('COLORTERM=truecolor',argv)
+
     def test_default_claude_home_is_unset_not_empty(self):
         argv=self.launched_env({'ANTHROPIC_API_KEY':'','CLAUDE_CONFIG_DIR':''})
         self.assertEqual(argv[:3],['env','-u','CLAUDE_CONFIG_DIR'])
@@ -114,6 +159,35 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(sends),1)
         self.assertIn('t8',sends[0]);self.assertEqual(sends[0][-1],'one task; $(never shell)')
         self.assertIn('--if',sends[0]);self.assertEqual(result['wait']['reason'],'status')
+
+    def test_accept_confirms_input_without_waiting_for_long_work(self):
+        self.hc.send={'started':True,'turn':1}
+        result=CoreRuntime(self.task).accept('tk-owner','long bounded work')
+        sends=[a for a,_ in self.hc.calls if a[:2]==['hc','send']]
+        self.assertEqual(len(sends),1)
+        self.assertNotIn('--wait',sends[0])
+        self.assertFalse(any(a[:2]==['hc','wait'] for a,_ in self.hc.calls))
+        self.assertTrue(result['accepted'])
+        self.assertEqual(result['terminal'],'t8')
+        self.assertEqual(result['native_pid'],88)
+        self.assertEqual(result['turn_baseline'],1)
+
+    def test_accept_unknown_delivery_never_sends_twice(self):
+        for response in ({'started':False,'turn':1},{'started':None},{}):
+            with self.subTest(response=response):
+                self.hc.calls=[];self.hc.send=response
+                with self.assertRaises(KitError):CoreRuntime(self.task).accept('tk-owner','once')
+                self.assertEqual(sum(a[:2]==['hc','send'] for a,_ in self.hc.calls),1)
+
+    def test_accept_rechecks_identity_after_input_without_replaying(self):
+        original=self.hc.__call__
+        def replaced(argv,**kwargs):
+            result=original(argv,**kwargs)
+            if argv[:2]==['hc','send']:self.hc.agent['foreground']['pid']=89
+            return result
+        with patch('teamkit.core_runtime.subprocess.run',side_effect=replaced):
+            with self.assertRaises(KitError):CoreRuntime(self.task).accept('tk-owner','once')
+        self.assertEqual(sum(a[:2]==['hc','send'] for a,_ in self.hc.calls),1)
     def test_done_is_a_settled_state_and_sends_once_without_force(self):
         self.hc.agent=terminal(status='done')
         CoreRuntime(self.task).prompt('tk-owner','next bounded task')

@@ -193,6 +193,35 @@ class ReceiptTests(Fixture):
         finally:
             if worker.poll() is None:worker.kill();worker.wait()
 
+    def test_cancellation_after_request_commit_before_return_is_rejected(self):
+        from teamkit.receipt import wait_for_confirmation
+        self.submitted()
+        with StoreContext(self.state) as db:
+            original = db._notify
+            calls = []
+            def interrupted():
+                calls.append(True)
+                if len(calls) == 1:
+                    raise SystemExit(143)
+                original()
+            with patch.object(db, '_notify', side_effect=interrupted):
+                with self.assertRaises(SystemExit):
+                    wait_for_confirmation(db, 'T1', 'owner', binding(self.value['profiles']['codex']['team']))
+            with patch('teamkit.providers.identity') as identity:
+                verify_pending(db, self.config, 'T1', 'owner')
+                identity.assert_not_called()
+            self.assertEqual(db.get('T1')['state'], 'uncertain')
+
+    def test_rejected_second_wait_does_not_cancel_prior_request(self):
+        from teamkit.receipt import wait_for_confirmation
+        self.submitted()
+        with StoreContext(self.state) as db:
+            self.request(db)
+            before = db.get('T1')
+            with self.assertRaises(ValueError):
+                wait_for_confirmation(db, 'T1', 'owner', binding(self.value['profiles']['codex']['team']))
+            self.assertEqual(db.get('T1'), before)
+
     def test_deadline_rechecked_after_final_config_read(self):
         from teamkit.config import load
         self.submitted();clock=[100];reads=[0]

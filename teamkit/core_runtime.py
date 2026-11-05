@@ -144,17 +144,25 @@ class CoreRuntime:
             raise RuntimeError('Core agent is not idle and ready; inspect before sending')
         return native
 
-    def launch(self, task, spec, name, on_created=None):
+    def launch(self, task, spec, name, on_created=None, *, keep=True):
+        if type(keep) is not bool:
+            raise RuntimeError('Core launch keep must be an explicit boolean')
         require_managed()
         owner = spec['env'].get('TEAMKIT_OWNER')
         if not owner or spec['kind'] not in ('codex', 'claude'):
             raise RuntimeError('Core launch requires an explicit task owner and provider')
-        args = ['run', '--json', '--bg', '--keep', '--outlive-parent', '--no-notify',
+        args = ['run', '--json', '--bg', *(['--keep'] if keep else []), '--outlive-parent', '--no-notify',
                 '--name', name, '--cwd', task['root'],
                 '--label', 'teamkit.owner='+owner, '--label', 'teamkit.task='+task['id'],
                 '--label', 'teamkit.name='+name]
         # An empty CLAUDE_CONFIG_DIR makes Claude store its home in the working directory.
         env = dict(spec['env'])
+        # hc presents a color-capable PTY even when its caller is a dumb pipe.
+        term = env.get('TERM', os.environ.get('TERM', ''))
+        env['TERM'] = term if term and term != 'dumb' else 'xterm-256color'
+        env['COLORTERM'] = env.get('COLORTERM', os.environ.get('COLORTERM', '')) or 'truecolor'
+        if 'NO_COLOR' not in env and 'NO_COLOR' in os.environ:
+            env['NO_COLOR'] = os.environ['NO_COLOR']
         unset = ['-u', 'CLAUDE_CONFIG_DIR'] if env.get('CLAUDE_CONFIG_DIR') == '' else []
         if unset:
             del env['CLAUDE_CONFIG_DIR']
@@ -264,6 +272,23 @@ class CoreRuntime:
         status = reported.get('state', 'unknown') if _detector_matches(self.task.get('provider'), reported.get('app')) else 'unknown'
         return {'agent':{'name':args[2], 'agent_status':status, 'pane_id':native['address'],
                          'interactive_ready':status in ('idle','done'), 'completion_seq':native.get('turn')}}
+
+    def accept(self, name, text, before_send=None):
+        """Confirm accepted input, independently of the model turn's completion."""
+        require_managed()
+        native = self._native(name, ready=True)
+        if before_send is not None:
+            before_send()
+        condition = ['--if', 'idle'] if native['status']['state'] == 'idle' else []
+        sent = _call('send', '--json', *condition, native['address'], text, timeout=30)
+        if (sent.get('started') is not True or type(sent.get('turn')) is not int
+                or sent['turn'] < native.get('turn', 0)):
+            raise RuntimeError('Core input acceptance unconfirmed; inspect before further input')
+        # An input can already be working here. Recheck identity, not readiness.
+        self._native(name)
+        return {'accepted': True, 'terminal': native['address'],
+                'native_pid': native['foreground']['pid'],
+                'turn_baseline': native.get('turn', 0), 'turn': sent['turn']}
 
     def prompt(self, name, text):
         require_managed()

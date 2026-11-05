@@ -52,6 +52,21 @@ class ContextHandoffTests(unittest.TestCase):
         self.assertTrue(saved['reload_required'])
         self.assertFalse(saved['enabled'])
 
+    def test_department_staff_does_not_require_a_product_pool_task(self):
+        from teamkit.store import Store
+        store = Store(self.state)
+        try:
+            task = store.create('STAFF-QA', 'qa', 'leader', str(self.root),
+                                'a' * 64, 'Prepare a general QA staff seat', 'instructions')
+            task['state'] = 'staff_ready'
+            store.db.execute('UPDATE tasks SET body=? WHERE id=?', (json.dumps(task), task['id']))
+        finally:
+            store.close()
+        config = {**self.config, 'teams': {'alpha': {}}, 'profiles': {'codex': {}, 'claude': {}},
+                  'session_pool': {'enabled': True, 'bindings': str(self.root/'bindings.json'),
+                                   'tasks': {'alpha': 'POOL-ALPHA'}}}
+        self.assertEqual(context.targets(config, self.state), [])
+
     def test_crossing_90_latches_once_even_if_context_later_compacts(self):
         self.assertIsNone(self.request(89.9))
         job = self.request(90)

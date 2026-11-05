@@ -10,3 +10,5 @@ local/
 *.db
 *.log
 .DS_Store
+app-mods/team-queue/gpui-kit.d.ts
+app-mods/team-queue/jsconfig.json

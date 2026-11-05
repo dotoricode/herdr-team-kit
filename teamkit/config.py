@@ -36,8 +36,9 @@ def load(path):
                 or pool['enabled'] and value.get('runtime_backend')!='core'):
             raise ValueError('session_pool requires core, enabled, absolute bindings and a distinct canonical task per team')
     routes = value.get('routing', {})
-    from .routing import KINDS, execution_preference
+    from .routing import KINDS, execution_preference, leader_preference
     execution_preference(value)
+    leader_preference(value)
     if not isinstance(routes, dict) or any(kind not in KINDS for kind in routes):
         raise ValueError('invalid routing kinds')
     for route in routes.values():

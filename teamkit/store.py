@@ -67,6 +67,15 @@ class Store:
         except BaseException:
             self.db.execute('ROLLBACK')
             raise
+        self._notify()
+
+    def _notify(self):
+        # Wakeups are hints. A failed hint must not undo a committed ledger.
+        try:
+            from .wake import notify
+            notify(self.path)
+        except Exception:
+            pass
 
     def get(self, task):
         row = self.db.execute('SELECT body FROM tasks WHERE id=?', (task,)).fetchone()
@@ -125,14 +134,17 @@ class Store:
             if approval_config is not None:
                 from .workflow import check_task
                 work=check_task(approval_config,self,value)
-            active = [t for t in self.list() if t['state'] in ACTIVE]
-            if len(active) >= 3:
-                raise ValueError('global model limit reached')
-            if value['role'] == 'implementer' and any(t['role'] == 'implementer' and (t['team'] == value['team'] or writes_overlap(t['root'], value['root'])) for t in active):
-                raise ValueError('team already has an implementation owner')
+            from . import admission
+            resource_attempt = admission.reserve_task(self, value, owner, provider, account, approval_config)
+            if resource_attempt is None:
+                active = [t for t in self.list() if t['state'] in ACTIVE]
+                if len(active) >= 3:
+                    raise ValueError('global model limit reached')
+                if value['role'] == 'implementer' and any(t['role'] == 'implementer' and (t['team'] == value['team'] or writes_overlap(t['root'], value['root'])) for t in active):
+                    raise ValueError('team already has an implementation owner')
             value.update(state='claimed', owner=owner, provider=provider, account=account, model=model, effort=effort)
             value['attempt_count']=value.get('attempt_count',0)+1
-            value['runtime']={}
+            value['runtime']={'resource_attempt': resource_attempt} if resource_attempt else {}
             if work and value['role']!='implementer' and work.get('hold',{}).get('kind')=='quota':
                 from .workflow import save
                 work.pop('hold')
@@ -154,6 +166,8 @@ class Store:
                 raise ValueError('owner or state transition mismatch')
             value['state'] = state
             value.setdefault('runtime', {}).update(detail)
+            from .admission import bind_task
+            bind_task(self, value)
             return self._save(value, state, detail)
 
     def delivery_failed(self, task, owner):
@@ -180,14 +194,18 @@ class Store:
             if value.get('owner') != owner or value['state'] not in ACTIVE:
                 raise ValueError('runtime note owner/state mismatch')
             value.setdefault('runtime', {}).update(detail)
+            from .admission import bind_task
+            bind_task(self, value)
             return self._save(value, 'runtime', detail)
 
-    def park(self, task, owner):
+    def park(self, task, owner, writer_stopped=False):
         with self.transaction():
             value = self.get(task)
             if value.get('owner') != owner or value['role'] != 'leader' or value['state'] != 'running':
                 raise ValueError('only a running leader can park')
             value['state'] = 'ready'
+            from .admission import release_task
+            release_task(self, value, writer_stopped)
             return self._save(value, 'ready')
 
     def wake(self, task, owner, approval_config=None):
@@ -202,8 +220,14 @@ class Store:
             if approval_config is not None:
                 from .workflow import check_task
                 check_task(approval_config,self,value)
-            if sum(t['state'] in ACTIVE for t in self.list()) >= 3:
-                raise ValueError('global model limit reached')
+            from . import admission
+            resource_attempt = admission.reserve_task(self, value, owner, value['provider'], value['account'], approval_config)
+            if resource_attempt is None:
+                if sum(t['state'] in ACTIVE for t in self.list()) >= 3:
+                    raise ValueError('global model limit reached')
+            else:
+                value.setdefault('runtime', {})['resource_attempt'] = resource_attempt
+                value['runtime'].pop('resource_writer_stopped', None)
             value['state'] = 'running'
             return self._save(value, 'woken')
 
@@ -221,7 +245,10 @@ class Store:
                 if not isinstance(failure, dict) or set(failure) != {'cause','kind'} or failure['kind'] not in FAILURES or not isinstance(failure['cause'], str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}', failure['cause']) or not isinstance(checkpoint['verification'], list) or not checkpoint['verification'] or not all(isinstance(v,str) and v.strip() for v in checkpoint['verification']):
                     raise ValueError('failure requires cause, kind and verification evidence')
                 value.setdefault('failures', []).append({**failure, 'effort':value['effort']})
-            value.update(state='handed_off', owner=None, checkpoint=checkpoint)
+            value['state'] = 'handed_off'
+            from .admission import release_task
+            release_task(self, value, writer_stopped=stopped is True)
+            value.update(owner=None, checkpoint=checkpoint)
             return self._save(value, 'handed_off', checkpoint)
 
     def authorize(self, task, decision, approved):
@@ -237,7 +264,7 @@ class Store:
             value['user_decision'] = dict(decision)
             return self._save(value, 'user_authorized', decision)
 
-    def complete(self, task, owner, head, evidence, reviewed_head=None, review_verdict=None):
+    def complete(self, task, owner, head, evidence, reviewed_head=None, review_verdict=None, writer_stopped=False):
         if not sha(head) or not isinstance(evidence, list) or not evidence or not all(isinstance(x,str) and x.strip() for x in evidence):
             raise ValueError('completion requires full SHA and verification evidence')
         with self.transaction():
@@ -251,7 +278,19 @@ class Store:
                     raise ValueError('linked independent review requires an explicit verdict')
                 value['review_verdict']=review_verdict
             value.update(state='awaiting_review', head=head, verification=evidence)
+            from .admission import release_task
+            release_task(self, value, writer_stopped)
             return self._save(value, 'awaiting_review')
+
+    def release_resources(self, task, owner, writer_stopped=False):
+        with self.transaction():
+            value = self.get(task)
+            if value.get('owner') != owner or value['state'] not in ('ready', 'awaiting_review'):
+                raise ValueError('resource release requires the current stopped task owner')
+            from .admission import release_task
+            if not release_task(self, value, writer_stopped):
+                raise ValueError('actual stopped native execution is not confirmed')
+            return self._save(value, 'resources_released', {'writer_stopped': writer_stopped})
 
     def events(self, task):
         return [dict(seq=r[0], event=r[1], at=r[2], detail=json.loads(r[3])) for r in
@@ -260,5 +299,7 @@ class Store:
     def quota(self, profile, value=None):
         if value is not None:
             self.db.execute('INSERT OR REPLACE INTO quotas VALUES (?,?)', (profile, json.dumps(value)))
+            if not self.db.in_transaction:
+                self._notify()
         row = self.db.execute('SELECT body FROM quotas WHERE profile=?', (profile,)).fetchone()
         return json.loads(row[0]) if row else None

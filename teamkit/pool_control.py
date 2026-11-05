@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 from pathlib import Path
 import subprocess
 import sys
@@ -12,6 +13,7 @@ import uuid
 from .config import load, cached_quota
 from .store import Store, ACTIVE
 from . import session_pool as pool
+from .wake import notify
 
 
 def folder(state):
@@ -157,6 +159,7 @@ def enqueue(config_path,state,team,message_file,provider=None,account=None,work_
                         and old.get('completion_requirements')==completion
                         and old.get('workflow_ref')==workflow_ref and old.get('priority',0)==priority
                         and old.get('dependencies',[])==dependencies and old_resources==claimed_resources):
+                    notify(state)
                     return {k:v for k,v in old.items() if k!='message'}
                 raise ValueError('work identity already has different immutable request content')
         if any(d not in {j['id'] for j in previous} for d in dependencies):
@@ -168,6 +171,7 @@ def enqueue(config_path,state,team,message_file,provider=None,account=None,work_
                'execution_constraint':requested,
                'phase':'pending','at':time.time(),'updated_at':time.time()}
         write_request(folder(state)/(value['id']+'.json'),value)
+    notify(state)
     return {k:v for k,v in value.items() if k!='message'}
 
 
@@ -290,26 +294,159 @@ def _advance(config_path,state,ident):
                     if any(latest.get(k)!=route.get(k) for k in keys):
                         return save('pending','사용량·선택·소유권이 바뀌어 전달 전에 다시 확인합니다.')
                     message=path.with_suffix('.txt')
-                    text=('WORK ID: '+job.get('work_id',job['id'])+'\n'
-                          'Receipt is not work completion. Report evidence and park; only the verified queue resolve releases the next work.\n')
+                    job['delivery_id']=uuid.uuid4().hex
+                    text=('QUEUE REQUEST ID: '+job['id']+'\nWORK ID: '+job.get('work_id',job['id'])+'\n'
+                          'DELIVERY ID: '+job['delivery_id']+'\n'
+                          'Receipt is not work completion. Save result evidence, submit it, then park. Only verified reconciliation releases the next work.\n')
                     if job.get('completion_requirements'):
                         text+='COMPLETION REQUIREMENTS:\n'+job['completion_requirements']+'\n'
-                    message.write_text(text+'\n'+job['message'])
+                    import shlex
+                    submission=command(config_path,state,'pool','submit','--request',job['id'],
+                        '--expected-owner',route['owner'],'--expected-attempt',str(route['attempt']),
+                        '--delivery-id',job['delivery_id'],'--evidence-file','/absolute/path/to/result.json')
+                    text+=('Result JSON requires request_id, work_id, owner, attempt, delivery_id, writer_stopped=true, '
+                           'a nonempty verification string array and artifacts [{"path":"absolute result path","sha256":"file SHA-256"}]. '
+                           'Use the exact identities above. Optional outcome is completed or deferred; deferred requires next. '
+                           'Never claim independent review from your own flag. Additional plain-text completion conditions remain waiting for an applicable verifier.\n'
+                           'Submit before the supplied park command, replacing only the example evidence path:\n'+shlex.join(submission)+'\n')
+                    from .protocol import leader_guidance
+                    message.write_text(text+leader_guidance('leader')+'\n'+job['message'])
                     message.chmod(0o600)
+                    job['delivery_message_sha256']=hashlib.sha256(message.read_bytes()).hexdigest()
+                    job['receiver']={'terminal':task['runtime']['terminal'],'owner':route['owner'],
+                                     'attempt':route['attempt'],'native_pid':task['runtime']['native_pid']}
                     save('sending','선택된 팀장에게 요청을 전달합니다.')
             if route['action']=='dispatch':
                 result=official(config_path,state,'dispatch',job['task'],'--expected-attempt',str(route['attempt']))
                 if result.get('state')!='ready':return save('uncertain','새 담당의 수신·대기를 확인해야 합니다.')
                 return save('pending','새 담당 준비가 끝났습니다. 다음 경계에서 요청을 전달합니다.')
             result=official(config_path,state,'tell',job['task'],'--message-file',str(message),
-                '--expected-owner',route['owner'],'--expected-attempt',str(route['attempt']))
-            job['receiver']={'terminal':result['runtime']['terminal'],'owner':result['owner'],'attempt':result['attempt_count']}
+                '--expected-owner',route['owner'],'--expected-attempt',str(route['attempt']),
+                '--accept-only','--delivery-id',job['delivery_id'])
+            receiver=job['receiver']
+            if (result.get('owner')!=receiver['owner'] or result.get('attempt_count')!=receiver['attempt']
+                    or result.get('runtime',{}).get('terminal')!=receiver['terminal']
+                    or result.get('runtime',{}).get('native_pid')!=receiver['native_pid']):
+                raise ValueError('returned delivery owner or native identity differs from the recorded receiver')
+            delivery=result.get('delivery')
+            if delivery is not None and (delivery.get('accepted') is not True
+                    or delivery.get('delivery_id')!=job['delivery_id']
+                    or delivery.get('terminal')!=receiver['terminal'] or delivery.get('native_pid')!=receiver['native_pid']):
+                raise ValueError('accepted input receipt differs from the recorded delivery')
+            if delivery is None and result.get('state')!='ready':
+                raise ValueError('input acceptance has no receipt')
+            if delivery is not None:job['delivery_receipt']=delivery
             save('received','요청 수신을 확인했습니다. 업무 완료·보류 인계 증거를 기다립니다.')
         except Exception as error:
             job['error_type']=type(error).__name__
             job['error_stage']=job['phase']
             job['error_code']='official_execution_unconfirmed' if job['phase'] in ('sending','dispatching') else 'preparation_failed'
             save('uncertain','실행 결과를 확인해 주세요. 기존 기록과 요청을 보존했습니다.')
+
+
+def _validate_resolution(job,evidence,owner,attempt,outcome):
+    if not evidence or evidence.get('writer_stopped') is not True:
+        raise ValueError('explicit writer-stopped evidence required')
+    verification=evidence.get('verification')
+    if not isinstance(verification,list) or not verification or any(not isinstance(v,str) or not v.strip() for v in verification):
+        raise ValueError('nonempty verification evidence required')
+    receiver=job.get('receiver') or {}
+    if (not owner or type(attempt) is not int or receiver.get('owner')!=owner or receiver.get('attempt')!=attempt
+            or evidence.get('owner')!=owner or evidence.get('attempt')!=attempt
+            or evidence.get('work_id')!=job.get('work_id',job['id'])):
+        raise ValueError('completion evidence must match the received work and owner attempt')
+    if job.get('completion_requirements') and evidence.get('completion_requirements')!=job['completion_requirements']:
+        raise ValueError('verification must explicitly cover the fixed completion requirements')
+    if outcome=='deferred' and (not isinstance(evidence.get('next'),str) or not evidence['next'].strip()):
+        raise ValueError('deferred work requires an explicit handoff next step')
+
+
+def _file_proof(path):
+    path=Path(path)
+    if not path.is_absolute():raise ValueError('absolute result artifact path required')
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(fd,'rb') as source:
+        info=os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or not 0<info.st_size<=64*1024*1024:
+            raise ValueError('nonempty bounded regular result artifact required')
+        return hashlib.file_digest(source,'sha256').hexdigest()
+
+
+def _validate_artifacts(evidence):
+    artifacts=evidence.get('artifacts')
+    if not isinstance(artifacts,list) or not 0<len(artifacts)<=32:
+        raise ValueError('nonempty result artifacts with SHA-256 are required')
+    for item in artifacts:
+        if (not isinstance(item,dict) or set(item)!={'path','sha256'}
+                or not isinstance(item.get('path'),str)
+                or not isinstance(item.get('sha256'),str) or not re.fullmatch(r'[a-f0-9]{64}',item['sha256'])
+                or _file_proof(item.get('path'))!=item['sha256']):
+            raise ValueError('result artifact is missing or changed after verification')
+
+
+def _result_file(path):
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(fd,'rb') as source:
+        info=os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or not 0<info.st_size<=256*1024:
+            raise ValueError('bounded nonempty JSON result evidence required')
+        raw=source.read(256*1024+1)
+    if len(raw)>256*1024:raise ValueError('result evidence grew during read')
+    value=json.loads(raw)
+    if not isinstance(value,dict):raise ValueError('result evidence must be a JSON object')
+    return value,hashlib.sha256(raw).hexdigest()
+
+
+def submit(config_path,state,ident,evidence_file,owner,attempt,delivery_id):
+    """Persist a result candidate; submission never declares the work complete."""
+    from . import context_handoff as context
+    from .core_runtime import CoreRuntime,require_managed
+    if (not isinstance(ident,str) or not context.JOB.fullmatch(ident)
+            or not isinstance(delivery_id,str) or not context.JOB.fullmatch(delivery_id)):
+        raise ValueError('request and execution delivery identities required')
+    source=Path(evidence_file).absolute()
+    evidence,digest=_result_file(source)
+    outcome=(evidence or {}).get('outcome','completed')
+    if outcome not in ('completed','deferred'):raise ValueError('completed or deferred result required')
+    path=folder(state)/(ident+'.json');initial=context.read(path)
+    if not initial:raise ValueError('existing work request required')
+    key=hashlib.sha256(initial['team'].encode()).hexdigest()
+    with context.locked(folder(state)/('team-'+key)),context.locked(path):
+        job=context.read(path)
+        if job.get('phase') not in ('received','done'):raise ValueError('confirmed input acceptance required before result submission')
+        if (job.get('delivery_id')!=delivery_id or evidence.get('delivery_id')!=delivery_id
+                or evidence.get('request_id')!=ident):
+            raise ValueError('result submission execution identity differs from the current request')
+        _validate_resolution(job,evidence,owner,attempt,outcome)
+        _validate_artifacts(evidence)
+        receiver=job.get('receiver') or {}
+        if require_managed()!=receiver.get('terminal'):raise ValueError('only the received execution terminal may submit its result')
+        store=Store(state)
+        try:task=store.get(job['task'])
+        finally:store.close()
+        receipt=task.get('runtime',{}).get('last_delivery') or {}
+        if (task.get('owner')!=owner or task.get('attempt_count')!=attempt
+                or task.get('state') not in ('running','ready') or receipt.get('delivery_id')!=delivery_id
+                or receipt.get('phase')!='accepted' or receipt.get('accepted') is not True
+                or receipt.get('message_sha256')!=job.get('delivery_message_sha256')
+                or any(receipt.get(k)!=receiver.get(k) for k in ('terminal','native_pid','owner','attempt'))
+                or task.get('runtime',{}).get('native_pid')!=receiver.get('native_pid')):
+            raise ValueError('current receipted execution differs from result submission')
+        CoreRuntime(task)._native(task['runtime']['name'])
+        candidate={'source':str(source),'sha256':digest,'owner':owner,'attempt':attempt,
+                   'delivery_id':delivery_id,'outcome':outcome}
+        previous=job.get('submission')
+        if previous:
+            if any(previous.get(k)!=v for k,v in candidate.items()):raise ValueError('result candidate already exists with different immutable evidence')
+            notify(state)
+            return {k:v for k,v in job.items() if k!='message'}
+        snapshot=folder(state)/(ident+'.result-'+digest+'.json')
+        context.write(snapshot,evidence)
+        candidate.update(snapshot=str(snapshot),snapshot_sha256=_file_proof(snapshot),at=time.time())
+        job.update(submission=candidate,updated_at=time.time(),reason='결과 제출을 저장했습니다. 실제 대기·쓰기 중단과 검증을 대조합니다.')
+        write_request(path,job)
+    notify(state)
+    return {k:v for k,v in job.items() if k!='message'}
 
 
 def resolve(config_path,state,ident,outcome,evidence_file,owner,attempt):
@@ -320,11 +457,6 @@ def resolve(config_path,state,ident,outcome,evidence_file,owner,attempt):
         raise ValueError('evidence file and expected owner attempt required')
     source=Path(evidence_file)
     evidence=context.read(source)
-    if not evidence or evidence.get('writer_stopped') is not True:
-        raise ValueError('explicit writer-stopped evidence required')
-    verification=evidence.get('verification')
-    if not isinstance(verification,list) or not verification or any(not isinstance(v,str) or not v.strip() for v in verification):
-        raise ValueError('nonempty verification evidence required')
     path=folder(state)/(ident+'.json')
     initial=context.read(path)
     if not initial:raise ValueError('existing work request required')
@@ -334,14 +466,7 @@ def resolve(config_path,state,ident,outcome,evidence_file,owner,attempt):
         if job['phase'] not in ('received','done'):
             raise ValueError('only a confirmed received request may be resolved')
         receiver=job.get('receiver') or {}
-        if (not owner or type(attempt) is not int or receiver.get('owner')!=owner or receiver.get('attempt')!=attempt
-                or evidence.get('owner')!=owner or evidence.get('attempt')!=attempt
-                or evidence.get('work_id')!=job.get('work_id',job['id'])):
-            raise ValueError('completion evidence must match the received work and owner attempt')
-        if job.get('completion_requirements') and evidence.get('completion_requirements')!=job['completion_requirements']:
-            raise ValueError('verification must explicitly cover the fixed completion requirements')
-        if outcome=='deferred' and (not isinstance(evidence.get('next'),str) or not evidence['next'].strip()):
-            raise ValueError('deferred work requires an explicit handoff next step')
+        _validate_resolution(job,evidence,owner,attempt,outcome)
         config=load(config_path)
         if outcome=='completed' and job.get('workflow_ref'):
             from .queue_policy import completion
@@ -352,22 +477,190 @@ def resolve(config_path,state,ident,outcome,evidence_file,owner,attempt):
         try:task=store.get(job['task'])
         finally:store.close()
         if (task['state']!='ready' or task.get('owner')!=owner or task.get('attempt_count')!=attempt
-                or task.get('runtime',{}).get('terminal')!=receiver.get('terminal')):
+                or task.get('runtime',{}).get('terminal')!=receiver.get('terminal')
+                or (job.get('delivery_id') or job.get('receiver_lineage'))
+                   and task.get('runtime',{}).get('native_pid')!=receiver.get('native_pid')):
             raise ValueError('current ready owner must match the received work')
         if idle_native(task,config,state) is None:raise ValueError('current work is still active or has unsubmitted input')
         job.update(phase=outcome,work_resolution=evidence,updated_at=time.time(),
                    reason='업무 완료 증거를 확인했습니다.' if outcome=='completed' else '보류 인계 증거를 확인했습니다.')
         write_request(path,job)
+        notify(state)
         return {k:v for k,v in job.items() if k!='message'}
 
 
+def rebind_receiver(config_path,state,ident,evidence_file,owner,attempt,operator_approved=False):
+    """Repair only a proven legacy session resume; never change work resolution."""
+    from . import context_handoff as context
+    from .core_runtime import CoreRuntime,require_managed,_call,_values
+    require_managed()
+    if (operator_approved is not True or not isinstance(ident,str) or not context.JOB.fullmatch(ident)
+            or not isinstance(owner,str) or not owner or type(attempt) is not int or attempt<1):
+        raise ValueError('approved operator reconciliation and exact request owner/attempt required')
+    evidence_path=Path(evidence_file).absolute()
+    evidence,evidence_digest=_result_file(evidence_path)
+    if (not isinstance(evidence.get('operator_reference'),str) or not evidence['operator_reference'].strip()
+            or not isinstance(evidence.get('verification'),list) or not evidence['verification']
+            or any(not isinstance(x,str) or not x.strip() for x in evidence['verification'])
+            or type(evidence.get('lineage_event_seq')) is not int or evidence['lineage_event_seq']<1
+            or not isinstance(evidence.get('request_record_sha256'),str)
+            or not re.fullmatch(r'[a-f0-9]{64}',evidence['request_record_sha256'])):
+        raise ValueError('operator reference, pinned request hash and ledger lineage evidence required')
+    path=folder(state)/(ident+'.json');initial=context.read(path)
+    if not initial:raise ValueError('existing legacy work request required')
+    key=hashlib.sha256(initial['team'].encode()).hexdigest()
+    with context.locked(folder(state)/('team-'+key)),context.locked(path):
+        job=context.read(path)
+        if (job.get('phase') not in ('received','done') or job.get('delivery_id')
+                or job.get('team')!=initial.get('team')):
+            raise ValueError('only legacy confirmed received/done requests may rebind their receiver')
+        history=job.get('receiver_lineage',[])
+        if not isinstance(history,list):raise ValueError('receiver lineage history is invalid')
+        previous=history[-1] if history and history[-1].get('evidence_sha256')==evidence_digest else None
+        receiver=previous['previous_receiver'] if previous else job.get('receiver') or {}
+        if (receiver.get('owner')!=owner or receiver.get('attempt')!=attempt
+                or evidence.get('request_id')!=ident or evidence.get('task')!=job.get('task')
+                or evidence.get('owner')!=owner or type(evidence.get('attempt')) is not int or evidence['attempt']!=attempt
+                or evidence.get('from_terminal')!=receiver.get('terminal')):
+            raise ValueError('legacy receiver or evidence owner/attempt differs')
+        expected_hash=previous['original_request_sha256'] if previous else hashlib.sha256(path.read_bytes()).hexdigest()
+        if evidence['request_record_sha256']!=expected_hash:
+            raise ValueError('legacy request changed after operator inspection')
+        config=load(config_path)
+        store=Store(state)
+        try:
+            task=store.get(job['task'])
+            events=store.events(job['task'])
+        finally:store.close()
+        runtime=task.get('runtime') or {}
+        if (config.get('runtime_backend')!='core' or task.get('state')!='ready'
+                or task.get('role')!='leader' or task.get('team')!=job['team']
+                or task.get('owner')!=owner or task.get('attempt_count')!=attempt
+                or evidence.get('to_terminal')!=runtime.get('terminal')
+                or evidence.get('from_terminal')==runtime.get('terminal')):
+            raise ValueError('current ready execution is not the same resumed owner/attempt')
+        session=evidence.get('session_id')
+        recorded=[value for value in (runtime.get('resumed_session'),runtime.get('context_session_id'),
+                   (runtime.get('reboot_restore')or{}).get('session_id')) if value]
+        if not isinstance(session,str) or not recorded or any(value!=session for value in recorded):
+            raise ValueError('current recorded native session differs from the operator lineage')
+        event=next((e for e in events if e['seq']==evidence['lineage_event_seq']),None)
+        detail=(event or {}).get('detail') or {}
+        if (not event or event['event']!='native-session-resumed' or event['at']<job['at']
+                or detail.get('from_terminal')!=receiver['terminal']
+                or detail.get('to_terminal')!=runtime['terminal'] or detail.get('session')!=session
+                or detail.get('owner_preserved') is not True or detail.get('state_preserved') is not True):
+            raise ValueError('matching owner-preserving native session resume event is required')
+        claims=[e for e in events if e['event']=='claimed' and e['seq']<event['seq']]
+        if (len(claims)!=attempt or not claims or claims[-1]['detail'].get('owner')!=owner
+                or claims[-1]['at']>job['at']):
+            raise ValueError('lineage event is outside the original execution attempt')
+        old=_call('get',receiver['terminal'])
+        old_labels=old.get('labels') or {}
+        if (old.get('state')!='finished' or old.get('foreground') is not None
+                or old_labels.get('teamkit.owner')!=owner or old_labels.get('teamkit.task')!=job['task']):
+            raise ValueError('the original owned terminal must be proven finished before receiver rebind')
+        native=idle_native(task,config,state)
+        if native is None:raise ValueError('resumed native is working or has an unknown input draft')
+        argv=(native.get('foreground')or{}).get('argv') or []
+        if task['provider']=='claude':sessions=_values(argv,'--resume')
+        else:
+            positions=[i for i,value in enumerate(argv[:-1]) if value=='resume']
+            sessions=[argv[i+1] for i in positions]
+        if sessions!=[session]:raise ValueError('actual native argv does not resume the pinned conversation')
+        CoreRuntime(task)._native(runtime['name'],ready=True)
+        updated_receiver={**receiver,'terminal':runtime['terminal'],'native_pid':runtime['native_pid']}
+        if previous:
+            if job.get('receiver')!=updated_receiver:raise ValueError('recorded receiver changed after the earlier reconciliation')
+            if _file_proof(previous['original_request_file'])!=previous['original_request_sha256']:
+                raise ValueError('preserved original request bytes changed')
+            return {k:v for k,v in job.items() if k!='message'}
+        original=path.read_bytes()
+        if hashlib.sha256(original).hexdigest()!=expected_hash:raise ValueError('legacy request changed during lineage verification')
+        backup=folder(state)/(ident+'.receiver-before-'+expected_hash+'.json')
+        try:fd=os.open(backup,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        except FileExistsError:
+            if _file_proof(backup)!=expected_hash:raise ValueError('existing original-request backup differs')
+        else:
+            with os.fdopen(fd,'wb') as output:output.write(original);output.flush();os.fsync(output.fileno())
+        audit={'at':time.time(),'operator_reference':evidence['operator_reference'],
+               'evidence_file':str(evidence_path),'evidence_sha256':evidence_digest,
+               'original_request_file':str(backup),'original_request_sha256':expected_hash,
+               'previous_receiver':receiver,'receiver':updated_receiver,'session_id':session,
+               'lineage_event_seq':event['seq'],'lineage_event':event,
+               'previous_phase':job['phase'],'previous_reason':job.get('reason'),
+               'verification':evidence['verification']}
+        job.update(receiver=updated_receiver,receiver_lineage=[*history,audit],updated_at=time.time(),
+                   reason='동일 담당·실행 시도의 대화 재개 계보를 확인했습니다. 업무 완료와 검증은 별도 확인합니다.')
+        write_request(path,job)
+    notify(state)
+    return {k:v for k,v in job.items() if k!='message'}
+
+
+def _recover_delivery(config_path,state,ident):
+    """Adopt only this execution's durable accepted receipt; never resend input."""
+    from . import context_handoff as context
+    from .core_runtime import CoreRuntime
+    path=folder(state)/(ident+'.json');initial=context.read(path)
+    if not initial or not isinstance(initial.get('delivery_id'),str) or not context.JOB.fullmatch(initial['delivery_id']):return
+    key=hashlib.sha256(initial['team'].encode()).hexdigest()
+    with context.locked(folder(state)/('team-'+key)),context.locked(path):
+        job=context.read(path)
+        if job.get('phase') not in ('sending','uncertain'):return
+        receiver=job.get('receiver') or {}
+        store=Store(state)
+        try:task=store.get(job['task'])
+        finally:store.close()
+        runtime=task.get('runtime') or {};receipt=runtime.get('last_delivery') or {}
+        if (receipt.get('phase')!='accepted' or receipt.get('accepted') is not True
+                or receipt.get('delivery_id')!=job['delivery_id']
+                or not job.get('delivery_message_sha256')
+                or receipt.get('message_sha256')!=job['delivery_message_sha256']
+                or any(receipt.get(k)!=receiver.get(k) for k in ('terminal','native_pid','owner','attempt'))
+                or task.get('owner')!=receiver.get('owner') or task.get('attempt_count')!=receiver.get('attempt')
+                or runtime.get('terminal')!=receiver.get('terminal') or runtime.get('native_pid')!=receiver.get('native_pid')
+                or task.get('state') not in ('running','ready')):
+            return
+        CoreRuntime(task)._native(runtime['name'])
+        job.update(phase='received',delivery_receipt=receipt,
+                   transport_recovery={'previous_phase':job['phase'],'at':time.time()},updated_at=time.time(),
+                   reason='같은 실행의 저장된 입력 수락과 실제 세션 신원을 대조했습니다. 업무 완료는 별도 확인합니다.')
+        write_request(path,job)
+
+
 def reconcile(config_path,state,ident):
-    """Advance only a formally completed linked work; never repair uncertain transport."""
+    """Reconcile accepted input and submitted proof without inventing completion."""
     from . import context_handoff as context
     from .queue_policy import completion
+    from .runtime import RuntimeError as RuntimeUnavailable
+    if not isinstance(ident,str) or not context.JOB.fullmatch(ident):raise ValueError('valid queue request identity required')
     job=context.read(folder(state)/(ident+'.json'))
-    if not job or job['phase'] not in ('received','done') or not job.get('workflow_ref'):return
+    if not job:return
     try:
+        if job['phase'] in ('sending','uncertain'):
+            _recover_delivery(config_path,state,ident)
+            job=context.read(folder(state)/(ident+'.json'))
+        if job['phase'] not in ('received','done'):return
+        candidate=job.get('submission')
+        if candidate:
+            if (candidate.get('delivery_id')!=job.get('delivery_id')
+                    or _file_proof(candidate['source'])!=candidate['sha256']
+                    or _file_proof(candidate['snapshot'])!=candidate['snapshot_sha256']):
+                raise ValueError('submitted result source or snapshot changed')
+            evidence=context.read(Path(candidate['snapshot']))
+            if evidence.get('request_id')!=ident or evidence.get('delivery_id')!=job.get('delivery_id'):
+                raise ValueError('submitted result identity changed')
+            _validate_artifacts(evidence)
+            if job.get('completion_requirements'):
+                path=folder(state)/(ident+'.json')
+                with context.locked(path):
+                    current=context.read(path)
+                    if current.get('phase') in ('received','done'):
+                        current.update(reason='추가 완료 조건은 일반 문장만으로 자동 검증할 수 없습니다. 적용 가능한 검증 근거 확인을 기다립니다.',updated_at=time.time())
+                        write_request(path,current)
+                return
+            return resolve(config_path,state,ident,candidate['outcome'],candidate['snapshot'],candidate['owner'],candidate['attempt'])
+        if not job.get('workflow_ref'):return
         proof=completion(load(config_path),state,job)
         if proof is None:return
         if job.get('completion_requirements'):
@@ -386,8 +679,16 @@ def reconcile(config_path,state,ident):
         path=folder(state)/(ident+'.workflow-proof.json')
         context.write(path,evidence)
         return resolve(config_path,state,ident,'completed',path,receiver.get('owner'),receiver.get('attempt'))
-    except (ValueError,KeyError,OSError):
+    except (ValueError,KeyError,OSError,RuntimeUnavailable) as error:
         # Keep received ownership and its evidence intact for a manager to inspect.
+        path=folder(state)/(ident+'.json')
+        with context.locked(path):
+            current=context.read(path)
+            if current and current.get('submission') and current.get('phase') in ('received','done'):
+                detail={'type':type(error).__name__,'reason':str(error)}
+                if current.get('verification_error')!=detail:
+                    current.update(verification_error=detail,reason='제출 결과의 실행 신원·파일·검증을 확인해야 합니다.',updated_at=time.time())
+                    write_request(path,current)
         return
 
 
@@ -420,6 +721,10 @@ def handle(args):
         return {'refreshed':'configured account observations; unknown or failed readings remain ineligible','model_requests':0}
     if args.action=='resolve':
         return resolve(args.config,args.state,args.request,args.outcome,args.evidence_file,args.expected_owner,args.expected_attempt)
+    if args.action=='submit':
+        return submit(args.config,args.state,args.request,args.evidence_file,args.expected_owner,args.expected_attempt,args.delivery_id)
+    if args.action=='rebind-receiver':
+        return rebind_receiver(args.config,args.state,args.request,args.evidence_file,args.expected_owner,args.expected_attempt,args.operator_approved)
     if args.action=='assign':
         if not args.team or not args.message_file:raise ValueError('team and approved message file required')
         from .context_handoff import ensure

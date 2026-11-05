@@ -18,6 +18,7 @@ from .config import binding, load, profile
 from .core_runtime import CoreRuntime, _call, _model_effort, claude_gui_settings, require_managed
 from .routing import execution_policy, execution_candidates
 from .runtime import launch_spec
+from .staff import display_name
 
 SAFE_FIELDS = ('team', 'task', 'provider', 'account', 'model', 'effort', 'phase', 'generation',
                'owner', 'name', 'terminal', 'native_pid', 'reason', 'updated_at', 'native_verified_at')
@@ -386,9 +387,10 @@ def present(config, state, only=None):
                      'owner': slot['owner'], 'runtime': slot['runtime']}
             CoreRuntime(actor)._native(slot['name'])
             tab = 'tbpool'+slot['owner'][:16]
-            _call('label', slot['terminal'], 'herdr.space='+space, 'herdr.tab='+tab)
+            label = display_name(slot['provider'], slot['account'], product=slot['team'],
+                                 aliases=config.get('operations', {}).get('staff_aliases'))
+            _call('label', slot['terminal'], 'herdr.space='+space, 'herdr.tab='+tab, 'ui.display-name='+label)
             _wait_for_tab(space,tab,slot['terminal'])
-            label = ('개인' if slot['account'] == 'personal' else '회사')+' · '+slot['provider'].capitalize()
             subprocess.run(['herdr-app', 'do', 'tab.rename', json.dumps({'id': tab, 'name': label})],
                            capture_output=True, text=True, timeout=5, check=True)
             count += 1

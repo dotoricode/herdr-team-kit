@@ -3,6 +3,7 @@ import copy
 from datetime import datetime
 import json
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 from test_cli import Fixture, StoreContext
@@ -232,3 +233,62 @@ class ExecutionPreferenceTests(Fixture):
             with self.subTest(preference=preference):
                 self.value['execution_preference'] = preference; self.save()
                 with self.assertRaises(ValueError): load(self.config)
+
+    def test_leader_priority_dispatches_company_claude_even_on_weekend(self):
+        self.value['leader_execution_preference'] = {'provider':'claude','account':'team',
+            'model':'claude-opus-5-5','effort':'medium'}
+        self.save(); self.make('--role','leader'); self.seed(claude_personal=20)
+        task, _, _ = self.dispatch()
+        self.assertEqual((task['provider'],task['account'],task['model'],task['effort']),
+                         ('claude','team','claude-opus-5-5','medium'))
+
+    def test_leader_priority_still_rejects_blocked_company_quota(self):
+        self.value['leader_execution_preference'] = {'provider':'claude','account':'team',
+            'model':'claude-opus-5-5','effort':'medium'}
+        self.save(); self.make('--role','leader'); self.seed(claude_personal=20)
+        with StoreContext(self.state) as db:
+            value = db.quota('claude/team')
+            value['five_hour']['used'] = 99
+            db.quota('claude/team',value)
+        task, _, _ = self.dispatch()
+        self.assertEqual((task['provider'],task['account'],task['model']),
+                         ('claude','personal','claude-opus-5-5'))
+
+    def test_leader_only_preference_plan_waits_for_fresh_quota(self):
+        self.value.pop('execution_preference')
+        self.value['leader_execution_preference'] = {'provider':'claude','account':'team',
+            'model':'claude-opus-5-5','effort':'medium'}
+        self.save(); self.make('--role','leader')
+        with patch('teamkit.__main__.time.time', return_value=SUNDAY):
+            plan = self.call('plan', 'T1')
+        selected, identity, launcher = self.dispatch()
+        self.assertEqual(plan['action'], 'wait')
+        self.assertEqual(plan, selected)
+        identity.assert_not_called(); launcher.assert_not_called()
+
+    def test_leader_only_preference_rechecks_config_after_identity(self):
+        self.value.pop('execution_preference')
+        self.value['leader_execution_preference'] = {'provider':'claude','account':'team',
+            'model':'claude-opus-5-5','effort':'medium'}
+        self.save(); self.make('--role','leader'); self.seed()
+        def change(*args):
+            self.value['leader_execution_preference']['model'] = 'changed-after-identity'
+            self.save()
+        with self.assertRaisesRegex(ValueError, 'changed during preflight'):
+            self.dispatch(identity_effect=change)
+        self.assertEqual(self.call('show', 'T1')['state'], 'queued')
+
+    def test_work_linked_design_executor_keeps_its_sandbox_adapter(self):
+        from test_workflow import WorkflowTests
+        self.value['leader_execution_preference'] = {'provider':'claude','account':'team',
+            'model':'claude-opus-5-5','effort':'medium'}
+        self.save(); WorkflowTests.setup_work(self)
+        self.call('create','T1','--team','alpha','--role','leader','--work-kind','design',
+                  '--root',str(self.repo),'--work','W1','--goal-file',str(self.root/'goal.txt'))
+        self.seed()
+        task, _, launcher = self.dispatch()
+        self.assertEqual((task['provider'], task['model'], task['effort']),
+                         ('codex','design-model','high'))
+        launch_task, spec = launcher.return_value.launch.call_args.args[:2]
+        self.assertEqual(Path(launch_task['root']), (self.root/'private-plans/W1/r1').resolve())
+        self.assertIn('sandbox_workspace_write.exclude_slash_tmp=true',spec['args'])

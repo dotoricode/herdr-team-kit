@@ -11,9 +11,10 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
-from contextlib import contextmanager, closing
+from contextlib import contextmanager, closing, nullcontext
 from concurrent.futures import ThreadPoolExecutor
 
 from .config import binding, load, profile, cached_quota
@@ -112,7 +113,8 @@ def targets(config, state, starting=False):
             observer=(dispatch['enabled'] and dispatch['tasks'].get(task['team'])==task['id']
                       and task.get('team_dispatch_team')==task['team']
                       and task.get('execution_constraint')=={'provider':'codex','account':'personal'})
-            if (session_pool.enabled(config) and task.get('role')=='leader' and not task.get('work_id')
+            if (session_pool.enabled(config) and task.get('team') in config['teams']
+                    and task.get('role')=='leader' and not task.get('work_id')
                     and task.get('classification',{}).get('kind','general')=='general'
                     and task['id']!=session_pool.task_id(config,task['team']) and not observer):
                 continue
@@ -724,7 +726,97 @@ def attach(config, state, previous, address):
         os.close(lock)
 
 
-def tick(config_path, state, pool=None, futures=None):
+def _operations_tick(config_path, state):
+    config = load(config_path)
+    from . import operations, admission
+    if (not settings(config)['enabled'] or config.get('runtime_backend') != 'core'
+            or not operations.enabled(config)):
+        return {'enabled':False}
+    admission.configure(state, operations.policy(config))
+    admission.reconcile_stopped(state)
+    from .queue_actions import consume
+    actions = consume(config_path, state)
+    # A sync request already performed this consumer's full reconcile/dispatch pass.
+    synced = next((action for action in reversed(actions) if action['kind']=='sync'
+                   and action.get('result') is not None), None)
+    result = dict(synced['result']['dispatch']) if synced else operations.tick(config_path, state)
+    result['actions'] = actions
+    return result
+
+
+def dispatch_status(state):
+    """Read the independent dispatcher heartbeat without querying native actors."""
+    path = Path(state).resolve().with_name('context-handoffs') / 'dispatch-consumer.json'
+    value = read(path) or {'phase':'missing', 'enabled':False,
+                           'reason':'dispatch consumer heartbeat missing'}
+    return {**value, 'heartbeat_age_seconds':max(0, time.time()-value.get('observed_at',0))}
+
+
+@contextmanager
+def dispatch_consumer(config_path, state):
+    """A single sequential dispatcher, inside the supervisor's lifetime flock."""
+    from .wake import listener, notify, wait
+    stopped = threading.Event()
+    path = directory(state) / 'dispatch-consumer.json'
+    value = {'schema_version':1, 'pid':os.getpid(), 'phase':'starting', 'enabled':False,
+             'observed_at':time.time(), 'source_fingerprint':LOADED_SOURCE_FINGERPRINT,
+             'last_success_at':None, 'consecutive_errors':0}
+    failure = []
+    with listener(state, channel='dispatch') as wake:
+        def publish(**changes):
+            value.update(changes, observed_at=time.time())
+            write(path, value)
+        def reload_required():
+            if source_fingerprint() == LOADED_SOURCE_FINGERPRINT:
+                return False
+            publish(phase='reload_required', enabled=False, reload_required=True,
+                    reason='dispatch source version changed; current attempt drained without retry')
+            notify(state)
+            return True
+        def consume():
+            try:
+                publish(thread_id=threading.get_ident(), thread_name=threading.current_thread().name)
+                while not stopped.is_set():
+                    if reload_required():
+                        break
+                    publish(phase='working', enabled=False, tick_started_at=time.time())
+                    try:
+                        result = _operations_tick(config_path, state)
+                    except Exception as error:
+                        publish(phase='error', enabled=False, consecutive_errors=value['consecutive_errors']+1,
+                                reason=type(error).__name__+': '+str(error),
+                                last_error={'type':type(error).__name__, 'reason':str(error), 'at':time.time()})
+                    else:
+                        if reload_required():
+                            break
+                        publish(phase='idle' if result.get('enabled') is True else 'disabled',
+                                enabled=result.get('enabled') is True, last_success_at=time.time(),
+                                consecutive_errors=0, reason='')
+                    if not stopped.is_set():
+                        wait(wake, 5)
+            except BaseException as error:
+                failure.append(error)
+                publish(phase='error', enabled=False, reason=type(error).__name__+': '+str(error),
+                        last_error={'type':type(error).__name__, 'reason':str(error), 'at':time.time()})
+            finally:
+                publish(phase=value['phase'] if value['phase'] in ('error','reload_required') else 'stopped',
+                        enabled=False, stopped_at=time.time())
+        scope = hashlib.sha256(str(Path(state).resolve()).encode()).hexdigest()[:12]
+        thread = threading.Thread(target=consume, name='teamkit-dispatch-'+scope)
+        thread.start()
+        try:
+            yield thread
+        finally:
+            stopped.set()
+            notify(state)
+            # Keep the lifetime flock until the in-flight tick drains; no second
+            # supervisor may start merely because a shutdown timeout elapsed.
+            thread.join()
+            if failure:
+                raise RuntimeError('dispatch consumer failed; inspect its error heartbeat') from failure[0]
+
+
+def tick(config_path, state, pool=None, futures=None, operations_consumer=True):
     config = load(config_path)
     if not settings(config)['enabled'] or config.get('runtime_backend') != 'core':
         return {'enabled':False}
@@ -733,6 +825,14 @@ def tick(config_path, state, pool=None, futures=None):
             if future.done():
                 future.result()
                 del futures[nonce]
+    from . import operations, admission
+    if operations.enabled(config):
+        admission.configure(state, operations.policy(config))
+        if operations_consumer:
+            if pool is None:
+                _operations_tick(config_path, state)
+            elif 'operation-tickets' not in futures:
+                futures['operation-tickets'] = pool.submit(_operations_tick, config_path, state)
     for target in targets(config, state):
         try:
             native(target, state)
@@ -758,8 +858,9 @@ def tick(config_path, state, pool=None, futures=None):
     if session_pool.enabled(config):
         from . import pool_control
         for assignment in pool_control.requests(state):
-            if assignment['phase'] in ('completed','deferred','uncertain','cancelled'):continue
-            operation=pool_control.reconcile if assignment['phase'] in ('done','received') else pool_control.advance
+            recoverable = bool(assignment.get('delivery_id')) and assignment['phase'] in ('sending','uncertain')
+            if assignment['phase'] in ('completed','deferred','cancelled') or assignment['phase']=='uncertain' and not recoverable:continue
+            operation=pool_control.reconcile if assignment['phase'] in ('done','received') or recoverable else pool_control.advance
             key='assignment-'+assignment['id']
             if pool is None:operation(config_path,state,assignment['id'])
             elif key not in futures:futures[key]=pool.submit(operation,config_path,state,assignment['id'])
@@ -779,18 +880,33 @@ def serve(config_path, state, once=False):
     fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            futures={}
-            while True:
-                if source_fingerprint()!=LOADED_SOURCE_FINGERPRINT:
-                    write(directory(state)/'supervisor.json',{'observed_at':time.time(),'pid':os.getpid(),
-                        'enabled':False,'reload_required':True,'terminal':os.environ.get('HC_TERMINAL_ID'),'source_fingerprint':LOADED_SOURCE_FINGERPRINT})
-                    return {'enabled':False,'reload_required':True}
-                value = tick(config_path, state, None if once else pool, futures)
-                write(directory(state) / 'supervisor.json', {'observed_at':time.time(), 'pid':os.getpid(), 'enabled':value['enabled'], 'terminal':os.environ.get('HC_TERMINAL_ID'), 'source_fingerprint':LOADED_SOURCE_FINGERPRINT})
-                if once:
-                    return value
-                time.sleep(settings(load(config_path))['interval'])
+        from .wake import listener, wait
+        if source_fingerprint()!=LOADED_SOURCE_FINGERPRINT:
+            write(directory(state)/'supervisor.json', {'observed_at':time.time(), 'pid':os.getpid(),
+                  'enabled':False, 'reload_required':True, 'terminal':os.environ.get('HC_TERMINAL_ID'),
+                  'source_fingerprint':LOADED_SOURCE_FINGERPRINT})
+            return {'enabled':False, 'reload_required':True}
+        workers = load(config_path).get('operations', {}).get('consumer_workers', 2)
+        if type(workers) is not int or not 2 <= workers <= 16:
+            raise ValueError('consumer_workers must be an integer in 2..16')
+        with listener(state) as wake, ThreadPoolExecutor(max_workers=workers) as pool:
+            with (nullcontext() if once else dispatch_consumer(config_path, state)):
+                futures={}
+                while True:
+                    if source_fingerprint()!=LOADED_SOURCE_FINGERPRINT:
+                        write(directory(state)/'supervisor.json',{'observed_at':time.time(),'pid':os.getpid(),
+                            'enabled':False,'reload_required':True,'terminal':os.environ.get('HC_TERMINAL_ID'),'source_fingerprint':LOADED_SOURCE_FINGERPRINT})
+                        return {'enabled':False,'reload_required':True}
+                    value = (tick(config_path, state, None, futures) if once
+                             else tick(config_path, state, pool, futures, operations_consumer=False))
+                    heartbeat = {'observed_at':time.time(), 'pid':os.getpid(), 'enabled':value['enabled'],
+                                 'terminal':os.environ.get('HC_TERMINAL_ID'), 'source_fingerprint':LOADED_SOURCE_FINGERPRINT}
+                    if not once:
+                        heartbeat['dispatch'] = dispatch_status(state)
+                    write(directory(state) / 'supervisor.json', heartbeat)
+                    if once:
+                        return value
+                    wait(wake, min(5, settings(load(config_path))['interval']))
     finally:
         os.close(fd)
 
@@ -889,9 +1005,34 @@ def summary(config, state):
     return {'enabled':True,'healthy':healthy,'label':'자동 인계 · 90%' if healthy else '자동 인계 · 감시 확인 필요','active':active}
 
 
-def capacity_available(state, target=None, current_job=None):
+def capacity_available(state, target=None, current_job=None, config=None):
     store=Store(state)
-    try:tasks=store.list()
+    try:
+        tasks=store.list()
+        from . import admission
+        enabled, policy = admission.policy_for(config, store.db)
+        if enabled:
+            try:
+                observation = admission.observe_native()
+                snapshot = admission.snapshot(store.db, config, observation)
+                included = False
+                if target:
+                    runtime = next((t.get('runtime', {}) for t in tasks if t['id'] == target.get('id')), {})
+                    attempt = runtime.get('resource_attempt')
+                    if target.get('kind') == 'coordinator':
+                        from .app_coordinator import read_record
+                        attempt = read_record(state).get('resource_attempt')
+                    from .resources import ResourceLedger
+                    included = any(r['attempt'] == attempt and r['execution_reserved']
+                                   for r in ResourceLedger._rows(store.db))
+                    included |= any(r.get('terminal') == target.get('terminal')
+                                    and r.get('status') not in ('idle', 'done', 'blocked', 'finished')
+                                    for r in observation['terminals'])
+                if policy['global_limit'] is None:
+                    return True
+                return snapshot['used'] <= policy['global_limit'] if included else snapshot['available'] > 0
+            except Exception:
+                return False
     finally:store.close()
     aliases={t.get('runtime',{}).get('terminal'):'task:'+t['id'] for t in tasks}
     from .app_coordinator import read_record
