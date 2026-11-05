@@ -1042,6 +1042,10 @@ def capacity_available(state, target=None, current_job=None, config=None):
     try:
         from .pool_control import requests as pool_requests
         from .team_dispatch import _events as dispatch_events
+        # glob() hides an unreadable directory as empty; list it first so that fails closed.
+        for folder in (Path(state).resolve().parent/'pool-requests', Path(state).resolve().with_name('team-dispatch')/'events'):
+            if folder.exists():
+                os.listdir(folder)
         for job in pool_requests(state):
             if job.get('phase') in ('sending','dispatching') and isinstance(job.get('task'),str):
                 active.add('task:'+job['task'])

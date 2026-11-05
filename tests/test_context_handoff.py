@@ -260,6 +260,18 @@ class ActualHandoffFlowTests(Fixture):
         with patch.object(context,'_call',return_value={'terminals':terminals}):
             self.assertFalse(context.capacity_available(self.state))
 
+    def test_capacity_is_unavailable_when_pending_send_records_cannot_be_listed(self):
+        import os
+        terminals=[{'address':'outside0','agent':'codex','status':'working'}]
+        pool=self.state.resolve().parent/'pool-requests'
+        pool.mkdir()
+        os.chmod(pool,0)
+        try:
+            with patch.object(context,'_call',return_value={'terminals':terminals}):
+                self.assertFalse(context.capacity_available(self.state))
+        finally:
+            os.chmod(pool,0o700)
+
     def test_budget_and_context_crossing_cannot_create_two_jobs_for_one_owner(self):
         config=load(self.config)
         self.assertIsNone(context.request(config,self.state,self.target,

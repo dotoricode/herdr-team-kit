@@ -275,7 +275,7 @@ def advance(config_path, state, team):
     setting = settings(config)
     if not setting['enabled'] or team not in setting['tasks']:
         return
-    from .context_handoff import locked, capacity_available
+    from .context_handoff import locked, capacity_available, directory as context_directory
     from .pool_control import official, command
     root = _directory(state)
     key = hashlib.sha256(team.encode()).hexdigest()
@@ -297,11 +297,16 @@ def advance(config_path, state, team):
                 _write(path, event)
                 return
             task = _ready(config, state, team)
-            if task is None or not capacity_available(state):
+            if task is None:
                 return
-            event.update(phase='sending', receiver={'task': task['id'], 'owner': task['owner'],
-                         'attempt': task['attempt_count'], 'terminal': task['runtime']['terminal']}, updated_at=time.time())
-            _write(path, event)
+            # Check and claim the slot under the shared model-start lock, as pool requests do,
+            # so two observers cannot both take the last slot.
+            with locked(context_directory(state)/'model-start'):
+                if not capacity_available(state):
+                    return
+                event.update(phase='sending', receiver={'task': task['id'], 'owner': task['owner'],
+                             'attempt': task['attempt_count'], 'terminal': task['runtime']['terminal']}, updated_at=time.time())
+                _write(path, event)
             evidence = root/('ack-'+event['id']+'.json')
             ack_command = command(config_path, state, 'team-dispatch', 'ack', '--team', team,
                                   '--event', event['id'], '--owner', task['owner'], '--attempt', str(task['attempt_count']),
