@@ -980,14 +980,19 @@ class TicketStore:
             attempt = self.attempt(attempt_id)
             actor = attempt['executor']
             receipt = attempt.get('actor_receipt') or {}
-            if (item.get('attempt') != attempt_id or not item.get('intervention')
-                    or item['state'] not in ('running', 'awaiting_verification')
+            # The host already proved a replaced process ended, so there is no live turn to fence.
+            replaced = (item['state'] == 'intervention'
+                        and (item.get('intervention') or {}).get('kind') == 'process_replaced'
+                        and attempt.get('phase') == 'process_replaced')
+            fenced = replaced or (
+                item['state'] in ('running', 'awaiting_verification') and isinstance(native, dict)
+                and all(native.get(k) == actor.get(k) for k in ('terminal','pid','owner'))
+                and native.get('status') in ('idle','done')
+                and type(native.get('turn')) is int and type(receipt.get('turn')) is int
+                and native['turn'] > receipt['turn'])
+            if (item.get('attempt') != attempt_id or not item.get('intervention') or not fenced
                     or self.incomplete_children(ident) or writer_stopped is not True
-                    or not isinstance(reason, str) or not reason.strip()
-                    or any(native.get(k) != actor.get(k) for k in ('terminal','pid','owner'))
-                    or native.get('status') not in ('idle','done')
-                    or type(native.get('turn')) is not int or type(receipt.get('turn')) is not int
-                    or native['turn'] <= receipt['turn']):
+                    or not isinstance(reason, str) or not reason.strip()):
                 raise ValueError('recovery requires current intervention, fenced completed turn and explicit stopped-writer confirmation')
             ResourceLedger(self.db).release_in_transaction(self.db,attempt_id,True,True,True)
             attempt.update(phase='abandoned', recovery=dict(reason=reason,native=native,writer_stopped=True,at=self.clock()))

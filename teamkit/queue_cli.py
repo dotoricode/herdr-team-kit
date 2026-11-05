@@ -112,6 +112,8 @@ def handle(args):
         if args.action == 'recover':
             if not args.user_approved or not args.writer_stopped or not args.reason:
                 raise ValueError('operator-approved recovery requires explicit stopped-writer confirmation and reason')
+            if (queue.get(args.ticket).get('intervention') or {}).get('kind') == 'process_replaced':
+                return queue.recover_intervention(args.ticket,args.attempt,None,True,args.reason)
             runtime = NativeRuntime(load(args.config), args.state)
             return queue.recover_intervention(args.ticket,args.attempt,runtime.native(executor),True,args.reason)
         if os.environ.get('HC_TERMINAL_ID') != executor['terminal'] or args.owner != executor['owner']:

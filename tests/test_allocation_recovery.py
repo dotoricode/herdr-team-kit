@@ -40,6 +40,26 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual('pending',q.get('STOPPED')['state'])
         self.assertEqual('abandoned',q.attempt(attempt)['phase'])
 
+    def test_replaced_process_can_be_recovered_without_old_native_match(self):
+        self.enqueue('REPLACED')
+        def send(executor,text):
+            q=TicketStore(self.state)
+            item=q.get('REPLACED');a=q.attempt(item['attempt'])
+            q.receipt(item['id'],a['id'],executor['owner'],'t1',dict(self.runtime.native(executor),turn=1));q.close()
+            return {'accepted':True}
+        self.runtime.send=send
+        tick(self.config,self.state,self.runtime)
+        q=TicketStore(self.state);self.addCleanup(q.close)
+        attempt=q.get('REPLACED')['attempt']
+        q.process_replaced('REPLACED',attempt)
+        self.assertEqual('intervention',q.get('REPLACED')['state'])
+        with self.assertRaises(ValueError):q.recover_intervention('REPLACED',attempt,None,False,'operator confirms stop')
+        with self.assertRaises(ValueError):q.recover_intervention('REPLACED',attempt,None,True,'  ')
+        q.recover_intervention('REPLACED',attempt,None,True,'previous outcome inspected')
+        self.assertEqual('pending',q.get('REPLACED')['state'])
+        self.assertNotIn('intervention',q.get('REPLACED'))
+        self.assertEqual('abandoned',q.attempt(attempt)['phase'])
+
     def test_parent_recovery_question_clears_after_children_complete(self):
         self.enqueue('PARENT')
         tick(self.config,self.state,self.runtime)
