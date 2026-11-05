@@ -33,6 +33,9 @@ def variants(data):
     first = data['roster']['teams'][0]['employees'] if data['roster']['teams'] and data['roster']['teams'][0]['employees'] else None
     if first:
         first[0] = employee
+        if len(first) > 1:
+            first[1] = dict(first[1], progress={'linked': False, 'source': 'codex', 'stalled': False, 'last_change': None,
+                                                'activity': None, 'steps': employee['progress']['steps']})
     bounty = next((b for b in data['hq']['bounties'] if b['status'] == 'claimed'), {'id': 'x', 'title': '난제'})
     tabs = ('progress', 'floor', 'goal', 'bounty')
     pages = {f'page-{tab}': {'tab': tab, 'data': data} for tab in tabs}

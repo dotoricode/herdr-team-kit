@@ -475,8 +475,10 @@ export default class TeamOperations extends View {
     const rows = teams.flatMap(team => team.employees.filter(e => this.matches(e, team)).map(e => ({ e, team })));
     const rank = ({ e }) => (e.progress?.stalled ? 0 : e.state === "working" ? 1 : e.state === "blocked" ? 2 : 3);
     const recent = ({ e }) => -(e.progress?.last_change ?? 0);
-    const linked = rows.filter(r => r.e.progress?.linked).sort((a, b) => rank(a) - rank(b) || recent(a) - recent(b));
-    const unlinked = rows.filter(r => !r.e.progress?.linked);
+    // Recorded steps count even when the transcript is not linked (agent-progress works without it).
+    const shown = r => r.e.progress?.linked || Boolean(r.e.progress?.steps);
+    const linked = rows.filter(shown).sort((a, b) => rank(a) - rank(b) || recent(a) - recent(b));
+    const unlinked = rows.filter(r => !shown(r));
     return panel().size_full()
       .child(panelTitle("진행 현황", "직원을 누르면 단계와 상세"))
       .child(v_flex().flex_1().min_h(0).gap(8).overflow_y_scrollbar()
@@ -484,7 +486,9 @@ export default class TeamOperations extends View {
         .children(linked.map(({ e, team }) => this.progressRow(e, team)))
         .when(unlinked.length > 0, el => el.child(v_flex().gap(4).pt(8)
           .child(text(`진행 기록 연결 안 됨 ${unlinked.length}명`, FS.sm, C.sub))
-          .child(text(unlinked.map(({ e }) => e.label).join(" · "), FS.xs, C.faint)))));
+          .child(h_flex().flex_wrap().gap(6).children(unlinked.map(({ e, team }) => div().id(`unlinked-${e.terminal}`)
+            .px(8).py(3).rounded(6).bg(C.raised).cursor_pointer().text_size(FS.xs).text_color(C.sub)
+            .on_click(() => this.openBadge(e, team.label)).child(e.label)))))));
   }
 
   progressRow(e, team) {
@@ -571,7 +575,7 @@ export default class TeamOperations extends View {
           .child(div().text_size(FS.lg).font_semibold().child(goal.sentence || "목표 문장 없음"))
           .when(goal.metrics.length > 0, el => el.child(text("성공 지표", FS.sm, C.sub)).child(table(goal.metrics, ["지표", "기준선", "목표", "기한"])))
           .when(goal.levers.length > 0, el => el.child(text("레버", FS.sm, C.sub)).child(table(goal.levers, ["입력 지표", "담당 (사람/에이전트)"])))
-          .when(goal.guardrails.length > 0, el => el.child(text("가드레일", FS.sm, C.sub)).child(table(goal.guardrails, ["지표", "허용 한계"])))
+          .when(goal.guardrails.length > 0, el => el.child(text("가드레일", FS.sm, C.sub)).child(table(goal.guardrails, ["지표", "허용 한계", "넘으면 할 일"])))
           .when(goal.donts.length > 0, el => el.child(div().text_size(FS.sm).text_color(C.BAD).child(`하지 말 것: ${goal.donts.join(" · ")}`)))))
       .child(panel().flex_1()
         .child(panelTitle(`제안함 ${proposals.length}`, "에이전트: python3 -m teamkit.hq propose"))

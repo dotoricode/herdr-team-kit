@@ -103,5 +103,31 @@ class CodexLinkTests(unittest.TestCase):
             self.assertIsNone(progress.recorded_steps(tmp, '../t1'))
 
 
+class ReviewFindingTests(unittest.TestCase):
+    def test_task_update_finds_the_task_created_by_task_create(self):
+        records = [claude_use('TaskCreate', {'subject': 'Build', 'activeForm': 'Building'}, 'toolu_create'),
+                   {'type': 'user', 'isSidechain': False, 'toolUseResult': {'task': {'id': '1'}},
+                    'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'toolu_create', 'content': 'Task #1 created'}]}},
+                   claude_use('TaskUpdate', {'taskId': '1', 'status': 'completed'}, 'toolu_update')]
+        _, todos = progress.claude_activity(records)
+        self.assertEqual([(t['content'], t['status']) for t in todos], [('Build', 'completed')])
+
+    def test_steps_survive_when_the_todo_list_is_older_than_the_tail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / 'sessions').mkdir()
+            (home / 'sessions' / '42.json').write_text(json.dumps(
+                {'pid': 42, 'sessionId': 'abc12345-0000-0000-0000-000000000000', 'cwd': '/srv/r'}), encoding='utf-8')
+            filler = {'type': 'user', 'isSidechain': False, 'message': {'content': [{'type': 'text', 'text': 'x' * 4096}]}}
+            write_jsonl(home / 'projects' / '-srv-r' / 'abc12345-0000-0000-0000-000000000000.jsonl', [
+                claude_use('TodoWrite', {'todos': [{'content': 'A', 'status': 'completed'}, {'content': 'B', 'status': 'in_progress', 'activeForm': 'Doing B'}]}, 'w1')]
+                + [filler] * (progress.TAIL_BYTES // 4000 + 10) + [claude_use('Read', {'file_path': '/srv/r/x'}, 'u9')])
+            cache = {}
+            got = progress.observe('t9', 7, 'claude-code', 'working', claude_dirs=[home], now=0, cache=cache,
+                                   tree=lambda pid: [7, 42], files=lambda pid: [])
+            self.assertEqual((got['activity']['label'], got['steps']['done'], got['steps']['current']), ('파일 읽기', 1, 'Doing B'))
+            self.assertTrue(cache)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -127,7 +127,7 @@ def _claude_detail(name, given):
 
 def claude_activity(records):
     """Latest top-level tool call, and the todo list if the session keeps one."""
-    todos, failed, activity = {}, set(), None
+    todos, failed, activity, created = {}, set(), None, {}
     for rec in records:
         content = (rec.get('message') or {}).get('content')
         if rec.get('isSidechain') or not isinstance(content, list):
@@ -137,17 +137,40 @@ def claude_activity(records):
                 failed.add(part.get('tool_use_id'))
     for rec in records:
         content = (rec.get('message') or {}).get('content')
-        if rec.get('isSidechain') or rec.get('type') != 'assistant' or not isinstance(content, list):
+        if rec.get('isSidechain') or not isinstance(content, list):
             continue
         for part in content:
-            if not isinstance(part, dict) or part.get('type') != 'tool_use':
+            if not isinstance(part, dict):
+                continue
+            if part.get('type') == 'tool_result' and part.get('tool_use_id') in created:
+                # TaskCreate's result names the task id that later TaskUpdate calls use.
+                use_id = part['tool_use_id']
+                real = _created_task_id(rec, part)
+                if real and use_id in todos and real not in todos:
+                    todos = {(real if k == use_id else k): v for k, v in todos.items()}
+                created.pop(use_id, None)
+            if rec.get('type') != 'assistant' or part.get('type') != 'tool_use':
                 continue
             name, given = part.get('name'), part.get('input') or {}
             if name in TODO_TOOLS and part.get('id') not in failed:
                 _apply_todo(todos, name, given, part.get('id'))
+                if name == 'TaskCreate' and part.get('id'):
+                    created[part['id']] = True
             activity = {'label': _tool_label(name), 'detail': _claude_detail(name, given),
                         'at': _seconds(rec.get('timestamp'))}
     return activity, list(todos.values())
+
+
+def _created_task_id(rec, part):
+    result = rec.get('toolUseResult') or rec.get('tool_use_result') or {}
+    task = result.get('task') if isinstance(result, dict) else None
+    if isinstance(task, dict) and task.get('id') is not None:
+        return str(task['id'])
+    content = part.get('content')
+    text = content if isinstance(content, str) else ' '.join(
+        str(x.get('text', '')) for x in content if isinstance(x, dict)) if isinstance(content, list) else ''
+    found = re.search(r'Task #([0-9A-Za-z-]+)', text)
+    return found.group(1) if found else None
 
 
 def _status(value):
@@ -217,7 +240,36 @@ def _summary(items, title=''):
             'current': (current['active'] or current['content']) if current else ''}
 
 
-def observe(terminal, pid, app, state, *, claude_dirs=(), steps_dir=None, now, tree=descendants, files=open_files):
+FULL_BYTES = 32 * 1024 * 1024
+TODO_MARKS = tuple(f'"name":"{name}"'.encode() for name in TODO_TOOLS) + tuple(f'"name": "{name}"'.encode() for name in TODO_TOOLS)
+
+
+def full_todos(path, cache=None):
+    """Replay the whole transcript for its todo list: lists can be older than the tail.
+    Cached by path, size and mtime so an unchanged file is not read again."""
+    stat = path.stat()
+    key = f'{path}|{stat.st_size}|{stat.st_mtime_ns}'
+    if cache is not None and key in cache:
+        return cache[key]
+    with open(path, 'rb') as handle:
+        data = handle.read(FULL_BYTES)
+    todos = []
+    if any(mark in data for mark in TODO_MARKS):
+        records = []
+        for line in data.decode('utf-8', errors='replace').splitlines():
+            try:
+                records.append(json.loads(line))
+            except ValueError:
+                continue
+        todos = claude_activity(records)[1]
+    if cache is not None:
+        for old in [k for k in cache if k.startswith(f'{path}|')]:
+            cache.pop(old)
+        cache[key] = todos
+    return todos
+
+
+def observe(terminal, pid, app, state, *, claude_dirs=(), steps_dir=None, now, cache=None, tree=descendants, files=open_files):
     """Progress for one staff terminal. `state` is the app's working/idle/... status."""
     pids = tree(pid) if isinstance(pid, int) else []
     path = claude_transcript(pids, claude_dirs) if app == 'claude-code' else codex_transcript(pids, files)
@@ -228,6 +280,8 @@ def observe(terminal, pid, app, state, *, claude_dirs=(), steps_dir=None, now, t
             activity, todos = read(_tail_records(path))
             if activity is None and path.stat().st_size > TAIL_BYTES:
                 activity, todos = read(_tail_records(path, TAIL_BYTES * 8))
+            if app == 'claude-code' and path.stat().st_size > TAIL_BYTES:
+                todos = full_todos(path, cache)
             changed = path.stat().st_mtime
         except OSError:
             path, changed = None, None
