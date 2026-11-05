@@ -10,7 +10,6 @@ import time
 from .app_bridge import bindings, readonly_snapshot, verified_session, session_read
 from .config import load
 from .knowledge import search
-from .staff import display_name
 
 
 def app_sessions():
@@ -26,7 +25,6 @@ def snapshot(config_path, state, binding_path):
     spaces = app_sessions()['spaces']
     try:tasks = readonly_snapshot(state)['tasks']
     except (OSError,ValueError):tasks=[]
-    aliases = config.get('operations', {}).get('staff_aliases', {})
     teams = []
     for team, policy in config['teams'].items():
         entry = linked['teams'][team]
@@ -62,9 +60,7 @@ def snapshot(config_path, state, binding_path):
             'space':(space or {}).get('id'),'terminal':terminal,'state':selected.get('state','미확인'),
             'live':bool(employees),'identity':'App 화면 기준 · 계정 신원은 별도 확인',
             'employees':employees,'roles':[{'role':role,'provider':value.get('provider')} for role,value in policy['roles'].items()]})
-    profiles = [{'provider':provider,'account':account,'label':display_name(provider,account,aliases=aliases)}
-                for provider,accounts in config['profiles'].items() for account in accounts]
-    result = {'observed_at':time.time(),'teams':teams,'profiles':profiles}
+    result = {'observed_at':time.time(),'teams':teams}
     target = Path(state).resolve().parent/'knowledge-hub-roster.json'
     fd, temp = tempfile.mkstemp(prefix='.knowledge-hub-roster-',dir=target.parent)
     try:
