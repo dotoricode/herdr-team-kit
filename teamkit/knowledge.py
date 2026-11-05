@@ -1,6 +1,7 @@
 """Read and append the local knowledge hub's Markdown documents."""
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -16,20 +17,25 @@ def search(root, query=''):
     terms = query.casefold().split()
     entries = []
     for path in root.glob('*.md'):
-        if path.name == 'README.md':
+        # Dot files are add_entry's in-flight temporaries; a document replaced mid-scan is read next time.
+        if path.name == 'README.md' or path.name.startswith('.'):
             continue
-        text = REQUEST_MARK.sub('', path.read_text(encoding='utf-8'))
+        try:
+            text = REQUEST_MARK.sub('', path.read_text(encoding='utf-8'))
+            updated_at = path.stat().st_mtime
+        except FileNotFoundError:
+            continue
         lines = text.splitlines()
         if not lines or not lines[0].startswith('# '):
             continue
         if not all(term in (path.stem + ' ' + text).casefold() for term in terms):
             continue
         entries.append({'team': path.stem, 'title': lines[0][2:].strip(), 'body': text,
-                        'source': str(path), 'updated_at': path.stat().st_mtime})
+                        'source': str(path), 'updated_at': updated_at})
     return sorted(entries, key=lambda item: (-item['updated_at'], item['title']))
 
 
-REQUEST_MARK = re.compile(r'^<!-- request:[0-9A-Za-z-]{1,64} -->\n?', re.M)
+REQUEST_MARK = re.compile(r'^<!-- request:[0-9A-Za-z-]{1,64}(?::[0-9a-f]{12})? -->\n?', re.M)
 
 
 def add_entry(root, team, title, content, request_id=None):
@@ -48,16 +54,19 @@ def add_entry(root, team, title, content, request_id=None):
         if target.is_symlink() or (target.exists() and target.resolve().parent != root.resolve()):
             raise ValueError('지식 문서가 링크이거나 지식 폴더 밖에 있어 쓰지 않습니다.')
         existing = target.read_text(encoding='utf-8').rstrip() if target.exists() else ''
-        mark = f'<!-- request:{request_id} -->' if request_id else ''
+        digest = hashlib.sha256(f'{team}\0{title}\0{content}'.encode()).hexdigest()[:12]
+        mark = f'<!-- request:{request_id}:{digest} -->' if request_id else ''
         if mark and mark in existing:
             return {'team': team, 'title': title, 'source': str(target), 'updated_at': target.stat().st_mtime, 'repeated': True}
+        if mark and f'<!-- request:{request_id}:' in existing:
+            raise ValueError('같은 요청이 다른 내용으로 이미 저장됐습니다. 새로고침 후 확인하세요.')
         today = time.strftime('%Y-%m-%d')
         tail = f'\n{mark}' if mark else ''
         if existing:
             text = f"{existing}\n\n### {title} ({today})\n\n{content}{tail}\n"
         else:
             text = f"# {team.upper()} · {title}\n\n{content}\n\n기록일자: {today}{tail}\n"
-        fd, temp = tempfile.mkstemp(prefix=f'.{team}-', suffix='.md', dir=root)
+        fd, temp = tempfile.mkstemp(prefix=f'.{team}-', suffix='.tmp', dir=root)
         try:
             with os.fdopen(fd, 'w', encoding='utf-8') as out:
                 out.write(text)

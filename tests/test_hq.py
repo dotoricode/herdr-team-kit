@@ -190,5 +190,30 @@ class ReviewFindingTests(unittest.TestCase):
             self.assertEqual((wiki / 'alpha.md').read_text(encoding='utf-8').count('제목'), 1)
 
 
+class ReReviewFindingTests(unittest.TestCase):
+    def test_search_ignores_in_flight_temp_files_and_vanished_documents(self):
+        from unittest.mock import patch
+        from teamkit.knowledge import search
+        with tempfile.TemporaryDirectory() as tmp:
+            add_entry(tmp, 'alpha', '제목', '내용')
+            (Path(tmp) / '.alpha-tmp123.md').write_text('# 임시\n', encoding='utf-8')
+            self.assertEqual([x['team'] for x in search(tmp)], ['alpha'])
+            ghost = Path(tmp) / 'ghost.md'
+            real_glob = Path.glob
+            with patch.object(Path, 'glob', lambda self, pattern: list(real_glob(self, pattern)) + [ghost]):
+                self.assertEqual([x['team'] for x in search(tmp)], ['alpha'])
+
+    def test_same_request_id_with_changed_content_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / 'state.sqlite'
+            hq.apply(state, {'op': 'bounty-add', 'request_id': 'r1', 'title': '원래'})
+            with self.assertRaises(ValueError):
+                hq.apply(state, {'op': 'bounty-add', 'request_id': 'r1', 'title': '고친 제목'})
+            wiki = Path(tmp) / 'wiki'
+            add_entry(wiki, 'alpha', '원래', '내용', request_id='k1')
+            with self.assertRaises(ValueError):
+                add_entry(wiki, 'alpha', '고친 제목', '내용', request_id='k1')
+
+
 if __name__ == '__main__':
     unittest.main()

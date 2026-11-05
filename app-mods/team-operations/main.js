@@ -114,6 +114,12 @@ class Dialog {
 
   async submit(cx, action) {
     if (this.busy) return;
+    // Same inputs retry with the same id (stored once); edited inputs are a new request.
+    const inputs = JSON.stringify([this.team, this.points, this.title.value(), this.body.value()]);
+    if (inputs !== this.lastInputs) {
+      if (this.lastInputs !== undefined) this.requestId = Array.from({ length: 16 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+      this.lastInputs = inputs;
+    }
     this.busy = true;
     this.error = null;
     cx.notify();
