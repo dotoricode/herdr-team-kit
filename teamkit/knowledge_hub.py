@@ -1,91 +1,141 @@
-"""Read knowledge and refresh a local, observational staff roster."""
+"""Readonly knowledge hub data and employee roster snapshot."""
 import json
-import argparse
 import os
-import subprocess
 from pathlib import Path
+import subprocess
 import tempfile
 import time
 
 from .app_bridge import bindings, readonly_snapshot, verified_session, session_read
 from .config import load
 from .knowledge import search
+from .staff import display_name
 
 
 def app_sessions():
-    result=subprocess.run(['herdr-app','ls'],capture_output=True,text=True,timeout=5,check=True)
-    value=json.loads(result.stdout)
-    if not isinstance(value.get('spaces'),list):raise ValueError('App 세션 목록을 확인하지 못했습니다.')
+    result = subprocess.run(['herdr-app', 'ls'], capture_output=True, text=True, timeout=5, check=True)
+    value = json.loads(result.stdout)
+    if not isinstance(value.get('spaces'), list):
+        raise ValueError('App 세션 목록을 확인하지 못했습니다.')
     return value
+
+
+def _all_units(config):
+    ops = config.get('operations', {}) if isinstance(config.get('operations'), dict) else {}
+    deps = ops.get('departments', {}) if isinstance(ops.get('departments'), dict) else {}
+    teams = config.get('teams', {}) if isinstance(config.get('teams'), dict) else {}
+    seen = set()
+    units = []
+    for uid in ('operations', 'eversafe', 'fakefinder', 'server', 'codemix', 'qa', 'docs', 'infra'):
+        if uid in teams:
+            units.append((uid, teams[uid]))
+            seen.add(uid)
+        elif uid in deps:
+            units.append((uid, deps[uid]))
+            seen.add(uid)
+    for uid, policy in teams.items():
+        if uid not in seen:
+            units.append((uid, policy))
+    return units
 
 
 def snapshot(config_path, state, binding_path):
     config = load(config_path)
     linked = bindings(binding_path, config)
     spaces = app_sessions()['spaces']
-    try:tasks = readonly_snapshot(state)['tasks']
-    except (OSError,ValueError):tasks=[]
-    teams = []
-    for team, policy in config['teams'].items():
-        entry = linked['teams'][team]
-        space=next((item for item in spaces if item['id']==entry.get('space')),None)
-        if space is None:
-            matches=[item for item in spaces if item.get('folder')==policy.get('root')]
-            if len(matches)==1:space=matches[0]
-        employees=[];seen=set()
-        for tab in (space or {}).get('tabs',[]):
-            for item in tab.get('terminals',[]):
-                address=item['terminal']
-                if address in seen or item.get('app') not in ('codex','claude-code'):continue
-                seen.add(address)
-                label=None;verified_task=None
-                try:label=(session_read(address).get('labels') or {}).get('ui.display-name')
-                except (OSError,ValueError,subprocess.SubprocessError):pass
-                for task in tasks:
-                    if task.get('team')!=team or (task.get('runtime') or {}).get('terminal')!=address or not task.get('owner'):continue
-                    try:verified,_status=verified_session(task,address)
-                    except (OSError,ValueError,subprocess.SubprocessError):continue
-                    if verified:verified_task=task;break
-                provider='codex' if item['app']=='codex' else 'claude'
-                account=(verified_task or {}).get('account')
-                if (verified_task or {}).get('provider')!=provider or account not in config['profiles'].get(provider,{}):
-                    account=None;verified_task=None
-                employees.append({'terminal':address,'provider':provider,'account':account,
-                    'role':(verified_task or {}).get('role'),'label':label or f"{tab.get('name','직원')} · {provider}",
-                    'state':item.get('status','unknown'),'identity_verified':verified_task is not None})
-        terminal=entry.get('terminal')
-        if terminal not in seen:terminal=employees[0]['terminal'] if employees else None
-        selected=next((item for item in employees if item['terminal']==terminal),{})
-        teams.append({'id':team,'label':(space or {}).get('name',entry.get('label',team)),
-            'space':(space or {}).get('id'),'terminal':terminal,'state':selected.get('state','미확인'),
-            'live':bool(employees),'identity':'App 화면 기준 · 계정 신원은 별도 확인',
-            'employees':employees,'roles':[{'role':role,'provider':value.get('provider')} for role,value in policy['roles'].items()]})
-    result = {'observed_at':time.time(),'teams':teams}
-    target = Path(state).resolve().parent/'knowledge-hub-roster.json'
-    fd, temp = tempfile.mkstemp(prefix='.knowledge-hub-roster-',dir=target.parent)
     try:
-        with os.fdopen(fd,'w',encoding='utf-8') as out:
-            json.dump(result,out,ensure_ascii=False);out.flush();os.fsync(out.fileno())
-        os.replace(temp,target)
+        tasks = readonly_snapshot(state)['tasks']
+    except (OSError, ValueError):
+        tasks = []
+    ops = config.get('operations', {}) if isinstance(config.get('operations'), dict) else {}
+    aliases = ops.get('staff_aliases', {})
+    spaces_cfg = ops.get('spaces', {})
+    labels_cfg = ops.get('product_labels', {})
+    units = _all_units(config)
+    teams = []
+    for team, policy in units:
+        entry = (linked.get('teams', {}) or {}).get(team, {})
+        target_space_id = entry.get('space') or spaces_cfg.get(team)
+        space = next((item for item in spaces if item['id'] == target_space_id), None)
+        if space is None:
+            matches = [item for item in spaces if item.get('folder') == policy.get('root')]
+            if len(matches) == 1:
+                space = matches[0]
+        employees = []
+        seen = set()
+        for tab in (space or {}).get('tabs', []):
+            for item in tab.get('terminals', []):
+                address = item.get('terminal')
+                if not address or address in seen or item.get('app') not in ('codex', 'claude-code'):
+                    continue
+                seen.add(address)
+                label = None
+                verified_task = None
+                try:
+                    s_info = session_read(address)
+                    lbls = s_info.get('labels') or {}
+                    label = lbls.get('ui.display-name') or lbls.get('operations.display-name')
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    pass
+                for task in tasks:
+                    if task.get('team') != team or (task.get('runtime') or {}).get('terminal') != address or not task.get('owner'):
+                        continue
+                    try:
+                        verified, _status = verified_session(task, address)
+                    except (OSError, ValueError, subprocess.SubprocessError):
+                        continue
+                    if verified:
+                        verified_task = task
+                        break
+                provider = 'codex' if item['app'] == 'codex' else 'claude'
+                account = (verified_task or {}).get('account')
+                if (verified_task or {}).get('provider') != provider or account not in config.get('profiles', {}).get(provider, {}):
+                    account = None
+                    verified_task = None
+                employees.append({
+                    'terminal': address,
+                    'provider': provider,
+                    'account': account,
+                    'role': (verified_task or {}).get('role'),
+                    'label': label or f"{tab.get('name', '직원')} · {provider}",
+                    'state': item.get('status', 'unknown'),
+                    'identity_verified': verified_task is not None
+                })
+        terminal = entry.get('terminal')
+        if terminal not in seen:
+            terminal = employees[0]['terminal'] if employees else None
+        selected = next((item for item in employees if item['terminal'] == terminal), {})
+        team_label = (space or {}).get('name') or labels_cfg.get(team) or entry.get('label', team)
+        teams.append({
+            'id': team,
+            'label': team_label,
+            'space': (space or {}).get('id'),
+            'terminal': terminal,
+            'state': selected.get('state', '미확인'),
+            'live': bool(employees),
+            'identity': 'App 화면 기준 · 계정 신원은 별도 확인',
+            'employees': employees,
+            'roles': [{'role': role, 'provider': value.get('provider')} for role, value in policy.get('roles', {}).items()]
+        })
+    profiles = [{'provider': provider, 'account': account, 'label': display_name(provider, account, aliases=aliases)}
+                for provider, accounts in config.get('profiles', {}).items() for account in accounts]
+    result = {'observed_at': time.time(), 'teams': teams, 'profiles': profiles}
+    target = Path(state).resolve().parent / 'knowledge-hub-roster.json'
+    fd, temp = tempfile.mkstemp(prefix='.knowledge-hub-roster-', dir=target.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as out:
+            json.dump(result, out, ensure_ascii=False)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(temp, target)
     finally:
-        if os.path.exists(temp):os.unlink(temp)
+        if os.path.exists(temp):
+            os.unlink(temp)
     return result
 
 
 def view(config_path, state, binding_path):
-    return {'roster':snapshot(config_path,state,binding_path),
-            'knowledge':search(Path.home()/'00_work/05_docs/wiki')}
-
-
-def main():
-    parser=argparse.ArgumentParser(description='직원명부 관찰 및 갱신')
-    parser.add_argument('--config',default=str(Path.home()/'.config/herdr-team-kit-app/config.json'))
-    parser.add_argument('--state',default=str(Path.home()/'.local/state/herdr-team-kit-app/state.sqlite'))
-    parser.add_argument('--bindings',default=str(Path.home()/'.config/herdr-team-kit-app/bindings.json'))
-    args=parser.parse_args()
-    result=snapshot(args.config,args.state,args.bindings)
-    print(json.dumps({'observed_at':result['observed_at'],'team_count':len(result['teams'])},ensure_ascii=False))
-
-
-if __name__ == '__main__':
-    main()
+    return {
+        'roster': snapshot(config_path, state, binding_path),
+        'knowledge': search(Path.home() / '00_work/05_docs/wiki')
+    }
