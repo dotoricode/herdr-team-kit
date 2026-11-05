@@ -1,0 +1,107 @@
+"""Public queue ingress, cancellation and concurrent admission."""
+import json
+import unittest
+import time
+from unittest.mock import patch
+import test_operations as fixtures
+from teamkit import pool_control
+from teamkit.__main__ import parser, run
+from teamkit.operations import tick
+from teamkit.tickets import TicketStore
+from teamkit.resources import ResourceLedger
+
+
+class UnifiedQueueTests(unittest.TestCase):
+    setUp = fixtures.OperationsTest.setUp
+    enqueue = fixtures.OperationsTest.enqueue
+
+    def test_pool_assign_without_static_pool_enqueues_one_sqlite_ticket_idempotently(self):
+        message = self.root/'request.txt'; message.write_text('Read fixture and report only.')
+        job = pool_control.enqueue(self.config,self.state,'example',message,work_id='WORK-ONE')
+        queue = TicketStore(self.state); self.addCleanup(queue.close)
+        self.assertEqual(job['id'],queue.list()[0]['id'])
+        self.assertEqual('pending',job['state'])
+        self.assertEqual(job,pool_control.enqueue(self.config,self.state,'example',message,work_id='WORK-ONE'))
+        self.assertEqual([],pool_control.requests(self.state))
+        message.write_text('A different request')
+        with self.assertRaisesRegex(ValueError,'immutable|conflict'):
+            pool_control.enqueue(self.config,self.state,'example',message,work_id='WORK-ONE')
+
+    def test_pool_cli_persists_without_starting_or_contacting_a_supervisor(self):
+        import os
+        message=self.root/'offline-request.txt';message.write_text('Read fixture only.')
+        with patch.dict(os.environ,{'HC_TERMINAL_ID':''}),patch('teamkit.core_runtime._call',side_effect=AssertionError('ingress must not contact HC')):
+            item=run(parser().parse_args(['--config',str(self.config),'--state',str(self.state),
+                'pool','assign','--team','example','--message-file',str(message),'--work','OFFLINE']))
+        self.assertEqual('pending',item['state'])
+
+    def test_pool_external_read_file_is_approved_and_staged_without_shared_root(self):
+        import tempfile
+        from pathlib import Path
+        from teamkit.operations import prompt
+        with tempfile.TemporaryDirectory() as external:
+            attachment=Path(external)/'input.txt';attachment.write_text('approved external fixture')
+            message=self.root/'external-request.txt';message.write_text('Read the attached fixture.')
+            item=pool_control.enqueue(self.config,self.state,'example',message,work_id='EXTERNAL',resource_paths=[str(attachment)])
+            self.assertIn(dict(kind='path',name=str(attachment.resolve()),mode='read'),item['resources'])
+            queue=TicketStore(self.state);self.addCleanup(queue.close)
+            actor=dict(self.runtime.executor,root=str(self.root))
+            attempt=queue.reserve(item['id'],actor,{},self.runtime.observation())
+            prompt(self.config,self.state,item,attempt)
+            packet=json.loads((Path(attempt['mailbox'])/'contract.json').read_text())
+            self.assertEqual(str(attachment.resolve()),packet['staged_inputs'][0]['original'])
+
+    def test_host_prepared_legacy_ticket_is_displayed_once_and_cannot_be_forged_by_cli_spec(self):
+        from teamkit import operations
+        from teamkit.store import Store
+        original=self.enqueue('ORIGINAL')
+        spec={k:original[k] for k in ('product','role','kind','goal','completion','checks','verification_commands','profiles','scope','resources')}
+        spec['id']='MIGRATED'
+        queue=TicketStore(self.state);self.addCleanup(queue.close)
+        legacy='a'*32
+        item=queue.enqueue(spec,'migration',legacy_request_id=legacy)
+        self.assertEqual('waiting_approval',item['state'])
+        Store(self.state).close()
+        old=dict(id=legacy,team='example',phase='pending')
+        with patch('teamkit.pool_control.requests',return_value=[old]),patch('teamkit.service.status',return_value={}),patch('teamkit.operations.observe_native',return_value=self.runtime.observation()):
+            payload=operations.view(self.config,self.state)
+        self.assertEqual(['MIGRATED','ORIGINAL'],sorted(x['id'] for x in payload['tickets']))
+        with self.assertRaisesRegex(ValueError,'host-derived'):
+            queue.enqueue(dict(spec,id='FORGED',legacy_request_id=legacy),'forged')
+
+    def test_three_same_team_reads_start_in_one_tick_and_only_same_path_writes_wait(self):
+        config=json.loads(self.config.read_text()); config['operations']['resource_policy']={'global_limit':10,'profile_limits':{'codex/personal':10}}
+        self.config.write_text(json.dumps(config))
+        for ident in ('A','B','C'):self.enqueue(ident)
+        actors = [dict(self.runtime.executor, terminal='t'+str(i+1),pid=42+i,owner='owner-'+str(i)) for i in range(3)]
+        self.runtime.executors=lambda ticket=None:actors
+        self.runtime.native=lambda actor,require_idle=True:dict(actor,status='idle',turn=1)
+        self.runtime.send=lambda actor,text:dict(accepted=True,terminal=actor['terminal'],native_pid=actor['pid'],turn=1,turn_baseline=1)
+        result=tick(self.config,self.state,self.runtime)
+        self.assertEqual(3,len(result['started']))
+        queue=TicketStore(self.state);self.addCleanup(queue.close)
+        self.assertEqual({'t1','t2','t3'},{x['executor']['terminal'] for x in queue.list()})
+        for ident,path in (('W1','same'),('W2','other'),('W3','same')):
+            self.enqueue(ident,scope=dict(paths=[str(self.root)],actions=['read','write'],data=['fixture']),
+                resources=[dict(kind='path',name=str(self.root/path),mode='write')],workflow_ref={'root':str(self.root)})
+        # Work approval is tested independently; this admission check exercises the real SQLite path leases.
+        observation=dict(observed_at=time.time(),complete=True,terminals=[])
+        queue.reserve('W1',dict(actors[0],terminal='t4'),{'global_limit':10,'profile_limits':{'codex/personal':10}},observation)
+        queue.reserve('W2',dict(actors[1],terminal='t5'),{'global_limit':10,'profile_limits':{'codex/personal':10}},observation)
+        with self.assertRaisesRegex(ValueError,'conflicting resource'):
+            queue.reserve('W3',dict(actors[2],terminal='t6'),{'global_limit':10,'profile_limits':{'codex/personal':10}},observation)
+
+    def test_cli_cancel_preserves_history_and_rejects_any_executed_or_reserved_work(self):
+        self.enqueue('CANCEL')
+        args=lambda *extra:parser().parse_args(['--config',str(self.config),'--state',str(self.state),'queue','cancel','CANCEL',*extra])
+        with self.assertRaises(ValueError):run(args('--reason','wrong assignment'))
+        result=run(args('--reason','wrong assignment','--user-approved'))
+        self.assertEqual('cancelled',result['state'])
+        queue=TicketStore(self.state);self.addCleanup(queue.close)
+        self.assertEqual(0,queue.get('CANCEL')['attempt_count'])
+        events=[(r[0],json.loads(r[1])) for r in queue.db.execute('SELECT event,body FROM operation_events WHERE ticket=?',('CANCEL',))]
+        self.assertTrue(any(event=='cancelled' and body['reason']=='wrong assignment' for event,body in events))
+        self.enqueue('BUSY')
+        attempt=queue.reserve('BUSY',self.runtime.executor,{},self.runtime.observation())
+        with self.assertRaises(ValueError):queue.cancel('BUSY','operator request',True)
+        self.assertTrue(ResourceLedger._rows(queue.db)[0]['execution_reserved'])

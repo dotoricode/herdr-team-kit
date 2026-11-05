@@ -1,8 +1,9 @@
 import json
+import time
 from pathlib import Path
 
 from .runtime import launch_spec
-from .policy import CLAUDE_QUOTA_SOURCE
+from .policy import CLAUDE_QUOTA_SOURCE, CLAUDE_NATIVE_QUOTA_SOURCE, number, eligible, account_order
 
 
 def load(path):
@@ -25,8 +26,19 @@ def load(path):
         for role, policy in team['roles'].items():
             if role not in ('leader','implementer','reviewer') or policy.get('provider') not in value['profiles'] or not policy.get('model'):
                 raise ValueError('role requires configured provider and explicit model')
+    pool=value.get('session_pool')
+    if pool is not None:
+        if (not isinstance(pool,dict) or set(pool)!={'enabled','bindings','tasks'} or type(pool['enabled']) is not bool
+                or not isinstance(pool['bindings'],str) or not Path(pool['bindings']).is_absolute()
+                or not isinstance(pool['tasks'],dict) or set(pool['tasks'])!=set(value['teams'])
+                or any(not isinstance(t,str) or not t for t in pool['tasks'].values())
+                or len(set(pool['tasks'].values()))!=len(pool['tasks'])
+                or pool['enabled'] and value.get('runtime_backend')!='core'):
+            raise ValueError('session_pool requires core, enabled, absolute bindings and a distinct canonical task per team')
     routes = value.get('routing', {})
-    from .routing import KINDS
+    from .routing import KINDS, execution_preference, leader_preference
+    execution_preference(value)
+    leader_preference(value)
     if not isinstance(routes, dict) or any(kind not in KINDS for kind in routes):
         raise ValueError('invalid routing kinds')
     for route in routes.values():
@@ -39,6 +51,11 @@ def load(path):
     if type(ttl) is not int or not 1 <= ttl <= 300:
         raise ValueError('quota TTL must be 1..300 seconds')
     value['quota_ttl_seconds'] = ttl
+    account_order(value, time.time())
+    from .context_handoff import settings as context_settings
+    if context_settings(value)['enabled']:
+        if value.get('runtime_backend') != 'core' or not isinstance(value.get('context_bindings'), str) or not Path(value['context_bindings']).is_absolute():
+            raise ValueError('enabled context_handoff requires core and absolute context_bindings')
     if value.get('runtime_backend', 'tui') not in ('tui', 'core'):
         raise ValueError('runtime_backend must be tui or core')
     if type(value.get('require_design_approval',False)) is not bool:
@@ -50,6 +67,10 @@ def load(path):
         raise ValueError('dashboard_workspaces must map configured teams to explicit workspace IDs')
     if value.get('herdr_session') is not None and (not isinstance(value['herdr_session'],str) or not value['herdr_session']):
         raise ValueError('herdr_session must be a session name')
+    from .allocation import usage_only
+    usage_only(value)
+    from .team_dispatch import settings as dispatch_settings
+    dispatch_settings(value)
     return value
 
 
@@ -68,6 +89,22 @@ def binding(profile):
 
 def cached_quota(config, store, provider, account):
     value = store.quota(provider+'/'+account)
-    if provider == 'claude' and value and value.get('source') != CLAUDE_QUOTA_SOURCE:
-        return None
-    return value if value and value.get('binding') == binding(profile(config, provider, account)) else None
+    if value and value.get('binding') != binding(profile(config, provider, account)):
+        value = None
+    if provider != 'claude':
+        return None if value and value.get('source') == CLAUDE_NATIVE_QUOTA_SOURCE else value
+    if value and value.get('source') != CLAUDE_QUOTA_SOURCE:
+        value = None
+    from .app_usage import native_admission_quota
+    native = native_admission_quota(config, store.path, account)
+    if native is None:
+        return value
+    if value is None or not number(value.get('observed_at')) or native['observed_at'] > value['observed_at']:
+        return native
+    if native['observed_at'] == value['observed_at']:
+        if not eligible(value, time.time(), config.get('quota_ttl_seconds', 120)):
+            return value
+        for key in ('five_hour', 'weekly'):
+            native[key]['used'] = max(native[key]['used'], value[key]['used'])
+        return native
+    return value

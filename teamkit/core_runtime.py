@@ -24,9 +24,9 @@ def claude_gui_settings(spec,config_path,state,account,renderer=''):
     return {**spec,'args':[*spec['args'],'--settings',json.dumps(settings)]}
 
 
-def _call(*args):
+def _call(*args, timeout=45):
     try:
-        result = subprocess.run(['hc', *args], capture_output=True, text=True, timeout=45)
+        result = subprocess.run(['hc', *args], capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise RuntimeError('Core outcome unknown; inspect before retry') from error
     if result.returncode:
@@ -38,6 +38,13 @@ def _call(*args):
     if not isinstance(body, dict) or body.get('error') or body.get('ok') is False:
         raise RuntimeError('Core rejected command')
     return body
+
+
+def _budget(deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RuntimeError('Core wait deadline expired; inspect before further input')
+    return remaining
 
 
 def require_managed():
@@ -87,11 +94,13 @@ def _model_effort(provider, argv):
     return model[0], effort[0]
 
 
-def startup_native(address):
+def startup_native(address, outer_deadline=None):
     """Wait only for absent OS metadata on the same settled terminal."""
     deadline = time.monotonic() + 3
+    if outer_deadline is not None:
+        deadline = min(deadline, outer_deadline)
     while True:
-        native = _call('get', address)
+        native = _call('get', address, timeout=_budget(deadline))
         if (native.get('state') != 'live' or native.get('foreground') is not None
                 or (native.get('status') or {}).get('state') not in ('idle', 'done')
                 or time.monotonic() >= deadline):
@@ -112,18 +121,19 @@ class CoreRuntime:
         self.task = task
         self.target = dict(task.get('runtime', {})) if task else None
 
-    def _native(self, name, ready=False):
+    def _native(self, name, ready=False, timeout=45):
         target = self.target or {}
         address = target.get('terminal', '')
         if target.get('backend') != 'core' or target.get('name') != name or not ADDRESS.fullmatch(address):
             raise RuntimeError('Core task has no matching terminal identity; inspect')
-        native = _call('get', address)
+        native = _call('get', address, timeout=timeout)
         foreground = native.get('foreground') or {}
         labels = native.get('labels') or {}
         if (native.get('address') != address or native.get('state') != 'live' or native.get('name') != target.get('native_name', name)
-                or labels.get('teamkit.owner') != self.task.get('owner')
-                or labels.get('teamkit.task') != self.task.get('id')
-                or labels.get('teamkit.name') != name
+                or (not target.get('workspace_live') and (
+                    labels.get('teamkit.owner') != self.task.get('owner')
+                    or labels.get('teamkit.task') != self.task.get('id')
+                    or labels.get('teamkit.name') != name))
                 or not _process_matches(self.task.get('provider'), foreground.get('name'))
                 or type(foreground.get('pid')) is not int or foreground['pid'] <= 0
                 or type(target.get('native_pid')) is not int or target['native_pid'] <= 0
@@ -135,35 +145,58 @@ class CoreRuntime:
             raise RuntimeError('Core agent is not idle and ready; inspect before sending')
         return native
 
-    def launch(self, task, spec, name, on_created=None):
+    def launch(self, task, spec, name, on_created=None, *, keep=True):
+        if type(keep) is not bool:
+            raise RuntimeError('Core launch keep must be an explicit boolean')
         require_managed()
         owner = spec['env'].get('TEAMKIT_OWNER')
         if not owner or spec['kind'] not in ('codex', 'claude'):
             raise RuntimeError('Core launch requires an explicit task owner and provider')
-        args = ['run', '--json', '--bg', '--keep', '--outlive-parent', '--no-notify',
+        args = ['run', '--json', '--bg', *(['--keep'] if keep else []), '--outlive-parent', '--no-notify',
                 '--name', name, '--cwd', task['root'],
                 '--label', 'teamkit.owner='+owner, '--label', 'teamkit.task='+task['id'],
                 '--label', 'teamkit.name='+name]
-        args += ['--', 'env', *(key+'='+value for key, value in spec['env'].items()), spec['kind'], *spec['args']]
+        # An empty CLAUDE_CONFIG_DIR makes Claude store its home in the working directory.
+        env = dict(spec['env'])
+        # hc presents a color-capable PTY even when its caller is a dumb pipe.
+        term = env.get('TERM', os.environ.get('TERM', ''))
+        env['TERM'] = term if term and term != 'dumb' else 'xterm-256color'
+        env['COLORTERM'] = env.get('COLORTERM', os.environ.get('COLORTERM', '')) or 'truecolor'
+        if 'NO_COLOR' not in env and 'NO_COLOR' in os.environ:
+            env['NO_COLOR'] = os.environ['NO_COLOR']
+        unset = ['-u', 'CLAUDE_CONFIG_DIR'] if env.get('CLAUDE_CONFIG_DIR') == '' else []
+        if unset:
+            del env['CLAUDE_CONFIG_DIR']
+        args += ['--', 'env', *unset, *(key+'='+value for key, value in env.items()), spec['kind'], *spec['args']]
         created = _call(*args)
         address = created.get('address', '')
         if not isinstance(address, str) or not ADDRESS.fullmatch(address):
             raise RuntimeError('Core terminal address unavailable; inspect before retry')
         detail = {'backend':'core', 'name':name, 'terminal':address, 'pane':address,
+                  'session_cwd':task['root'],
                   'managed_workspace':False, 'ephemeral':task['role'] != 'leader'
                   or task.get('classification', {}).get('kind') == 'design'}
         if on_created:
             on_created(dict(detail))
         # hc owns readiness waiting. A timeout is a known terminal with an
         # uncertain startup, not permission to launch a replacement.
-        waited = _call('wait', '--json', '--timeout', '30', address)
+        deadline = time.monotonic() + 30
+        waited = _call('wait', '--json', '--timeout', '30', address, timeout=_budget(deadline))
+        while (waited.get('terminal') == address and waited.get('ended') is False
+               and waited.get('reason') == 'message'):
+            remaining = _budget(deadline)
+            waited = _call('wait', '--json', '--timeout', str(max(1, int(remaining))), address, timeout=remaining)
+            time.sleep(0.01)
         if waited.get('terminal') != address or waited.get('ended') is not True or waited.get('reason') != 'status' or waited.get('status') != 'idle':
             raise RuntimeError('Core startup not ready; inspect the recorded terminal')
-        native = startup_native(address)
+        _budget(deadline)
+        native = startup_native(address, deadline)
+        _budget(deadline)
         detail['native_pid'] = (native.get('foreground') or {}).get('pid')
         self.task = {**task, 'owner':owner, 'provider':spec['kind']}
         self.target = detail
-        self._native(name, ready=True)
+        self._native(name, ready=True, timeout=_budget(deadline))
+        _budget(deadline)
         if on_created:
             on_created(dict(detail))
         return detail
@@ -241,20 +274,77 @@ class CoreRuntime:
         return {'agent':{'name':args[2], 'agent_status':status, 'pane_id':native['address'],
                          'interactive_ready':status in ('idle','done'), 'completion_seq':native.get('turn')}}
 
-    def prompt(self, name, text):
+    def accept(self, name, text, before_send=None):
+        """Confirm accepted input, independently of the model turn's completion."""
         require_managed()
         native = self._native(name, ready=True)
+        if before_send is not None:
+            before_send()
+        # Recheck after the durable send fence, without changing prior ownership.
+        native = self._native(name, ready=True)
+        condition = ['--if', 'idle'] if native['status']['state'] == 'idle' else []
+        sent = _call('send', '--json', *condition, native['address'], text, timeout=30)
+        if (sent.get('started') is not True or type(sent.get('turn')) is not int
+                or sent['turn'] < native.get('turn', 0)):
+            raise RuntimeError('Core input acceptance unconfirmed; inspect before further input')
+        # Bind only a confirmed input on the same observed process. An uncertain
+        # send must preserve the previous owner's labels as well as its turn.
+        self._native(name)
+        if (self.target or {}).get('workspace_live'):
+            _call('label', '--json', native['address'], 'teamkit.owner='+self.task['owner'],
+                  'teamkit.task='+self.task['id'], 'teamkit.name='+name,
+                  'teamkit.attempt='+self.target['resource_attempt'])
+            self.target['workspace_live'] = False
+        elif (self.target or {}).get('resource_attempt'):
+            _call('label', '--json', native['address'], 'teamkit.attempt='+self.target['resource_attempt'])
+        self._native(name)
+        return {'accepted': True, 'terminal': native['address'],
+                'native_pid': native['foreground']['pid'],
+                'turn_baseline': native.get('turn', 0), 'turn': sent['turn']}
+
+    def prompt(self, name, text, before_send=None):
+        require_managed()
+        native = self._native(name, ready=True)
+        if before_send is not None:
+            before_send()
         address = native['address']
         # hc has an atomic --if idle guard, but no --if done. For a checked,
         # settled done agent use ordinary send; never force a blocked program.
         condition = ['--if','idle'] if native['status']['state']=='idle' else []
-        sent = _call('send', '--json', *condition, '--wait', '--timeout', '30', address, text)
+        deadline = time.monotonic() + 30
+        sent = _call('send', '--json', *condition, '--wait', '--timeout', '30', address, text, timeout=_budget(deadline))
         waited = sent.get('wait') or {}
-        if (sent.get('started') is not True or waited.get('terminal') != address
+        resumed = False
+        # A caller message or delayed status report ends hc's wait, not the
+        # accepted input. Follow that same turn; never submit the text again.
+        while (waited.get('terminal') == address and waited.get('ended') is False
+               and waited.get('reason') in ('message', 'not_started')
+               and type(sent.get('started')) is bool):
+            remaining = _budget(deadline)
+            try:
+                self._native(name, timeout=remaining)
+            except RuntimeError as error:
+                raise RuntimeError('Core post-send identity unconfirmed; inspect before further input') from error
+            remaining = _budget(deadline)
+            waited = _call('wait', '--json', '--timeout', str(max(1, int(remaining))), address, timeout=remaining)
+            resumed = True
+            time.sleep(0.01)
+        _budget(deadline)
+        if ((sent.get('started') is not True and not resumed) or waited.get('terminal') != address
                 or waited.get('ended') is not True or waited.get('reason') != 'status'
                 or waited.get('status') not in ('idle','done')
                 or type(waited.get('turn')) is not int or waited['turn'] <= native.get('turn', 0)):
-            raise RuntimeError('Core delivery/wait not confirmed; inspect before further input')
+            reason = waited.get('reason')
+            reason = reason if reason in ('status','exit','output','timeout','not_started','message') else 'unknown'
+            raise RuntimeError(f'Core delivery/wait not confirmed ({reason}); inspect before further input')
+        if resumed:
+            remaining = _budget(deadline)
+            try:
+                self._native(name, timeout=remaining)
+            except RuntimeError as error:
+                raise RuntimeError('Core post-send identity unconfirmed; inspect before further input') from error
+            _budget(deadline)
+            sent = {**sent, 'wait':waited}
         # This confirms the transport turn only. Receipt and verification remain
         # separate ledger events on the host/worker paths.
         return sent

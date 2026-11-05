@@ -47,6 +47,8 @@ def launch_spec(provider, profile, session):
                  '-c', 'cli_auth_credentials_store="file"', '--approve-for-me', '--no-alt-screen', '--no-daemon']
     else:
         env['CLAUDE_CONFIG_DIR'] = home_value(provider, home)
+        # Grey next-input suggestions are indistinguishable from a draft in `hc read` text.
+        env['CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION'] = 'false'
         args = ['--resume', session] if session else []
         args += ['--model', profile['model'], '--effort', effort, '--permission-mode', 'auto']
     return {'kind':provider, 'env':env, 'args':args}

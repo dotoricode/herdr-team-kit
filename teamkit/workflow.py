@@ -1,4 +1,5 @@
 """Private, versioned design approval and restart records for product work."""
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -7,6 +8,7 @@ import re
 import sqlite3
 import subprocess
 import time
+from contextlib import closing
 
 from .checkpoint import fingerprint, revision_guard
 from .store import ACTIVE
@@ -159,7 +161,8 @@ def run(args,config,store):
         raise ValueError('invalid product work ID')
     if args.action=='create':
         root=Path(args.root).resolve()
-        team=config['teams'][args.team]
+        from .departments import organization
+        team=organization(config,args.team)
         if not any(root.is_relative_to(Path(p).resolve()) for p in [team['root'],*config.get('shared_roots',[])]):
             raise ValueError('work root is outside configured roots')
         if git(root,'rev-parse','--show-toplevel').decode().removesuffix('\n')!=str(root):
@@ -276,7 +279,7 @@ def snapshot(state):
     """Read-only: a status refresh never creates a DB or starts a model."""
     path=Path(state).expanduser().resolve()
     if not path.is_file():return {'works':[],'tasks':[],'quotas':{},'monitor':None,'event_sequence':0,'observed_at':time.time()}
-    with sqlite3.connect(path.as_uri()+'?mode=ro',uri=True) as db:
+    with closing(sqlite3.connect(path.as_uri()+'?mode=ro',uri=True)) as db:
         db.execute('BEGIN')
         tasks=[json.loads(r[0]) for r in db.execute('SELECT body FROM tasks')]
         exists=db.execute("SELECT 1 FROM sqlite_master WHERE name='work_items'").fetchone()

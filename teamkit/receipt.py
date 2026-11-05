@@ -15,7 +15,7 @@ from . import providers
 PROTOCOL = 'host-fresh-v1'
 
 
-def requested(store, task, owner, profile_binding):
+def requested(store, task, owner, profile_binding, *, nonce=None):
     with store.transaction():
         value = store.get(task)
         runtime = value.get('runtime', {})
@@ -24,7 +24,7 @@ def requested(store, task, owner, profile_binding):
         old = runtime.get('receipt_request')
         if old:
             raise ValueError('receipt already requested; inspect instead of resending')
-        request = {'nonce':uuid.uuid4().hex, 'owner':owner, 'attempt':value['attempt_count'],
+        request = {'nonce':nonce or uuid.uuid4().hex, 'owner':owner, 'attempt':value['attempt_count'],
                    'binding':profile_binding, 'expires_at':time.time()+30}
         runtime['receipt_request'] = request
         value['runtime'] = runtime
@@ -86,6 +86,7 @@ def verify_pending(store, config_path, task, owner, active=None):
 
 def wait_for_confirmation(store, task, owner, profile_binding):
     request = None
+    nonce = uuid.uuid4().hex
     previous = None
     if threading.current_thread() is threading.main_thread():
         previous = signal.getsignal(signal.SIGTERM)
@@ -93,7 +94,7 @@ def wait_for_confirmation(store, task, owner, profile_binding):
             raise SystemExit(128 + signum)
         signal.signal(signal.SIGTERM, terminate)
     try:
-        request = requested(store, task, owner, profile_binding)
+        request = requested(store, task, owner, profile_binding, nonce=nonce)
         while True:
             value = store.get(task)
             runtime = value.get('runtime', {})
@@ -109,7 +110,11 @@ def wait_for_confirmation(store, task, owner, profile_binding):
             time.sleep(0.1)
     except BaseException:
         if request is None:
-            raise
+            # COMMIT can succeed before a notification or signal interrupts the
+            # return. Only recover this invocation's nonce, never a prior wait.
+            request = store.get(task).get('runtime', {}).get('receipt_request')
+            if not request or request.get('nonce') != nonce:
+                raise
         value = store.get(task)
         runtime = value.get('runtime', {})
         if value.get('owner') == owner and value.get('attempt_count') == request['attempt'] and value['state'] in ('submitted','uncertain') and runtime.get('receipt_request') == request and not runtime.get('receipt_error'):

@@ -1,5 +1,6 @@
 """Account coverage is display metadata, not an admission override."""
 import json
+import subprocess
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -110,8 +111,13 @@ class UsageTests(UsageFixture):
 class NativeHc:
     def __init__(self):
         self.calls=[];self.labels={};self.state='live';self.missing=False
+        self.initial_screen='❯ ';self.screen_complete=True;self.turn=0;self.extra_labels={}
         self.screen='Session\nUsage: 0 input, 0 output, 0 cache read, 0 cache write\nCurrent session\n0% used\nCurrent week (all models)\n32% used'
         self.ready=True;self.timeout_run=False;self.queried=False;self.foreground_name='claude';self.status_app='claude';self.foreground_missing_once=False;self.gets=0;self.wrap_sends=False;self.received_text=None
+    def read_result(self,argv,text):
+        output=json.dumps({'text':text,'complete':self.screen_complete}) if '--json' in argv else text
+        return subprocess.CompletedProcess(argv,0,output,'')
+
     def __call__(self,argv,**opts):
         import subprocess
         self.calls.append(argv);args=argv[1:];op=args[0]
@@ -122,7 +128,7 @@ class NativeHc:
         elif op=='get':
             self.gets+=1
             if self.missing:return subprocess.CompletedProcess(argv,3,'','not_found')
-            value={'address':'t9','state':self.state,'labels':self.labels,'name':'usage-test',
+            value={'address':'t9','state':self.state,'labels':{**self.labels,**self.extra_labels},'name':'usage-test','turn':self.turn,
                    'foreground':None if self.foreground_missing_once and self.gets==1 else {'pid':99,'name':self.foreground_name},'status':{'app':self.status_app,'state':'idle'} if self.ready else None}
         elif op=='wait':value={'ended':self.ready,'reason':'status' if self.ready else 'timeout','status':'idle' if self.ready else None}
         elif op=='send':
@@ -131,7 +137,7 @@ class NativeHc:
         elif op=='keys':
             self.received_text=''.join(args[3:-1]) if args[1]=='--json' else ''.join(args[2:-1])
             self.queried=self.received_text=='/usage';value={'status':'idle','turn':0}
-        elif op=='read':return subprocess.CompletedProcess(argv,0,self.screen if self.queried or not self.ready else 'Ready for input','')
+        elif op=='read':return self.read_result(argv,self.screen if self.queried or not self.ready else self.initial_screen)
         elif op=='ls':value={'terminals':[{'address':'t9','state':self.state}]} if self.labels and not self.missing else {'terminals':[]}
         elif op=='kill':self.state='finished';value={'ok':True}
         elif op=='rm':self.missing=True;value={'ok':True}
@@ -149,6 +155,177 @@ class NativeUsageTests(UsageFixture):
         launch=next(a for a in native.calls if a[1]=='run');self.assertIn('--safe-mode',launch);self.assertNotIn('-p',launch)
         self.assertEqual(native.received_text,'/usage')
         with StoreContext(self.state) as db:self.assertIsNone(db.quota('claude/personal'))
+
+    def test_initial_missing_status_and_foreground_wait_for_same_native_startup(self):
+        from teamkit.app_usage import refresh_native_usage
+        native=NativeHc()
+        def starting(argv, **opts):
+            result=native(argv, **opts)
+            if argv[1]=='get' and native.gets<=3:
+                value=json.loads(result.stdout);value.update(status=None,foreground=None)
+                return subprocess.CompletedProcess(argv,0,json.dumps(value),'')
+            return result
+        with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=starting),patch('teamkit.app_usage.time.sleep'):
+            value=refresh_native_usage(self.value,self.state,'personal')
+        self.assertEqual(value['weekly'],32)
+        self.assertEqual(sum(a[1]=='run' for a in native.calls),1)
+        self.assertEqual(sum(a[1]=='keys' for a in native.calls),1)
+        first_key=next(i for i,a in enumerate(native.calls) if a[1]=='keys')
+        self.assertTrue(all(a[2:5]==['--json','--lines','0'] for a in native.calls[:first_key] if a[1]=='read'))
+        self.assertFalse(any(a[1]=='send' for a in native.calls))
+        attempt=json.loads(Path(str(self.state)+'.native-usage-personal.json').read_text())
+        self.assertTrue(attempt['zero_token_usage']);self.assertTrue(native.missing)
+
+    def test_missing_startup_metadata_times_out_without_input_or_relaunch(self):
+        from teamkit.app_usage import refresh_native_usage,UsageUnavailable
+        native=NativeHc();ticks=iter(range(100))
+        def starting(argv, **opts):
+            result=native(argv, **opts)
+            if argv[1]=='get' and native.state=='live':
+                value=json.loads(result.stdout);value.update(status=None,foreground=None)
+                return subprocess.CompletedProcess(argv,0,json.dumps(value),'')
+            return result
+        with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=starting),patch('teamkit.app_usage.time.sleep'),patch('teamkit.app_usage.time.monotonic',side_effect=lambda:next(ticks)):
+            with self.assertRaisesRegex(UsageUnavailable,'native_not_ready'):
+                refresh_native_usage(self.value,self.state,'team')
+        self.assertGreaterEqual(next(ticks),15)
+        self.assertGreater(native.gets,3)
+        self.assertEqual(sum(a[1]=='run' for a in native.calls),1)
+        self.assertFalse(any(a[1] in ('send','keys') for a in native.calls))
+        self.assertTrue(native.missing)
+
+    def test_idle_metadata_without_an_empty_prompt_never_sends_usage(self):
+        from teamkit.app_usage import refresh_native_usage,UsageUnavailable
+        native=NativeHc();ticks=iter(range(100))
+        def starting(argv, **opts):
+            result=native(argv, **opts)
+            if argv[1]=='read' and not native.queried:
+                return native.read_result(argv,'❯ unfinished draft')
+            return result
+        with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=starting),patch('teamkit.app_usage.time.sleep'),patch('teamkit.app_usage.time.monotonic',side_effect=lambda:next(ticks)):
+            with self.assertRaisesRegex(UsageUnavailable,'native_not_ready'):
+                refresh_native_usage(self.value,self.state,'team')
+        self.assertFalse(any(a[1] in ('send','keys') for a in native.calls))
+        self.assertTrue(native.missing)
+
+    def test_idle_metadata_waits_for_the_actual_empty_prompt(self):
+        from teamkit.app_usage import refresh_native_usage
+        native=NativeHc();reads=[]
+        def starting(argv, **opts):
+            result=native(argv, **opts)
+            if argv[1]=='read' and not native.queried:
+                reads.append(True)
+                if len(reads)<=3:return native.read_result(argv,'Initializing CLI')
+            return result
+        with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=starting),patch('teamkit.app_usage.time.sleep'):
+            refresh_native_usage(self.value,self.state,'personal')
+        self.assertEqual(len(reads),4)
+        self.assertEqual(sum(a[1]=='keys' for a in native.calls),1)
+        self.assertTrue(native.missing)
+
+    def test_failed_or_finished_startup_is_rejected_without_waiting_or_input(self):
+        from teamkit.app_usage import refresh_native_usage,UsageUnavailable
+        for state,status in (('live','error'),('live','blocked'),('live','working'),('finished',None)):
+            with self.subTest(state=state,status=status):
+                native=NativeHc()
+                def starting(argv, **opts):
+                    result=native(argv, **opts)
+                    if argv[1]=='get' and native.gets==1:
+                        value=json.loads(result.stdout);value.update(state=state,status={'app':'claude','state':status})
+                        return subprocess.CompletedProcess(argv,0,json.dumps(value),'')
+                    return result
+                with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=starting),patch('teamkit.app_usage.time.sleep') as sleeping:
+                    with self.assertRaisesRegex(UsageUnavailable,'native_not_ready'):
+                        refresh_native_usage(self.value,self.state,'team')
+                sleeping.assert_not_called()
+                self.assertFalse(any(a[1] in ('send','keys') for a in native.calls))
+                self.assertTrue(native.missing)
+
+    def test_single_multiline_and_history_drafts_never_receive_builtin_input(self):
+        from teamkit.app_usage import refresh_native_usage,UsageUnavailable
+        for screen in ('❯ preserve this draft', '❯ \n  preserve this multiline draft\n',
+                       '❯ earlier prompt\nold answer\n❯ \n  preserve this hidden draft\n'):
+            with self.subTest(screen=screen):
+                native=NativeHc();native.initial_screen=screen;ticks=iter(range(100))
+                with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=native),patch('teamkit.app_usage.time.sleep'),patch('teamkit.app_usage.time.monotonic',side_effect=lambda:next(ticks)):
+                    with self.assertRaisesRegex(UsageUnavailable,'native_not_ready'):
+                        refresh_native_usage(self.value,self.state,'team')
+                self.assertFalse(any(a[1] in ('send','keys') for a in native.calls))
+                self.assertTrue(native.missing)
+
+    def test_incomplete_startup_screen_never_receives_input(self):
+        from teamkit.app_usage import refresh_native_usage,UsageUnavailable
+        native=NativeHc();native.screen_complete=False;ticks=iter(range(100))
+        with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=native),patch('teamkit.app_usage.time.sleep'),patch('teamkit.app_usage.time.monotonic',side_effect=lambda:next(ticks)):
+            with self.assertRaisesRegex(UsageUnavailable,'native_not_ready'):
+                refresh_native_usage(self.value,self.state,'team')
+        self.assertGreaterEqual(next(ticks),15)
+        self.assertFalse(any(a[1] in ('send','keys') for a in native.calls))
+        self.assertTrue(native.missing)
+
+    def test_incomplete_screen_waits_until_the_same_owned_screen_is_complete(self):
+        from teamkit.app_usage import refresh_native_usage
+        native=NativeHc();reads=[]
+        def reading(argv,**opts):
+            if argv[1]=='read' and not native.queried:
+                reads.append(True);native.screen_complete=len(reads)>2
+            return native(argv,**opts)
+        with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=reading),patch('teamkit.app_usage.time.sleep'):
+            refresh_native_usage(self.value,self.state,'team')
+        self.assertEqual(len(reads),3)
+        self.assertEqual(sum(a[1]=='run' for a in native.calls),1)
+        self.assertEqual(sum(a[1]=='keys' for a in native.calls),1)
+        self.assertTrue(native.missing)
+
+    def test_hidden_pristine_try_hint_is_empty_only_for_the_owned_probe(self):
+        from teamkit.app_usage import refresh_native_usage
+        native=NativeHc();native.initial_screen='❯\u00a0Try "create a util logging.py that..."\n';ticks=iter(range(100))
+        native.foreground_name='claude.exe';native.status_app='claude-code'
+        with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=native),patch('teamkit.app_usage.time.sleep'),patch('teamkit.app_usage.time.monotonic',side_effect=lambda:next(ticks)):
+            result=refresh_native_usage(self.value,self.state,'personal')
+        self.assertEqual(result['weekly'],32)
+        self.assertEqual(sum(a[1]=='run' for a in native.calls),1)
+        self.assertEqual(sum(a[1]=='keys' for a in native.calls),1)
+        self.assertFalse(any(a[1]=='send' for a in native.calls));self.assertTrue(native.missing)
+        self.assertNotIn('teamkit.owner',native.labels)
+        attempt=json.loads(Path(str(self.state)+'.native-usage-personal.json').read_text())
+        self.assertTrue(attempt['zero_token_usage'])
+
+    def test_initial_hint_rejects_visible_nonpristine_or_multiline_probes(self):
+        from teamkit.app_usage import refresh_native_usage,UsageUnavailable
+        for change in ('space','tab','turn','bool_turn','multiline','history_draft'):
+            with self.subTest(change=change):
+                native=NativeHc();native.initial_screen='❯ Try "create a util"\n';ticks=iter(range(100))
+                if change in ('space','tab'):native.extra_labels={'herdr.'+change:'visible'}
+                if change=='turn':native.turn=1
+                if change=='bool_turn':native.turn=False
+                if change=='multiline':native.initial_screen+='  preserve draft\n'
+                if change=='history_draft':native.initial_screen='old answer\n'+native.initial_screen+'  preserve hidden draft\n'
+                with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=native),patch('teamkit.app_usage.time.sleep'),patch('teamkit.app_usage.time.monotonic',side_effect=lambda:next(ticks)):
+                    with self.assertRaisesRegex(UsageUnavailable,'native_not_ready'):
+                        refresh_native_usage(self.value,self.state,'team')
+                self.assertFalse(any(a[1] in ('send','keys') for a in native.calls))
+                self.assertTrue(native.missing)
+
+    def test_initial_hint_rechecks_process_turn_and_app_attachment_after_read(self):
+        from teamkit.app_usage import refresh_native_usage,UsageUnavailable
+        for change in ('pid','turn','space'):
+            with self.subTest(change=change):
+                native=NativeHc();native.initial_screen='❯ Try "create a util"\n';ticks=iter(range(100))
+                def reading(argv,**opts):
+                    result=native(argv,**opts)
+                    if argv[1]=='get' and native.gets==2:
+                        value=json.loads(result.stdout)
+                        if change=='pid':value['foreground']['pid']=100
+                        if change=='turn':value['turn']=1
+                        if change=='space':value['labels']['herdr.space']='new-attachment'
+                        return subprocess.CompletedProcess(argv,0,json.dumps(value),'')
+                    return result
+                with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=reading),patch('teamkit.app_usage.time.sleep'),patch('teamkit.app_usage.time.monotonic',side_effect=lambda:next(ticks)):
+                    with self.assertRaisesRegex(UsageUnavailable,'native_not_ready'):
+                        refresh_native_usage(self.value,self.state,'team')
+                self.assertFalse(any(a[1] in ('send','keys') for a in native.calls))
+                self.assertTrue(native.missing)
 
     def test_os_process_name_is_distinct_from_reported_claude_program_id(self):
         from teamkit.app_usage import refresh_native_usage
@@ -209,3 +386,206 @@ class NativeUsageTests(UsageFixture):
         with patch('teamkit.app_usage.claude_identity'),patch('teamkit.app_usage.subprocess.run',side_effect=native):
             with self.assertRaises(UsageUnavailable):refresh_native_usage(self.value,self.state,'team')
         self.assertEqual(sum(a[1]=='run' for a in native.calls),1);self.assertTrue(native.missing)
+
+
+class NativeAdmissionTests(UsageFixture):
+    def probe(self, account='team', weekly=32):
+        from teamkit.app_usage import refresh_native_usage
+        native = NativeHc()
+        native.screen = native.screen.replace('32% used', str(weekly) + '% used')
+        with patch('teamkit.app_usage.claude_identity'), patch('teamkit.app_usage.subprocess.run', side_effect=native):
+            refresh_native_usage(self.value, self.state, account)
+        return native
+
+    def attempt_path(self, account='team'):
+        return Path(str(self.state) + '.native-usage-' + account + '.json')
+
+    def test_verified_official_refresh_enables_company_route_without_quota_injection(self):
+        self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+        native = self.probe()
+        self.assertEqual(self.call('route', '--provider', 'claude'), {'account':'team', 'action':'dispatch'})
+        self.assertTrue(native.missing)
+        self.assertEqual(native.received_text, '/usage')
+        with StoreContext(self.state) as db:
+            self.assertIsNone(db.quota('claude/team'))
+
+    def test_company_then_personal_then_wait_uses_the_same_ninety_percent_limit(self):
+        self.probe(weekly=90)
+        self.probe('personal', weekly=38)
+        self.assertEqual(self.call('route', '--provider', 'claude')['account'], 'personal')
+        self.probe('personal', weekly=95)
+        self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+
+    def test_unverified_manual_display_alone_does_not_enable_assignment(self):
+        with patch('teamkit.app_usage.claude_identity'):
+            record_native_observation(self.value, self.state, 'team',
+                'Current session\n0% used\nCurrent week (all models)\n0% used', self.now)
+        self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+
+    def test_failed_incomplete_mismatched_or_expired_probe_never_authorizes(self):
+        import copy
+        self.probe()
+        path = self.attempt_path()
+        original = json.loads(path.read_text())
+        changes = [
+            {'cleaned':False}, {'zero_token_usage':False}, {'error':'native_usage_failed'},
+            {'binding':'wrong'}, {'nonce':'wrong'}, {'terminal':'other'},
+            {'observed_at':time.time()-301}, {'observed_at':time.time()+30},
+            {'attempt_at':time.time()+30}, {'values':{'five_hour':0}},
+            {'values':{'five_hour':False, 'weekly':0}},
+            {'native':{'foreground_name':'zsh', 'foreground_pid':99, 'status_app':'claude', 'status_state':'idle'}},
+        ]
+        for change in changes:
+            with self.subTest(change=change):
+                path.write_text(json.dumps({**copy.deepcopy(original), **change}))
+                self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+
+    def test_changed_measurement_or_profile_cannot_reuse_probe_attestation(self):
+        self.probe()
+        observations = Path(str(self.state) + '.usage-observations.json')
+        data = json.loads(observations.read_text())
+        data['claude/team']['weekly'] = 1
+        observations.write_text(json.dumps(data))
+        self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+        self.probe()
+        self.value['profiles']['claude']['team']['identity']['email'] = 'changed@example.invalid'
+        self.config.write_text(json.dumps(self.value))
+        self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+
+    def test_latest_response_limits_override_older_native_zero(self):
+        self.probe(weekly=0)
+        from teamkit.policy import CLAUDE_QUOTA_SOURCE
+        now = time.time()
+        with StoreContext(self.state) as db:
+            db.quota('claude/team', {'source':CLAUDE_QUOTA_SOURCE,
+                'binding':binding(self.value['profiles']['claude']['team']), 'observed_at':now,
+                'five_hour':{'used':95, 'resets_at':now+300}, 'weekly':{'used':0, 'resets_at':now+600}})
+        self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+
+    def test_equal_timestamps_use_the_more_restrictive_usage(self):
+        self.probe(weekly=95)
+        from teamkit.policy import CLAUDE_QUOTA_SOURCE
+        at = json.loads(self.attempt_path().read_text())['observed_at']
+        with StoreContext(self.state) as db:
+            db.quota('claude/team', {'source':CLAUDE_QUOTA_SOURCE,
+                'binding':binding(self.value['profiles']['claude']['team']), 'observed_at':at,
+                'five_hour':{'used':0, 'resets_at':at+300}, 'weekly':{'used':0, 'resets_at':at+600}})
+        self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+
+    def test_equal_timestamps_display_matches_the_routed_composition(self):
+        self.probe(weekly=95)
+        from teamkit.policy import CLAUDE_QUOTA_SOURCE
+        from teamkit.config import cached_quota
+        at = json.loads(self.attempt_path().read_text())['observed_at']
+        with StoreContext(self.state) as db:
+            db.quota('claude/team', {'source':CLAUDE_QUOTA_SOURCE,
+                'binding':binding(self.value['profiles']['claude']['team']), 'observed_at':at,
+                'five_hour':{'used':0, 'resets_at':at+300}, 'weekly':{'used':0, 'resets_at':at+600}})
+        self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+        with patch('teamkit.app_usage.providers.codex_quota', return_value=self.raw), patch('teamkit.app_usage.claude_identity'):
+            row = collect(self.value, self.state)['accounts']['claude/team']
+        with StoreContext(self.state) as db:
+            routed = cached_quota(self.value, db, 'claude', 'team')
+        self.assertFalse(row['display_only'])
+        self.assertEqual(row['source'], routed['source'])
+        self.assertEqual(row['windows']['weekly']['used'], routed['weekly']['used'])
+        self.assertEqual(row['windows']['weekly']['used'], 95)
+        self.assertEqual(row['windows']['five_hour']['used'], routed['five_hour']['used'])
+
+    def test_equal_timestamp_display_keeps_a_rejected_tied_response(self):
+        self.probe(weekly=95)
+        from teamkit.policy import CLAUDE_QUOTA_SOURCE
+        from teamkit.config import cached_quota
+        at = json.loads(self.attempt_path().read_text())['observed_at']
+        with StoreContext(self.state) as db:
+            db.quota('claude/team', {'source':CLAUDE_QUOTA_SOURCE, 'unavailable':True,
+                'binding':binding(self.value['profiles']['claude']['team']), 'observed_at':at,
+                'five_hour':{'used':1, 'resets_at':at+300}, 'weekly':{'used':2, 'resets_at':at+600}})
+        with patch('teamkit.app_usage.providers.codex_quota', return_value=self.raw), patch('teamkit.app_usage.claude_identity'):
+            row = collect(self.value, self.state)['accounts']['claude/team']
+        with StoreContext(self.state) as db:
+            routed = cached_quota(self.value, db, 'claude', 'team')
+        self.assertEqual(row['source'], routed['source'])
+        self.assertNotEqual(row['status'], 'query_succeeded')
+
+    def test_private_probe_file_is_required_and_tui_does_not_consume_it(self):
+        self.probe()
+        path = self.attempt_path()
+        path.chmod(0o644)
+        self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+        path.chmod(0o600)
+        self.value['runtime_backend'] = 'tui'
+        self.config.write_text(json.dumps(self.value))
+        self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+
+
+    def test_verified_probe_has_admission_source_in_account_coverage(self):
+        self.probe()
+        with patch('teamkit.app_usage.providers.codex_quota', return_value=self.raw), patch('teamkit.app_usage.claude_identity'):
+            row = collect(self.value, self.state)['accounts']['claude/team']
+        self.assertFalse(row['display_only'])
+        self.assertEqual(row['source'], 'claude-native-usage')
+        self.assertEqual(row['windows']['weekly']['status'], 'provided')
+        self.assertNotIn('resets_at', row['windows']['weekly'])
+
+    def test_probe_read_does_not_renew_timestamp_and_rejects_symlink(self):
+        self.probe()
+        original = self.attempt_path().read_bytes()
+        with patch('teamkit.app_usage.time.time', return_value=time.time()+301):
+            self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+        self.assertEqual(self.attempt_path().read_bytes(), original)
+        other = self.root/'outside.json'
+        other.write_bytes(original)
+        other.chmod(0o600)
+        self.attempt_path().unlink()
+        self.attempt_path().symlink_to(other)
+        self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+
+
+    def test_native_source_cannot_bypass_codex_reset_checks(self):
+        with StoreContext(self.state) as db:
+            db.quota('codex/team', {'source':'claude-native-usage',
+                'binding':binding(self.value['profiles']['codex']['team']), 'observed_at':time.time(),
+                'five_hour':{'used':0}, 'weekly':{'used':0}})
+        self.assertEqual(self.call('route', '--provider', 'codex')['action'], 'wait')
+
+    def test_malformed_tied_response_fails_closed(self):
+        self.probe()
+        from teamkit.policy import CLAUDE_QUOTA_SOURCE
+        at = json.loads(self.attempt_path().read_text())['observed_at']
+        with StoreContext(self.state) as db:
+            db.quota('claude/team', {'source':CLAUDE_QUOTA_SOURCE,
+                'binding':binding(self.value['profiles']['claude']['team']), 'observed_at':at,
+                'five_hour':None, 'weekly':None})
+        self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+
+
+    def test_tied_response_reset_failure_or_unavailability_is_not_erased(self):
+        from teamkit.policy import CLAUDE_QUOTA_SOURCE
+        self.probe()
+        at = json.loads(self.attempt_path().read_text())['observed_at']
+        base = {'source':CLAUDE_QUOTA_SOURCE,
+                'binding':binding(self.value['profiles']['claude']['team']), 'observed_at':at,
+                'five_hour':{'used':1, 'resets_at':at+300}, 'weekly':{'used':2, 'resets_at':at+600}}
+        import copy
+        for variant in ('expired_reset', 'missing_reset', 'unavailable'):
+            value = copy.deepcopy(base)
+            if variant == 'expired_reset': value['five_hour']['resets_at'] = at-1
+            elif variant == 'missing_reset': value['weekly'].pop('resets_at')
+            else: value['unavailable'] = True
+            with self.subTest(variant=variant):
+                with StoreContext(self.state) as db: db.quota('claude/team', value)
+                self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')
+
+    def test_failed_identity_recheck_invalidates_previous_native_success(self):
+        from teamkit.app_usage import refresh_native_usage, UsageUnavailable
+        for reason in ('query_failed', 'profile_mismatch'):
+            with self.subTest(reason=reason):
+                self.probe()
+                observation = Path(str(self.state) + '.usage-observations.json').read_bytes()
+                with patch('teamkit.app_usage.claude_identity', side_effect=UsageUnavailable(reason)):
+                    with self.assertRaisesRegex(UsageUnavailable, reason):
+                        refresh_native_usage(self.value, self.state, 'team')
+                self.assertEqual(json.loads(self.attempt_path().read_text())['error'], reason)
+                self.assertEqual(Path(str(self.state) + '.usage-observations.json').read_bytes(), observation)
+                self.assertEqual(self.call('route', '--provider', 'claude')['action'], 'wait')

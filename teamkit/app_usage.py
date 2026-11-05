@@ -1,4 +1,4 @@
-"""GUI account coverage. Native /usage observations never authorize admission."""
+"""GUI coverage and verified official native usage for account admission."""
 from contextlib import contextmanager
 import fcntl
 import json
@@ -6,21 +6,24 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import stat
 import tempfile
 import time
 import uuid
 
 from . import providers
 from .config import binding
-from .policy import CLAUDE_QUOTA_SOURCE, normalize_quota, number
+from .policy import CLAUDE_QUOTA_SOURCE, CLAUDE_NATIVE_QUOTA_SOURCE, normalize_quota, number
 from .statusline import peek_quota
 from .runtime import AUTH_ENV, home_value
 from .store import Store
+from .prompt_state import empty_input
 
 REASONS={'provider_windows_read':'구독 조회가 반환한 사용량입니다.',
          'native_usage_needed':'로그인은 확인했지만 GUI에 연결된 최신 사용량 자료가 없습니다.',
          'native_display_observation':'공식 /usage에서 확인한 표시 전용 값입니다.',
          'native_response_observation':'실제 응답에 연결된 statusline 사용량입니다.',
+         'native_verified_observation':'계정·조회 완료·정리를 검증한 공식 /usage 값이며 배정에도 사용합니다.',
          'observation_expired':'마지막 사용량 자료의 유효기간이 지났습니다.',
          'observation_unreadable':'이전 표시용 기록을 읽지 못했습니다. 새 /usage 관측이 필요합니다.',
          'query_failed':'구독 CLI에서 사용량을 읽지 못했습니다. 로그인 문제로 단정하지 않습니다.',
@@ -120,7 +123,7 @@ def _measured(row,value,now,ttl,display_only=False,missing='not_provided'):
         used=window if display_only else window.get('used') if isinstance(window,dict) else None
         valid=number(used) and 0<=used<=100
         reset=None if display_only else window.get('resets_at') if isinstance(window,dict) else None
-        valid=valid and (display_only or number(reset) and reset>now)
+        valid=valid and (display_only or value.get('source')==CLAUDE_NATIVE_QUOTA_SOURCE or number(reset) and reset>now)
         state='provided' if valid and current else 'stale' if valid or age is not None and not current else missing if window is None else 'unavailable'
         out={'status':state,'status_label':WINDOW_LABELS[state],'observed_at':row['observed_at'],
              'reason':'provider_window_not_returned' if state=='not_provided' else state,
@@ -189,10 +192,23 @@ def collect(config,state):
                                 and all(number(observation.get(k)) and 0<=observation[k]<=100 for k in ('five_hour','weekly'))
                                 and (not value or observation['observed_at']>value.get('observed_at',0))):
                             value=observation;display=True
+                            verified=native_admission_quota(config,state,account)
+                            if verified and verified['observed_at']==observation['observed_at']:
+                                value=verified;display=False
+                        elif (isinstance(observation,dict) and value and observation.get('binding')==binding(pr)
+                                and observation.get('source')=='native-cli-manual-observation'
+                                and observation.get('observed_at')==value.get('observed_at')):
+                            verified=native_admission_quota(config,state,account)
+                            if verified and verified['observed_at']==observation['observed_at']:
+                                from .config import cached_quota
+                                store=Store(state)
+                                try:value=cached_quota(config,store,provider,account) or value
+                                finally:store.close()
                         if value and number(value.get('observed_at')) and value['observed_at']<=now:
                             fresh=now-value['observed_at']<=config.get('quota_ttl_seconds',120) and not value.get('unavailable')
                             row=_measured(_entry(provider,account,pr,'query_succeeded' if fresh else 'stale',attempt),value,now,config.get('quota_ttl_seconds',120),display)
-                            row['reason']='native_display_observation' if display else 'native_response_observation'
+                            row['reason']=('native_verified_observation' if value.get('source')==CLAUDE_NATIVE_QUOTA_SOURCE
+                                           else 'native_display_observation' if display else 'native_response_observation')
                         else:
                             row=_entry(provider,account,pr,'not_collected',attempt,'observation_unreadable' if observation_error else 'native_usage_needed')
                             row['source']='claude-auth-status';row['auth_checked_at']=now
@@ -273,6 +289,56 @@ def _native_attempt_path(state,account):
     return _path(state,'.native-usage-'+account+'.json')
 
 
+def _private_usage_record(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd) as stream:
+        info = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) & 0o077 or info.st_size > 65536):
+            raise ValueError('private usage record required')
+        value = json.load(stream)
+        if not isinstance(value, dict):
+            raise ValueError('usage record must be an object')
+        return value
+
+
+def native_admission_quota(config, state, account):
+    """Only a completed owned probe attests a matching display observation."""
+    if config.get('runtime_backend') != 'core':
+        return None
+    try:
+        attempt = _private_usage_record(_native_attempt_path(state, account))
+        observations = _private_usage_record(_path(state, '.usage-observations.json'))
+        observation = observations.get('claude/' + account)
+        pr = config['profiles']['claude'][account]
+        at, started = attempt.get('observed_at'), attempt.get('attempt_at')
+        now = time.time()
+        native, values = attempt.get('native'), attempt.get('values')
+        if (attempt.get('cleaned') is not True or attempt.get('zero_token_usage') is not True
+                or attempt.get('error') or attempt.get('binding') != binding(pr)
+                or not re.fullmatch(r'[0-9a-f]{32}', str(attempt.get('nonce', '')))
+                or not re.fullmatch(r't[0-9a-z]+', str(attempt.get('terminal', '')))
+                or not number(at) or not number(started) or not started <= at <= now
+                or now - at > config.get('quota_ttl_seconds', 120)
+                or not isinstance(native, dict) or not isinstance(values, dict)
+                or native.get('foreground_name') not in ('claude', 'claude.exe')
+                or type(native.get('foreground_pid')) is not int or native['foreground_pid'] <= 0
+                or native.get('status_app') not in ('claude', 'claude-code')
+                or native.get('status_state') != 'idle'
+                or not isinstance(observation, dict)
+                or observation.get('source') != 'native-cli-manual-observation'
+                or observation.get('binding') != binding(pr) or observation.get('observed_at') != at):
+            return None
+        for key in ('five_hour', 'weekly'):
+            if (not number(values.get(key)) or not 0 <= values[key] <= 100
+                    or not number(observation.get(key)) or observation[key] != values[key]):
+                return None
+        return {'source':CLAUDE_NATIVE_QUOTA_SOURCE, 'binding':binding(pr), 'observed_at':at,
+                'five_hour':{'used':values['five_hour']}, 'weekly':{'used':values['weekly']}}
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
 def _hc(args,timeout=15,plain=False):
     try:result=subprocess.run(['hc',*args],capture_output=True,text=True,timeout=timeout)
     except (OSError,subprocess.SubprocessError) as error:
@@ -294,8 +360,8 @@ def _dialog(text):
     return None
 
 
-def _owned_usage(address,labels):
-    native=_hc(['get',address])
+def _owned_usage(address,labels,timeout=15):
+    native=_hc(['get',address],timeout=timeout)
     if native.get('state')=='missing':return native
     if native.get('address')!=address or any(native.get('labels',{}).get(k)!=v for k,v in labels.items()):
         raise UsageUnavailable('native_ownership_changed')
@@ -324,7 +390,11 @@ def refresh_native_usage(config,state,account):
         previous=_read(path)
         if previous and not previous.get('cleaned'):
             raise UsageUnavailable('native_outcome_unknown')
-        claude_identity(pr)
+        try:claude_identity(pr)
+        except UsageUnavailable as error:
+            _write(path,{'attempt_at':time.time(),'binding':binding(pr),'cleaned':True,
+                         'terminal':None,'error':str(error)})
+            raise
         nonce=uuid.uuid4().hex;labels={'teamkit.usage':nonce,'teamkit.usage-account':'claude/'+account,
                                       'teamkit.usage-profile':binding(pr)}
         record={'attempt_at':time.time(),'binding':binding(pr),'nonce':nonce,'cleaned':False,'terminal':None}
@@ -344,33 +414,52 @@ def refresh_native_usage(config,state,account):
             if not isinstance(address,str) or not re.fullmatch(r't[0-9a-z]+',address):
                 address=None;raise UsageUnavailable('native_outcome_unknown')
             record['terminal']=address;_write(path,record)
-            native=_owned_usage(address,labels)
-            text=_hc(['read','--lines','100',address],plain=True)
-            dialog=_dialog(text)
-            if dialog:raise UsageUnavailable(dialog)
-            if (native.get('status') or {}).get('state')!='idle':
-                _hc(['wait','--json','--timeout','15',address],timeout=20)
-                native=_owned_usage(address,labels)
-            # The program's OSC idle report can arrive before the OS foreground
-            # snapshot. Keep the same newly owned terminal; never relaunch it.
-            foreground_deadline=time.monotonic()+3
-            while (native.get('state')=='live' and (native.get('status') or {}).get('state')=='idle'
-                   and native.get('foreground') is None and time.monotonic()<foreground_deadline):
+            from .session_pool import _hint_guard
+            hint_slot={'provider':'claude','phase':'preparing'}
+            startup_deadline=time.monotonic()+15
+            while True:
+                remaining=startup_deadline-time.monotonic()
+                if remaining<=0:raise UsageUnavailable('native_not_ready')
+                native=_owned_usage(address,labels,timeout=remaining)
+                foreground=native.get('foreground') or {};status=native.get('status') or {}
+                record['native']={'foreground_name':foreground.get('name'),'foreground_pid':foreground.get('pid'),
+                                  'status_app':status.get('app'),'status_state':status.get('state')}
+                if (native.get('state')!='live' or status.get('state') not in (None,'idle')
+                        or status.get('app') not in (None,'claude','claude-code')
+                        or foreground and (foreground.get('name') not in ('claude','claude.exe')
+                                           or type(foreground.get('pid')) is not int or foreground['pid']<=0)):
+                    raise UsageUnavailable('native_not_ready')
+                remaining=startup_deadline-time.monotonic()
+                if remaining<=0:raise UsageUnavailable('native_not_ready')
+                screen=_hc(['read','--json','--lines','0',address],timeout=remaining)
+                baseline=screen.get('text')
+                if not isinstance(baseline,str):raise UsageUnavailable('native_outcome_unknown')
+                dialog=_dialog(baseline)
+                if dialog:raise UsageUnavailable(dialog)
+                if 'Current week (all models)' in baseline:raise UsageUnavailable('native_outcome_unknown')
+                plain=re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]','',baseline)
+                hint=None
+                empty=empty_input(plain)
+                if not empty and screen.get('complete') is True and _hint_guard(hint_slot,native):
+                    prompts=list(re.finditer(r'^[ \t]*[›❯][^\S\r\n]*(.*)$',plain,re.M))
+                    candidate=prompts[-1].group(1).strip() if prompts else None
+                    if (isinstance(candidate,str) and re.fullmatch(r'Try "[^"\r\n]{1,200}"',candidate)
+                            and candidate.isprintable() and empty_input(plain,candidate)):
+                        hint=candidate;empty=True
+                if (status.get('state')=='idle' and status.get('app') in ('claude','claude-code')
+                        and foreground and screen.get('complete') is True and empty):
+                    break
+                if time.monotonic()>=startup_deadline:raise UsageUnavailable('native_not_ready')
                 time.sleep(0.1)
-                native=_owned_usage(address,labels)
-            foreground=native.get('foreground') or {};status=native.get('status') or {}
-            record['native']={'foreground_name':foreground.get('name'),'foreground_pid':foreground.get('pid'),
-                              'status_app':status.get('app'),'status_state':status.get('state')}
-            if (native.get('state')!='live' or status.get('state')!='idle'
-                    or foreground.get('name') not in ('claude','claude.exe')
-                    or type(foreground.get('pid')) is not int or foreground['pid']<=0
-                    or status.get('app') not in ('claude','claude-code')):
-                text=_hc(['read','--lines','100',address],plain=True)
-                raise UsageUnavailable(_dialog(text) or 'native_not_ready')
-            baseline=_hc(['read','--lines','100',address],plain=True)
-            if 'Current week (all models)' in baseline:raise UsageUnavailable('native_outcome_unknown')
-            ready=_owned_usage(address,labels)
-            if (ready.get('status') or {}).get('state')!='idle':raise UsageUnavailable('native_not_ready')
+            remaining=startup_deadline-time.monotonic()
+            if remaining<=0:raise UsageUnavailable('native_not_ready')
+            ready=_owned_usage(address,labels,timeout=remaining)
+            if (time.monotonic()>=startup_deadline or ready.get('state')!='live' or ready.get('foreground')!=native.get('foreground')
+                    or ready.get('turn')!=native.get('turn')
+                    or hint is not None and not _hint_guard(hint_slot,ready)
+                    or (ready.get('status') or {}).get('state')!='idle'
+                    or (ready.get('status') or {}).get('app') not in ('claude','claude-code')):
+                raise UsageUnavailable('native_not_ready')
             # send adds agent-message attribution inside an hc controller. Named
             # keys preserve the literal builtin command without clearing scope.
             keyed=_hc(['keys','--json',address,'/','u','s','a','g','e','enter'])

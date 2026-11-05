@@ -7,6 +7,40 @@ from test_cli import Fixture, StoreContext
 
 
 class WorkflowTests(Fixture):
+    def test_snapshot_closes_read_connection_on_success_and_query_failure(self):
+        import sqlite3
+        from contextlib import closing
+        from teamkit.workflow import snapshot
+
+        self.setup_work()
+        connect = sqlite3.connect
+        connections = []
+
+        def tracked_connect(*args, **kwargs):
+            connection = connect(*args, **kwargs)
+            connections.append(connection)
+            return connection
+
+        with patch('teamkit.workflow.sqlite3.connect', side_effect=tracked_connect):
+            self.assertEqual(snapshot(self.state)['works'][0]['id'], 'W1')
+        try:
+            with self.assertRaises(sqlite3.ProgrammingError):
+                connections[-1].execute('SELECT 1')
+        finally:
+            connections[-1].close()
+
+        with closing(connect(self.state)) as db:
+            db.execute('DROP TABLE quotas')
+            db.commit()
+        with patch('teamkit.workflow.sqlite3.connect', side_effect=tracked_connect):
+            with self.assertRaises(sqlite3.OperationalError):
+                snapshot(self.state)
+        try:
+            with self.assertRaises(sqlite3.ProgrammingError):
+                connections[-1].execute('SELECT 1')
+        finally:
+            connections[-1].close()
+
     def setup_work(self):
         self.value.update(private_plan_root=str(self.root/'private-plans'), require_design_approval=True)
         self.config.write_text(json.dumps(self.value))
