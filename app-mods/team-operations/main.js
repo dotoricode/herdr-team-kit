@@ -3,13 +3,15 @@
 // The same mod draws the page (no role) and its dialogs (props().role), so dialogs are
 // app overlays: Esc and a press beside them close them.
 //
-// Look: its own dark neutrals and four meaning colours only (not the app theme):
-//   ACCENT selection, actions, information · OK working, healthy, done
-//   WARN attention, waiting, possible stall  · BAD errors, failures
+// Look: charcoal neutrals (not the app theme) and three meaning colours. The accent is the
+// current app theme's accent, read at render time:
+//   ACCENT selection, actions, working, done · WARN attention, possible stall · BAD errors
+// Layout follows a running ops dashboard (Grafana): equal-width panels on a dense grid,
+// one big number per stat, related facts kept next to each other. No left-border accents.
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
-import { appHome, readTextFile, exec, run, props, openOverlay, closeOverlay, shared, setShared, nextCommand } from "herdr";
+import { appHome, readTextFile, exec, run, theme, props, openOverlay, closeOverlay, shared, setShared, nextCommand } from "herdr";
 
 const REV = "team-operations.rev";
 const REFRESH_MS = 15000;
@@ -17,11 +19,14 @@ const TABS = ["progress", "floor", "goal", "bounty"];
 const STALE_S = 45;
 
 const C = {
-  bg: "#0d1015", panel: "#151a21", raised: "#1c222b", line: "#29303b",
-  text: "#eef1f5", sub: "#a7b0bd", faint: "#6c7684",
-  ACCENT: "#4c8dff", OK: "#2fbf71", WARN: "#f0a020", BAD: "#ef4b4b",
+  bg: "#1b1c1f", panel: "#232428", raised: "#2b2d31", line: "#34363b",
+  text: "#ececee", sub: "#a9abb2", faint: "#74767d", ink: "#1b1c1f",
+  ACCENT: "#b8c77b", WARN: "#e8a33d", BAD: "#e5534b",
 };
-const FS = { xs: 13, sm: 14, md: 16, lg: 19, xl: 24, xxl: 30 };
+const FS = { xs: 13, sm: 14, md: 16, lg: 19, xl: 24, xxl: 30, stat: 40 };
+const CARD_W = 420;
+// The accent follows the app theme; everything else stays charcoal.
+const syncAccent = () => { C.ACCENT = theme()?.accent || C.ACCENT; };
 
 const floorOf = label => (String(label ?? "").match(/^(\d+)/)?.[1] ?? "");
 const shortName = label => String(label ?? "").split("·").pop().trim() || String(label ?? "");
@@ -61,7 +66,7 @@ function excerpt(body, query) {
 function tone(e) {
   const p = e.progress ?? {};
   if (p.stalled) return { color: C.WARN, text: "멈춤 의심" };
-  if (e.state === "working") return { color: C.OK, text: "작업 중" };
+  if (e.state === "working") return { color: C.ACCENT, text: "작업 중" };
   if (e.state === "blocked") return { color: C.WARN, text: "확인 필요" };
   if (e.state === "done") return { color: C.ACCENT, text: "새 응답" };
   return { color: C.faint, text: "대기" };
@@ -91,7 +96,7 @@ function text(value, size = FS.md, color = C.text) {
 function button(id, label, onClick, fill = null) {
   return div().id(id).px(14).py(7).rounded(8).cursor_pointer().flex_none().whitespace_nowrap()
     .text_size(FS.sm).font_semibold()
-    .bg(fill ?? C.raised).text_color(fill ? "#ffffff" : C.text).border(1).border_color(fill ?? C.line)
+    .bg(fill ?? C.raised).text_color(fill ? C.ink : C.text).border(1).border_color(fill ?? C.line)
     .hover(s => s.opacity(0.85))
     .on_click((_e, cx) => onClick(cx))
     .child(label);
@@ -100,7 +105,7 @@ function button(id, label, onClick, fill = null) {
 function chip(id, label, active, onClick) {
   return div().id(id).px(12).py(6).rounded(8).cursor_pointer().flex_none().whitespace_nowrap()
     .text_size(FS.sm).font_semibold()
-    .bg(active ? C.ACCENT : C.raised).text_color(active ? "#ffffff" : C.sub)
+    .bg(active ? C.ACCENT : C.raised).text_color(active ? C.ink : C.sub)
     .on_click((_e, cx) => onClick(cx))
     .child(label);
 }
@@ -115,7 +120,7 @@ function dot(color, size = 10) {
 }
 
 function panel() {
-  return v_flex().min_h(0).gap(12).p(16).rounded(12).bg(C.panel).border(1).border_color(C.line);
+  return v_flex().min_h(0).gap(10).p(14).rounded(8).bg(C.panel).border(1).border_color(C.line);
 }
 
 function panelTitle(title, note = "") {
@@ -137,7 +142,7 @@ function bar(done, total) {
 // The checklist the way Claude's app draws it: done greyed and struck, current in accent.
 function stepList(steps) {
   return v_flex().gap(6).children((steps?.items ?? []).map((s, i) => h_flex().id(`step-${i}`).gap(8).items_center()
-    .child(dot(s.status === "completed" ? C.OK : s.status === "in_progress" ? C.ACCENT : C.line, 8))
+    .child(dot(s.status === "completed" ? C.ACCENT : s.status === "in_progress" ? C.ACCENT : C.line, 8))
     .child(s.status === "completed" ? div().text_size(FS.sm).text_color(C.faint).line_through().child(s.content)
       : s.status === "in_progress" ? div().text_size(FS.sm).font_semibold().text_color(C.ACCENT).child(s.active || s.content)
       : text(s.content, FS.sm, C.sub))));
@@ -213,6 +218,7 @@ class Dialog {
   }
 
   render(cx) {
+    syncAccent();
     const p = this.p;
     if (p.role === "badge") return this.badge();
     if (p.role === "gotcha") return this.frame("새 주의사항", "부서 위키 문서 끝에 추가됩니다.",
@@ -394,6 +400,7 @@ export default class TeamOperations extends View {
 
   render(cx) {
     if (this.dialog) return this.dialog.render(cx);
+    syncAccent();
     const rev = shared(REV);
     if (rev !== this.seenRev) {
       this.seenRev = rev;
@@ -420,7 +427,7 @@ export default class TeamOperations extends View {
       .when(Boolean(this.error), el => el.child(div().p(12).rounded(10).border(1).border_color(C.BAD)
         .text_size(FS.md).text_color(C.BAD).child(`조회 오류: ${this.error}`)))
       .child(h_flex().w_full().flex_none().gap(12)
-        .child(this.kpi("작업 중", `${working}`, `전체 직원 ${staff.length}명`, working ? C.OK : C.text))
+        .child(this.kpi("작업 중", `${working}`, `전체 직원 ${staff.length}명`, working ? C.ACCENT : C.text))
         .child(this.kpi("멈춤 의심", `${stalled}`, "작업 중인데 10분 넘게 기록 변화 없음", stalled ? C.WARN : C.text))
         .child(this.kpi("대기 제안", `${pending}`, `전체 ${(hq.proposals ?? []).length}건`, pending ? C.ACCENT : C.text))
         .child(this.kpi("열린 현상금", `${openBounties}`, `해결 ${(hq.bounties ?? []).length - openBounties}건`, openBounties ? C.ACCENT : C.text)))
@@ -442,7 +449,7 @@ export default class TeamOperations extends View {
   // Live means the last read succeeded within STALE_S; the dot pulses natively (no JS timer).
   pulse() {
     const state = this.loading ? "loading" : this.error ? "error" : this.stale ? "stale" : "live";
-    const look = { live: [C.OK, "실시간"], stale: [C.WARN, "갱신 지연"], error: [C.BAD, "조회 오류"], loading: [C.faint, "불러오는 중"] }[state];
+    const look = { live: [C.ACCENT, "실시간"], stale: [C.WARN, "갱신 지연"], error: [C.BAD, "조회 오류"], loading: [C.faint, "불러오는 중"] }[state];
     const mark = div().id(`pulse-${state}`).size(12).rounded_full().bg(look[0]);
     return h_flex().items_center().gap(8).px(12).py(6).rounded(999).bg(C.panel).border(1).border_color(C.line)
       .child(state === "live" ? mark.loop("opacity", { from: 0.25, to: 1, period: 1600 }) : mark)
@@ -451,9 +458,9 @@ export default class TeamOperations extends View {
   }
 
   kpi(label, value, note, color) {
-    return v_flex().flex_1().min_w(0).p(16).gap(4).rounded(12).bg(C.panel).border(1).border_color(C.line)
-      .child(text(label, FS.sm, C.sub))
-      .child(div().font_bold().text_size(FS.xxl).text_color(color).child(value))
+    return v_flex().flex_1().min_w(0).px(14).py(10).gap(2).rounded(8).bg(C.panel).border(1).border_color(C.line)
+      .child(div().text_size(FS.sm).font_semibold().text_color(C.sub).child(label))
+      .child(div().font_bold().text_size(FS.stat).text_color(color).child(value))
       .child(div().text_size(FS.xs).text_color(C.faint).truncate().child(note));
   }
 
@@ -481,9 +488,10 @@ export default class TeamOperations extends View {
     const unlinked = rows.filter(r => !shown(r));
     return panel().size_full()
       .child(panelTitle("진행 현황", "직원을 누르면 단계와 상세"))
-      .child(v_flex().flex_1().min_h(0).gap(8).overflow_y_scrollbar()
+      .child(v_flex().flex_1().min_h(0).gap(10).overflow_y_scrollbar()
         .when(!rows.length, el => el.child(empty(this.loading ? "불러오는 중..." : "표시할 직원이 없습니다.")))
-        .children(linked.map(({ e, team }) => this.progressRow(e, team)))
+        .child(h_flex().w_full().flex_wrap().gap(10).items_start()
+          .children(linked.map(({ e, team }) => this.progressRow(e, team))))
         .when(unlinked.length > 0, el => el.child(v_flex().gap(4).pt(8)
           .child(text(`진행 기록 연결 안 됨 ${unlinked.length}명`, FS.sm, C.sub))
           .child(h_flex().flex_wrap().gap(6).children(unlinked.map(({ e, team }) => div().id(`unlinked-${e.terminal}`)
@@ -495,17 +503,17 @@ export default class TeamOperations extends View {
     const pr = e.progress ?? {};
     const look = tone(e);
     const act = pr.activity;
-    return v_flex().id(`row-${e.terminal}`).w_full().gap(8).p(14).rounded(10).bg(C.raised).cursor_pointer()
-      .border(1).border_color(pr.stalled ? C.WARN : C.raised)
-      .hover(s => s.opacity(0.9))
+    // A fixed-width card: name, state and time sit together instead of at opposite screen edges.
+    return v_flex().id(`row-${e.terminal}`).w(CARD_W).flex_none().gap(8).p(12).rounded(8).bg(C.raised).cursor_pointer()
+      .border(1).border_color(pr.stalled ? C.WARN : C.line)
+      .hover(s => s.bg(C.panel))
       .on_click(() => this.openBadge(e, team.label))
-      .child(h_flex().w_full().items_center().gap(10)
+      .child(h_flex().w_full().items_center().gap(8)
         .child(e.state === "working" && !pr.stalled ? dot(look.color).loop("opacity", { from: 0.35, to: 1, period: 1400 }) : dot(look.color))
         .child(div().font_bold().text_size(FS.md).flex_none().child(e.label))
-        .child(text(shortName(team.label), FS.sm, C.faint))
-        .child(div().flex_1())
         .child(pill(look.text, look.color))
-        .child(text(ago(pr.last_change), FS.sm, C.sub)))
+        .child(text(ago(pr.last_change), FS.xs, C.faint)))
+      .child(text(shortName(team.label), FS.xs, C.faint))
       .child(div().text_size(FS.md).text_color(act ? C.text : C.faint).truncate()
         .child(act ? `${act.label}${act.detail ? ` · ${act.detail}` : ""}` : "기록된 활동 없음"))
       .when(Boolean(pr.steps), el => el.child(v_flex().gap(6)
@@ -524,22 +532,22 @@ export default class TeamOperations extends View {
       .child(h_flex().flex_none().flex_wrap().gap(6)
         .child(chip("dept-all", "전체", this.dept === "all", cx => { this.dept = "all"; cx.notify(); }))
         .children(teams.map(x => chip(`dept-${x.id}`, `${floorOf(x.label) || "-"} ${shortName(x.label)}`, this.dept === x.id, cx => { this.dept = x.id; cx.notify(); }))))
-      .child(v_flex().flex_1().min_h(0).gap(10).overflow_y_scrollbar()
+      .child(v_flex().flex_1().min_h(0).overflow_y_scrollbar()
         .when(!shown.length, el => el.child(empty(this.loading ? "불러오는 중..." : "표시할 부서가 없습니다.")))
-        .children(shown.map(team => this.deptCard(team))));
+        .child(h_flex().w_full().flex_wrap().gap(10).items_start().children(shown.map(team => this.deptCard(team)))));
   }
 
   deptCard(team) {
     const busy = team.employees.filter(e => e.state === "working").length;
     const stalled = team.employees.filter(e => e.progress?.stalled).length;
-    return v_flex().id(`dept-card-${team.id}`).w_full().p(14).gap(10).rounded(10).bg(C.raised)
+    return v_flex().id(`dept-card-${team.id}`).w(CARD_W).flex_none().p(12).gap(8).rounded(8).bg(C.raised).border(1).border_color(C.line)
       .child(h_flex().w_full().items_center().gap(12)
         .child(div().font_bold().text_size(FS.xl).text_color(C.sub).w(40).child(floorOf(team.label) || "-"))
         .child(v_flex().flex_1().min_w(0)
           .child(div().font_bold().text_size(FS.lg).truncate().child(shortName(team.label)))
           .child(h_flex().gap(8).items_center()
             .child(text(`${team.employees.length}명`, FS.sm, C.sub))
-            .when(busy > 0, el => el.child(pill(`작업 중 ${busy}`, C.OK)))
+            .when(busy > 0, el => el.child(pill(`작업 중 ${busy}`, C.ACCENT)))
             .when(stalled > 0, el => el.child(pill(`멈춤 의심 ${stalled}`, C.WARN)))))
         .when(Boolean(team.space), el => el.child(button(`enter-${team.id}`, "스페이스로 이동", () => run("space.select", { id: team.space })))))
       .child(v_flex().gap(4)
@@ -585,7 +593,7 @@ export default class TeamOperations extends View {
   }
 
   proposalCard(x) {
-    const color = x.status === "채택" ? C.OK : x.status === "보류" ? C.faint : C.ACCENT;
+    const color = x.status === "채택" ? C.ACCENT : x.status === "보류" ? C.faint : C.ACCENT;
     return v_flex().id(`proposal-${x.id}`).w_full().p(14).gap(6).rounded(10).bg(C.raised)
       .child(h_flex().items_center().gap(10)
         .child(pill(x.status, color))
@@ -620,7 +628,7 @@ export default class TeamOperations extends View {
         .when(!ranking.length, el => el.child(empty("해결 기록이 아직 없습니다.")))
         .children(ranking.map(([name, pts], i) => h_flex().id(`hunter-${i}`).justify_between().py(4)
           .child(div().text_size(FS.md).font_semibold().child(`${i + 1}. ${name}`))
-          .child(text(`${pts}pt`, FS.md, C.OK))))
+          .child(text(`${pts}pt`, FS.md, C.ACCENT))))
         .child(text("최근 해결", FS.sm, C.sub))
         .child(v_flex().flex_1().min_h(0).gap(6).overflow_y_scrollbar()
           .children(done.slice(0, 10).map(b => v_flex().id(`done-${b.id}`).py(4)
@@ -648,7 +656,7 @@ export default class TeamOperations extends View {
     const items = (this.data?.knowledge ?? []).filter(x => !q || `${x.team} ${x.title} ${x.body}`.toLowerCase().includes(q));
     return panel().size_full()
       .child(panelTitle(`지식 허브 ${items.length}`))
-      .when(Boolean(tip), el => el.child(v_flex().flex_none().gap(4).p(12).rounded(10).bg(C.raised).border_l(3).border_color(C.ACCENT)
+      .when(Boolean(tip), el => el.child(v_flex().flex_none().gap(4).p(12).rounded(10).bg(C.raised)
         .child(text(`오늘의 주의사항 · ${tip.team}`, FS.xs, C.sub))
         .child(div().text_size(FS.md).font_semibold().child(tip.title))
         .child(text(tip.body.slice(0, 200), FS.sm, C.sub))))
