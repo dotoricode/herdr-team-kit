@@ -173,7 +173,7 @@ class OperationsTest(unittest.TestCase):
             self.assertEqual('awaiting_verification',store.get('GOOD')['state'])
         finally: store.close()
 
-    def test_warm_executor_cannot_ignore_explicit_account_constraint(self):
+    def test_warm_executor_outside_the_designated_account_stays_admissible(self):
         from unittest.mock import patch
         from teamkit.operations import NativeRuntime
         self.enqueue('ONE', execution_constraint={'provider':'codex','account':'personal'})
@@ -184,9 +184,9 @@ class OperationsTest(unittest.TestCase):
         config['teams']['example']['roles']['leader']={'provider':'claude','model':'fixture','effort':'medium'}
         runtime=NativeRuntime(config,self.state)
         executor=dict(self.runtime.executor,provider='claude',account='team',roles=['investigator'])
-        with patch.object(runtime,'native',return_value={}):
-            with self.assertRaisesRegex(ValueError,'outside the existing role policy'):
-                runtime.admit(ticket,executor)
+        with patch.object(runtime,'native',return_value={}), patch('teamkit.core_runtime._call',return_value={}):
+            reasons=[x['reason'] for x in runtime.admit_report(ticket,executor)]
+        self.assertFalse([x for x in reasons if 'outside the existing role policy' in x],reasons)
 
     def test_final_native_observation_cannot_outlive_approval_or_configuration(self):
         for changed in ('approval','configuration'):

@@ -34,7 +34,7 @@ PLAN_FIELDS = ('provider', 'account', 'model', 'effort', 'product', 'roles', 'ro
 def _ticket_signature(ticket):
     fields = ('id', 'origin_id', 'parent_id', 'product', 'role', 'kind', 'goal', 'completion',
               'checks', 'scope', 'approval', 'profiles', 'resources', 'workflow_ref',
-              *POLICY_FIELDS)
+              'git_base', *POLICY_FIELDS)
     return digest({key: ticket.get(key) for key in fields})
 
 
@@ -55,6 +55,22 @@ def _atlassian_registered(provider, pr):
     return isinstance(entry, dict) and entry.get('enabled', True) is not False and bool(entry.get('url') or entry.get('command'))
 
 
+def preferred(ticket, provider, account):
+    """True when the ticket designates this account (account list or execution constraint).
+
+    A designation only orders candidates; it never decides whether one is eligible.
+    """
+    constraint = ticket.get('execution_constraint')
+    if isinstance(constraint, dict) and (constraint.get('provider'), constraint.get('account')) == (provider, account):
+        return True
+    return provider + '/' + account in (ticket.get('profiles') or [])
+
+
+def prefer_designated(ticket, items, key=lambda item: item):
+    """Stable partition: designated accounts first, the existing order inside each group."""
+    return sorted(items, key=lambda item: not preferred(ticket, *key(item)))
+
+
 def _policy_task(config, ticket):
     product = ticket['product']
     if product not in config['teams']:
@@ -72,17 +88,28 @@ def _policy_task(config, ticket):
     return task
 
 
-def _roots(config, ticket):
-    roots = [Path(path).resolve() for path in ticket['scope']['paths'] if Path(path).is_dir()]
-    if not roots:
-        raise ValueError('worker requires an existing approved directory')
-    root = roots[0]
-    if any(r['kind'] == 'path' and not within(r['name'], [str(root)]) for r in ticket['resources']):
-        raise ValueError('worker cwd does not cover the approved path resources')
+def _roots(config, ticket, queue=None):
     team_root = Path(config['teams'][ticket['product']]['root']).resolve()
+    roots = [Path(path).resolve() for path in ticket['scope']['paths'] if Path(path).is_dir()
+             and within(path, [str(team_root), *config.get('shared_roots', [])])]
+    inherited = ticket.get('inherited_worktree')
+    root = Path(inherited['worktree']).resolve() if inherited else next(iter(roots), team_root)
+    if not root.is_dir():
+        raise ValueError('worker requires an existing execution directory')
+    if any(r['kind'] == 'path' and r['mode'] == 'write' and not within(r['name'], [str(root)])
+           and not (queue is not None and within(r['name'], [str(queue.path.resolve().parent/'operation-results'/ticket['id'])]))
+           for r in ticket['resources']):
+        raise ValueError('worker cwd does not cover the approved path resources')
     allowed = [str(team_root), *config.get('shared_roots', [])]
     if not within(str(root), allowed):
-        raise ValueError('worker root is outside configured product/shared roots')
+        inherited = ticket.get('inherited_worktree')
+        if not inherited or queue is None or not ticket.get('parent_id'):
+            raise ValueError('worker root is outside configured product/shared roots')
+        parent = queue.get(ticket['parent_id'])
+        if (parent.get('worktree_split') or parent.get('inherited_worktree')) != inherited or not within(str(root), [inherited['worktree']]):
+            raise ValueError('worker root is outside its parent split worktree')
+        from .split_worktree import _check_existing
+        _check_existing(inherited)
     reference = ticket.get('workflow_ref')
     actor_root = Path(reference['root']).resolve() if reference else root
     return str(root), str(actor_root)
@@ -100,8 +127,8 @@ def plans(config, state, ticket, *, reserved_owner=None):
     work_gate(config, state, ticket)
     from .departments import execution_config
     config = execution_config(config)
-    queue = TicketStore(state)
-    store = Store(state)
+    queue = TicketStore(state, read_only=True)
+    store = Store(state, read_only=True)
     try:
         if _ticket_signature(queue.get(ticket['id'])) != _ticket_signature(ticket):
             raise ValueError('ticket contract changed before worker planning')
@@ -110,16 +137,18 @@ def plans(config, state, ticket, *, reserved_owner=None):
         task = _policy_task(config, ticket)
         if task is None:
             return []
-        root, actor_root = _roots(config, ticket)
-        role = execution_policy(config, task)
-        if role['action'] != 'dispatch':
-            return []
-        candidate_config = config
-        if staff:
-            candidate_config = docsstaff.routing_config(config, role)
-        candidates = execution_candidates(candidate_config, task, role, time.time())
-        if candidates is None:
-            candidates = [{**role, 'account': account} for account in account_order(config, time.time())]
+        root, actor_root = _roots(config, ticket, queue)
+        from .allocation import usage_only, profile_candidates
+        if usage_only(config) and not staff:
+            candidates = profile_candidates(config)
+        else:
+            role = execution_policy(config, task)
+            if role['action'] != 'dispatch':
+                return []
+            candidate_config = docsstaff.routing_config(config, role) if staff else config
+            candidates = execution_candidates(candidate_config, task, role, time.time())
+            if candidates is None:
+                candidates = [{**role, 'account': account} for account in account_order(config, time.time())]
         from .__main__ import instructions_basis, git
         basis_kind = 'git' if ticket.get('workflow_ref') else 'instructions'
         base = git(actor_root, 'rev-parse', 'HEAD') if basis_kind == 'git' else instructions_basis(config['teams'][ticket['product']])
@@ -128,8 +157,6 @@ def plans(config, state, ticket, *, reserved_owner=None):
             provider, account = candidate['provider'], candidate['account']
             if staff and (provider + '/' + account not in staff['profiles']
                           or not docsstaff.available(config, queue.db, ticket, provider, reserved_owner)):
-                continue
-            if provider + '/' + account not in ticket['profiles']:
                 continue
             pr = profile(config, provider, account, candidate)
             if (not eligible(cached_quota(config, store, provider, account), time.time(), config['quota_ttl_seconds'])
@@ -150,7 +177,7 @@ def plans(config, state, ticket, *, reserved_owner=None):
                                new=True, pid=None, terminal=None, runtime={}, empty_prompt=None,
                                operation_actor=True, profile_binding=binding(pr),
                                ticket_signature=_ticket_signature(ticket), base=base, basis_kind=basis_kind))
-        return result
+        return result if usage_only(config) else prefer_designated(ticket, result, lambda plan: (plan['provider'], plan['account']))
     finally:
         store.close()
         queue.close()
@@ -179,7 +206,7 @@ def _fence(store, ticket, attempt):
         raise ValueError('worker attempt, owner, ticket or approval scope changed')
     lease=next((r for r in ResourceLedger._rows(store.db) if r['attempt']==attempt['id']),{})
     if (not lease.get('execution_reserved') or not lease.get('writes_held')
-            or lease.get('resources')!=execution_resources(item)):
+            or lease.get('resources')!=execution_resources(item, current)):
         raise ValueError('worker resource reservation differs from the host execution contract')
     return item, current
 
@@ -259,7 +286,7 @@ def launch(config_path, state, ticket, attempt):
             reservation = next((r for r in ResourceLedger._rows(store.db) if r['attempt'] == attempt['id']), None)
             if (not reservation or not reservation['execution_reserved'] or not reservation['writes_held']
                     or reservation['ticket'] != item['id']
-                    or reservation['resources']!=execution_resources(item)
+                    or reservation['resources']!=execution_resources(item, current)
                     or reservation['profile'] != executor['provider'] + '/' + executor['account']
                     or reservation.get('session') is not None):
                 raise ValueError('worker has no matching unbound execution reservation')
@@ -270,6 +297,8 @@ def launch(config_path, state, ticket, attempt):
                           runtime=dict(name=name, backend='core', resource_attempt=attempt['id'],
                                        profile_binding=executor['profile_binding'], identity_checked=False))
             store._save(staged, 'operation_actor_bound', {'attempt': attempt['id']})
+            if current.get('worktree_split'):
+                current['executor']['execution_root'] = current['worktree_split']['worktree']
             current['executor']['runtime'] = dict(staged['runtime'])
             current.update(launch_intent={'at': time.time(), 'task': staged['id'], 'owner': executor['owner']},
                            launch_phase='launching', model_startup_started_at=time.time())
@@ -300,15 +329,19 @@ def launch(config_path, state, ticket, attempt):
         if executor['provider'] == 'claude':
             spec = claude_gui_settings(spec, str(config_path), str(state), executor['account'],
                                         config.get('claude_display_commands', {}).get(executor['account'], ''))
-        spec['args'] += ['--add-dir', str(Path(state).resolve().parent)]
         spec['env'].update(TEAMKIT_TASK=executor['task'], TEAMKIT_OWNER=executor['owner'],
                            TEAMKIT_CONFIG=str(Path(config_path).resolve()), TEAMKIT_STATE=str(Path(state).resolve()))
         actor = store.get(executor['task'])
-        CoreRuntime().launch({**actor, 'root': executor['root']}, spec, actor['runtime']['name'], created, keep=False)
+        execution_root = current['executor'].get('execution_root', executor['root'])
+        CoreRuntime().launch({**actor, 'root': execution_root}, spec, actor['runtime']['name'], created, keep=False)
         fresh = _attempt(store, attempt['id'])
         executor = fresh['executor']
         actor = store.get(executor['task'])
         native = CoreRuntime(actor)._native(executor['runtime']['name'], ready=True)
+        if current.get('worktree_split'):
+            observed_cwd = (native.get('foreground') or {}).get('cwd') or native.get('cwd')
+            if not observed_cwd or Path(observed_cwd).resolve() != Path(execution_root).resolve():
+                raise ValueError('new worker did not start in the split worktree')
         hint = _hint(executor, native)
         with store.transaction():
             _, fresh = _fence(store, ticket, attempt)

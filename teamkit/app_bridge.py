@@ -65,6 +65,18 @@ def inventory(path):
 
 
 def card_detail(config_path,state,binding_path,kind,ident,*,_source=False):
+    if kind=='ticket':
+        from .app_board import board_state
+        from .queue_view import board, organization_card
+        job=next((item for item in board(config_path,state)['jobs'] if item['id']==ident),None)
+        if job is None:raise ValueError('현재 업무 카드를 찾을 수 없습니다. 최신 목록을 확인하세요.')
+        card=dict(job,kind='ticket',id=job['id'],status=job['phase'],title=job['title'])
+        card['board']=board_state(state,organization_card(job))
+        card['presentation']={'summary':job['title'],'current_activity':job.get('state_label',''),
+            'owner_label':job.get('owner_label') or job.get('team_label','담당자 미확인'),
+            'sessions':[{'terminal':job.get('current_terminal'),'can_focus':job.get('verified_working')} ] if job.get('current_terminal') else [],
+            'decision_required':job.get('requires_user_decision') is True,'column':job.get('category','waiting')}
+        return card
     from .app_board import presentation,board_state
     from .app_reading import reading_view
     card=feedback_card_detail(config_path,state,binding_path,kind,ident,_include_signature=True)
@@ -88,12 +100,16 @@ def card_detail(config_path,state,binding_path,kind,ident,*,_source=False):
     return card
 
 
-def card_board_action(config_path,state,binding_path,kind,ident,action,rid,revision):
+def card_board_action(config_path,state,binding_path,kind,ident,action,rid,revision,rank=None):
     from .app_board import board_action
     if bindings(binding_path,load(config_path)).get('actions_enabled') is not True:
         raise ValueError('보드 정리 기능이 비활성화돼 있습니다.')
+    if kind=='ticket':
+        from .queue_view import organize
+        result=organize(config_path,state,ident,action,rid,revision,rank=rank)
+        return {'board':result,'message':'보드 정리 상태를 변경했습니다. 실제 업무 완료·승인·전달은 변경하지 않습니다.'}
     card=card_detail(config_path,state,binding_path,kind,ident)
-    result=board_action(state,card,action,rid,revision)
+    result=board_action(state,card,action,rid,revision,rank=rank)
     return {'board':result,'message':'보드 정리 상태를 변경했습니다. 실제 업무 완료·승인·전달은 변경하지 않습니다.'}
 
 
@@ -185,9 +201,116 @@ def view(config_path, state, binding_path):
                 if (folder/filename).exists():
                     status=label;message=json.loads((folder/filename).read_text()).get('message','')
             actions.append({'id':folder.name,'task':request['task'],'status':status,'message':message})
+    from .queue_view import board as operation_board, _fresh_native
+    operations=operation_board(config_path,state)
+    works_by_id={row['id']:row for row in value['rows']}
+    tickets=[]
+    linked_tickets={}
+    from .staff import display_name
+    role_labels={'leader':'설계 담당','implementer':'구현 담당','reviewer':'검토 담당','worker':'담당 직원'}
+    for job in operations['jobs']:
+        origin=job.get('origin_id') or job.get('parent_id')
+        if origin in works_by_id:
+            ticket_summary=linked_tickets.setdefault(origin,{'done':0,'total':0,'updated_at':None,'current_terminal':None})
+            ticket_summary['total']+=1
+            ticket_summary['done']+=int(job.get('phase') == 'completed')
+            ticket_summary['updated_at']=max(filter(None,(ticket_summary.get('updated_at'),job.get('updated_at'))),default=None)
+            ticket_summary['current_terminal']=job.get('current_terminal') or ticket_summary.get('current_terminal')
+            continue
+        ticket=dict(job)
+        owner_label=(display_name(job['provider'],job['account'],product=job.get('team'),aliases=config.get('operations',{}).get('staff_aliases'))
+                     if job.get('provider') and job.get('account') else '담당자 미확인')
+        ticket.update(owner_label=owner_label,role_label=role_labels.get(job.get('role'),'담당 직원' if job.get('provider') else '배정 대기'),
+                      is_system_check=bool(re.match(r'^(ALLOC-LIVE-|ALLOC-EXT-|SMOKE-|TEST-)',job['id'])),
+                      title=job.get('request') or job.get('title'),short_title=job.get('short_title') or job.get('title'),board=job.get('board_state'))
+        column='progress' if job.get('verified_working') else 'review' if job.get('requires_user_decision') else 'complete' if job.get('phase') in ('completed','cancelled') else 'waiting'
+        ticket['presentation']={'summary':ticket['short_title'],'current_activity':job.get('state_label',''),
+            'owner_label':ticket['owner_label'],'current_terminal':job.get('current_terminal'),
+            'sessions':[{'terminal':job.get('current_terminal'),'can_focus':job.get('verified_working') is True,'task':job['id']}]
+                if job.get('current_terminal') else [],'attention':[{'reason':job.get('reason')}] if job.get('reason') else [],
+            'decision_required':job.get('requires_user_decision') is True,'waiting_on':job.get('next_action',''),'column':column}
+        ticket['category']=column
+        tickets.append(ticket)
+    for ident, ticket_summary in linked_tickets.items():
+        ticket_summary['progress']=('█'*ticket_summary['done']+'░'*(ticket_summary['total']-ticket_summary['done']))
+        works_by_id[ident]['linked_tickets']=ticket_summary
+    resource_lanes=[]
+    slot_teams={ident:[] for ident in config['teams']}
+    observation=operations.get('native_observation') or {}
+    observation_fresh=_fresh_native(config,operations)
+    capacity=operations.get('capacity') if isinstance(operations.get('capacity'),dict) else {}
+    capacity_available=capacity.get('available') if type(capacity.get('available')) is int else None
+    actors=operations.get('task_actors',[])
+    actor_by_native={(actor.get('owner'),actor.get('provider'),(actor.get('runtime') or {}).get('terminal'),
+                      (actor.get('runtime') or {}).get('native_pid')):actor for actor in actors}
+    matched_actors=set()
+    for observed in observation.get('terminals',[]) if observation_fresh else []:
+        actor=actor_by_native.get((observed.get('owner'),observed.get('provider'),observed.get('terminal'),observed.get('pid')))
+        if actor is None:
+            team=next((item['id'] for item in teams if item.get('space') and item['space']==observed.get('space')),None)
+            if team and observed.get('status')=='working' and type(observed.get('pid')) is int and observed['pid']>0:
+                slot_teams[team].append({'terminal':observed['terminal'],'provider':observed.get('provider'),
+                    'status':'working','role_label':'담당 직원','quota_eligible':False,'owner_label':'담당자 미확인'})
+            continue
+        matched_actors.add(id(actor))
+        job=next((item for item in operations.get('jobs',[]) if item.get('current_terminal')==observed.get('terminal')),{})
+        team=actor.get('team') or job.get('team') or next((item['id'] for item in teams if item.get('space') and item['space']==observed.get('space')),None)
+        if team not in slot_teams:continue
+        slot_teams[team].append({'terminal':observed['terminal'],'pid':observed.get('pid'),'provider':observed.get('provider'),
+            'account':actor.get('account'),'status':observed.get('status','unknown'),
+            'role_label':role_labels.get(actor.get('role'),'담당 직원'),
+            'quota_eligible':(operations.get('profiles',{}).get(f"{observed.get('provider')}/{actor.get('account')}") or {}).get('eligible') is True,
+            'owner_label':job.get('owner_label') or actor.get('label') or '담당자 미확인'})
+    executor_error=False
+    if observation_fresh:
+        from .operations import NativeRuntime
+        try:live_executors=NativeRuntime(config,state).executors()
+        except (OSError,ValueError,RuntimeError,subprocess.SubprocessError):live_executors=[];executor_error=True
+        known={slot['terminal'] for slots in slot_teams.values() for slot in slots}
+        observed_by_terminal={item.get('terminal'):item for item in observation.get('terminals',[])}
+        for actor in live_executors:
+            terminal=actor.get('terminal');team=actor.get('product');observed=observed_by_terminal.get(terminal,{})
+            if (terminal in known or team not in slot_teams or observed.get('pid')!=actor.get('pid')
+                    or observed.get('provider')!=actor.get('provider') or observed.get('status') not in ('idle','done')):continue
+            eligible=(operations.get('profiles',{}).get(f"{actor.get('provider')}/{actor.get('account')}") or {}).get('eligible') is True
+            slot_teams[team].append({'terminal':terminal,'pid':actor.get('pid'),'provider':actor.get('provider'),'account':actor.get('account'),
+                'status':observed['status'],'role_label':'담당 직원','quota_eligible':eligible,
+                'owner_label':display_name(actor['provider'],actor['account'],product=team,aliases=config.get('operations',{}).get('staff_aliases'))})
+            known.add(terminal)
+        verified={(actor.get('terminal'),actor.get('pid'),actor.get('provider'),actor.get('account'),actor.get('product')) for actor in live_executors}
+        for team,slots in slot_teams.items():
+            for slot in slots:
+                if slot.get('status') in ('idle','done'):
+                    identity=(slot.get('terminal'),slot.get('pid'),slot.get('provider'),slot.get('account'),team)
+                    profile=f"{slot.get('provider')}/{slot.get('account')}"
+                    used=capacity.get('profile_used',{}).get(profile)
+                    unknown=capacity.get('profile_unknown',{}).get(slot.get('provider'))
+                    limit=capacity.get('profile_limits',{}).get(profile)
+                    profile_available=all(type(x) is int for x in (used,unknown,limit)) and used+unknown<limit
+                    slot['quota_eligible']=slot.get('quota_eligible') and identity in verified and profile_available
+    for actor in actors:
+        runtime=actor.get('runtime') or {}
+        if id(actor) in matched_actors or actor.get('state') not in ('claimed','launching','submitted','running') or not runtime.get('terminal'):continue
+        job=next((item for item in operations.get('jobs',[]) if item.get('current_terminal')==runtime.get('terminal')), {})
+        team=actor.get('team') or job.get('team')
+        if team in slot_teams:
+            slot_teams[team].append({'terminal':runtime.get('terminal'),'status':'unknown','provider':actor.get('provider'),
+                'account':actor.get('account'),'role_label':role_labels.get(actor.get('role'),'담당 직원'),
+                'quota_eligible':False,'owner_label':job.get('owner_label') or actor.get('label') or '담당자 미확인'})
+    for team in teams:
+        slots=slot_teams.get(team['id'],[])
+        active=[s for s in slots if s.get('status')=='working']
+        idle=[s for s in slots if s.get('status') in ('idle','done')]
+        unlimited=capacity.get('global_limit','unknown') is None and capacity_available is None and not capacity.get('reason')
+        resource_lanes.append({'team':team['id'],'label':team['label'],'working_count':len(active),
+            'candidate_slots':len(idle),'capacity_available':capacity_available,
+            'idle_eligible_count':sum(s.get('quota_eligible') for s in idle) if unlimited or (capacity_available is not None and capacity_available>0) else 0,
+            'attention_count':sum(s.get('status') not in ('working','idle','done') or (s.get('status') in ('idle','done') and not s.get('quota_eligible')) for s in slots)+(0 if observation_fresh and not executor_error and (unlimited or capacity_available is not None) else 1),
+            'active_terminals':[{'terminal':s.get('terminal'),'role_label':s.get('role_label'),'owner_label':s.get('owner_label'),
+                'provider':s.get('provider'),'account':s.get('account'),'status':s.get('status')} for s in active]})
     from .app_coordinator import status as coordinator_status
     return {'synchronization':{'state':'partial' if error or feedback_error else 'ok','sources':{'native':not bool(error),'cards':not bool(feedback_error)},'reason':' · '.join(x for x in (error,feedback_error) if x)},'observed_at':time.time(), 'teams':teams, 'accounts':value['accounts'],
-            'works':value['rows'], 'inventory':rows, 'holds':holds,
+            'works':value['rows'], 'inventory':rows, 'tickets':tickets, 'resource_lanes':resource_lanes, 'holds':holds,
             'actions':actions,'feedback_error':feedback_error,'context_handoff':context_status,
             'usage_refreshing':refresh.get('phase') in ('queued','running'),
             'usage_message':refresh.get('message',''),
@@ -706,25 +829,36 @@ def main():
     parser.add_argument('--config', default=str(Path.home()/'.config/herdr-team-kit-app/config.json'))
     parser.add_argument('--state', default=str(Path.home()/'.local/state/herdr-team-kit-app/state.sqlite'))
     parser.add_argument('--bindings', default=str(Path.home()/'.config/herdr-team-kit-app/bindings.json'))
-    parser.add_argument('action', choices=('view','document','work-detail','approve','resume','resume-job','recover-coordinator','coordinator-job','refresh-usage','usage-job','card-detail','card-answer','card-question-set','card-send','card-send-job','card-send-status','card-receipt','card-board-action'))
+    parser.add_argument('action', choices=('knowledge-hub','knowledge-add','hq-action','view','document','work-detail','approve','resume','resume-job','recover-coordinator','coordinator-job','refresh-usage','usage-job','card-detail','card-answer','card-question-set','card-send','card-send-job','card-send-status','card-receipt','card-board-action'))
     parser.add_argument('--work'); parser.add_argument('--revision', type=int); parser.add_argument('--digest')
     parser.add_argument('--task'); parser.add_argument('--owner'); parser.add_argument('--request')
     parser.add_argument('--attempt',type=int)
-    parser.add_argument('--kind',choices=('inventory','work'))
+    parser.add_argument('--kind',choices=('inventory','work','ticket'))
     parser.add_argument('--card-revision');parser.add_argument('--choice');parser.add_argument('--answer-text',default='')
     parser.add_argument('--question-file');parser.add_argument('--expected-question-revision',type=int,default=0)
     parser.add_argument('--send-json');parser.add_argument('--request-id')
     from .app_board import BOARD_ACTIONS
-    parser.add_argument('--board-action',choices=BOARD_ACTIONS);parser.add_argument('--board-revision')
+    parser.add_argument('--board-action',choices=BOARD_ACTIONS);parser.add_argument('--board-revision');parser.add_argument('--board-rank',type=float)
     parser.add_argument('--outcome',choices=('responded','deferred'))
+    parser.add_argument('--team'); parser.add_argument('--title'); parser.add_argument('--content')
     parser.add_argument('--confirmed', action='store_true')
     args = parser.parse_args()
     try:
-        if args.action == 'view': result = view(args.config, args.state, args.bindings)
+        if args.action == 'knowledge-hub':
+            from .knowledge_hub import view as knowledge_view
+            result = knowledge_view(args.config,args.state,args.bindings)
+        elif args.action == 'knowledge-add':
+            from .knowledge import add_entry
+            from .knowledge_hub import knowledge_root
+            result = add_entry(knowledge_root(load(args.config)), args.team or 'common', args.title, args.content or '', args.request_id)
+        elif args.action == 'hq-action':
+            from .hq import apply as hq_apply
+            result = hq_apply(args.state, json.loads(args.send_json or '{}'))
+        elif args.action == 'view': result = view(args.config, args.state, args.bindings)
         elif args.action == 'document': result = document_view(args.config, args.state, args.work,args.bindings)
         elif args.action == 'work-detail': result = work_detail(args.config,args.state,args.bindings,args.work)
         elif args.action == 'card-detail':result=card_detail(args.config,args.state,args.bindings,args.kind,args.work)
-        elif args.action == 'card-board-action':result=card_board_action(args.config,args.state,args.bindings,args.kind,args.work,args.board_action,args.request_id,args.board_revision)
+        elif args.action == 'card-board-action':result=card_board_action(args.config,args.state,args.bindings,args.kind,args.work,args.board_action,args.request_id,args.board_revision,args.board_rank)
         elif args.action == 'card-answer':result=card_answer(args.config,args.state,args.bindings,args.kind,args.work,args.card_revision,args.choice,args.answer_text)
         elif args.action == 'card-question-set':result=card_question_set(args.config,args.state,args.bindings,args.kind,args.work,args.task,args.owner,args.attempt,args.question_file,args.expected_question_revision)
         elif args.action == 'card-send':result=card_send(args.config,args.state,args.bindings,args.send_json)

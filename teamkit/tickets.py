@@ -64,14 +64,33 @@ def _resource_contract(ticket):
         root=reference.get('root') if isinstance(reference,dict) else None
         if not isinstance(root,str) or not Path(root).is_absolute():
             raise ValueError('workflow resource constraint requires an absolute pinned root')
-        constraints=[dict(kind='named',name='worktree:'+str(Path(root).resolve()),
-                          mode='write' if 'write' in ticket['scope']['actions'] else 'read')]
+        inherited = ticket.get('inherited_worktree')
+        if inherited:
+            source = Path(inherited['source_root']).resolve()
+            path = Path(root).resolve()
+            if not path.is_relative_to(source):
+                raise ValueError('workflow worktree constraint is outside inherited source')
+            root = str(Path(inherited['worktree']) / path.relative_to(source))
+        # The pinned root is an approval boundary, not a whole-worktree lease.
+        # Only explicitly declared writes take locks; disjoint files may run together.
     return constraints,normalize_resources([*ticket['resources'],*constraints])
 
 
-def execution_resources(ticket):
+def execution_resources(ticket, attempt=None):
     """The host's single lease calculation, separate from declared permissions."""
-    return _resource_contract(ticket)[1]
+    constraints, original = _resource_contract(ticket)
+    split = (attempt or {}).get('worktree_split')
+    if not split:
+        return original
+    from .resources import normalize_resources
+    source, target = Path(split['source_root']), Path(split['worktree'])
+    mapped = []
+    for constraint in constraints:
+        path = Path(constraint['name'][len('worktree:'):]).resolve()
+        if not path.is_relative_to(source):
+            raise ValueError('workflow worktree constraint is outside split source')
+        mapped.append({**constraint, 'name': 'worktree:' + str(target / path.relative_to(source))})
+    return normalize_resources([*split['resources'], *mapped])
 
 
 class TicketStore:
@@ -104,6 +123,8 @@ class TicketStore:
             CREATE TABLE IF NOT EXISTS operation_events
               (seq INTEGER PRIMARY KEY, ticket TEXT, event TEXT NOT NULL,
                at REAL NOT NULL, body TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS operation_worktree_intents
+              (ticket TEXT PRIMARY KEY, contract TEXT NOT NULL, body TEXT NOT NULL, phase TEXT NOT NULL);
         ''')
         from .intake import schema
         schema(self.db)
@@ -156,17 +177,25 @@ class TicketStore:
         self.db.execute('INSERT OR REPLACE INTO operation_budgets VALUES (?,?)',
                         (origin, json.dumps(budget)))
 
-    def enqueue(self, spec, registration_key, *, user_approved=False):
+    def enqueue(self, spec, registration_key, *, user_approved=False, legacy_request_id=None):
         if type(user_approved) is not bool:
             raise ValueError('user_approved must be explicit boolean')
         spec = json.loads(json.dumps(spec))
-        if 'resource_constraints' in spec:
-            raise ValueError('resource_constraints are host-derived exclusions, not caller permissions')
+        if any(k in spec for k in ('resource_constraints', 'worktree_split', 'inherited_worktree', 'legacy_request_id')):
+            raise ValueError('resource constraints and worktree splits are host-derived, not caller permissions')
+        if legacy_request_id is not None:
+            if not isinstance(legacy_request_id,str) or not re.fullmatch(r'[a-f0-9]{32}',legacy_request_id):
+                raise ValueError('host migration requires an exact legacy request identity')
+            spec['legacy_request_id']=legacy_request_id
         ident = spec.get('id', '')
         if not IDENT.fullmatch(ident) or not isinstance(registration_key, str) or not registration_key:
             raise ValueError('ticket identity and idempotency key required')
         if spec.get('role') not in ROLES or spec.get('kind') not in KINDS:
             raise ValueError('explicit ticket role and kind required')
+        if 'git_base' in spec and (not isinstance(spec['git_base'], str)
+                or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,199}', spec['git_base'])
+                or '..' in spec['git_base'] or spec['git_base'].endswith(('.', '/'))):
+            raise ValueError('invalid explicit git base reference')
         for field in ('product', 'goal'):
             if not isinstance(spec.get(field), str) or not spec[field].strip():
                 raise ValueError(field + ' required')
@@ -218,22 +247,31 @@ class TicketStore:
             if parent:
                 if parent['state'] in FINAL:
                     raise ValueError('closed parent requires a new instruction')
-                narrowed = (all(set(scope[name]).issubset(parent['scope'][name]) for name in ('actions', 'data'))
-                            and all(within(x, parent['scope']['paths']) for x in scope['paths'])
-                            and set(spec['profiles']).issubset(parent['profiles'])
-                            and spec['product'] == parent['product'])
+                parent_scope = parent['scope']
+                if parent.get('worktree_split'):
+                    from .split_worktree import mapped_scope
+                    parent_scope = mapped_scope(parent, parent['worktree_split'])
                 same_verifiers = spec.get('verification_commands', {}) == parent.get('verification_commands', {})
                 safe_review = False
+                review_artifact = None
                 if spec.get('role') == 'reviewer' and spec.get('kind') == 'review' and parent.get('attempt'):
                     from .artifact_verifier import command
                     parent_attempt = self.attempt(parent['attempt'])
-                    if parent_attempt.get('submission'):
+                    if parent_attempt.get('submission') and spec.get('parent_attempt') == parent_attempt['id']:
                         expected = {'independent-review-report': command(parent_attempt['submission'])}
                         safe_review = spec.get('checks') == ['independent-review-report'] and spec.get('verification_commands') == expected
-                narrowed = narrowed and (same_verifiers or safe_review)
+                        if safe_review:review_artifact = parent_attempt['submission']['artifact']
+                def allowed_review_path(path):
+                    return review_artifact is not None and Path(path).resolve() == Path(review_artifact).resolve()
+                narrowed = (all(set(scope[name]).issubset(parent_scope[name]) for name in ('actions','data'))
+                            and all(within(x,parent_scope['paths']) or allowed_review_path(x) for x in scope['paths'])
+                            and all(r['kind']!='path' or within(r['name'],parent_scope['paths'])
+                                    or r['mode']=='read' and allowed_review_path(r['name']) for r in resources)
+                            and set(spec['profiles']).issubset(parent['profiles'])
+                            and spec['product']==parent['product'] and (same_verifiers or safe_review))
                 # These fields affect routing/approval, rather than the requested
                 # subtask. Descendants cannot weaken a parent's execution policy.
-                for field in ('execution_constraint', 'classification', 'user_decision', 'workflow_ref', 'failures'):
+                for field in ('execution_constraint', 'classification', 'user_decision', 'workflow_ref', 'failures', 'git_base'):
                     if spec.get(field) != parent.get(field):
                         narrowed = False
                 for resource in resources:
@@ -245,6 +283,9 @@ class TicketStore:
                 if spec.get('approval', {}).get('reference') not in (None, parent['approval'].get('reference')):
                     raise ValueError('child approval must be explicitly granted as a new instruction')
                 origin = parent['origin_id']
+                inherited = parent.get('worktree_split') or parent.get('inherited_worktree')
+                if inherited and narrowed:
+                    spec['inherited_worktree'] = inherited
             else:
                 approval = spec.get('approval', {'state': 'pending'})
                 if not user_approved:
@@ -293,6 +334,26 @@ class TicketStore:
         from .wake import notify
         notify(self.path)
 
+    def cancel(self, ident, reason, user_approved=False):
+        from .resources import ResourceLedger
+        if user_approved is not True or not isinstance(reason, str) or not reason.strip():
+            raise ValueError('cancellation requires explicit user approval and reason')
+        with self.transaction():
+            item=self.get(ident)
+            if item['state']=='cancelled' and item.get('cancellation',{}).get('reason')==reason.strip():
+                return item
+            reservations=ResourceLedger._rows(self.db) if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='resource_reservations'").fetchone() else []
+            if (item['state'] not in ('pending','waiting_approval','backlog') or item.get('attempt')
+                    or item.get('attempt_count',0) or item.get('executor') or item.get('result')
+                    or self.db.execute('SELECT 1 FROM operation_attempts WHERE ticket=?',(ident,)).fetchone()
+                    or any(r['ticket']==ident and (r['execution_reserved'] or r['writes_held']) for r in reservations)):
+                raise ValueError('only never-executed tickets without reservations may be cancelled')
+            evidence=dict(reason=reason.strip(),user_approved=True,at=self.clock())
+            item.update(state='cancelled',reason=reason.strip(),next_action='preserve cancelled instruction and audit history',cancellation=evidence)
+            self._save(item,'cancelled',evidence)
+        self.notify()
+        return item
+
     def set_dependencies(self, ident, dependencies):
         strings(dependencies, 'dependencies', False)
         with self.transaction():
@@ -320,8 +381,10 @@ class TicketStore:
             visit(ident, set())
 
     def incomplete_children(self, ident):
+        from .child_review_disposition import satisfied
         return [x['id'] for x in self.list() if x.get('parent_id') == ident
-                and x['relation'] in ('required', 'defect') and x['state'] != 'completed']
+                and x['relation'] in ('required', 'defect') and x['state'] != 'completed'
+                and not satisfied(self, x)]
 
     def gate(self, ident):
         item = self.get(ident)
@@ -353,7 +416,132 @@ class TicketStore:
         self.db.execute('INSERT OR REPLACE INTO operation_attempts VALUES (?,?,?)',
                         (attempt['id'], attempt['ticket'], json.dumps(attempt)))
 
-    def reserve(self, ident, executor, policy, observation, expected_revision=None, manual_action=None, *, before_reserve=None):
+    @staticmethod
+    def _split_contract(ticket):
+        return digest({key: ticket.get(key) for key in
+                       ('id', 'role', 'kind', 'resources', 'scope', 'approval', 'workflow_ref', 'git_base')})
+
+    def _split_conflict(self, item):
+        """Only a conflicting path write justifies creating a separate checkout."""
+        from .resources import ResourceLedger, _conflict, normalize_resources
+        from .admission import _tasks, task_resources, ACTIVE
+        declared = normalize_resources(item['resources'])
+        holders = [row for row in ResourceLedger._rows(self.db) if row['writes_held']]
+        if any(row['ticket'] == item['id'] for row in holders):
+            raise ValueError('existing ticket write lease requires ownership reconciliation')
+        held = [resource for row in holders for resource in row['resources']]
+        reserved = {row['attempt'] for row in holders}
+        for task in _tasks(self.db):
+            if (task['id'] != item['id'] and task['state'] in ACTIVE
+                    and (task.get('runtime') or {}).get('resource_attempt') not in reserved):
+                held.extend(task_resources(task))
+        if any(left['kind'] == 'named' and _conflict(left, right)
+               for left in declared for right in held):
+            raise ValueError('named resource conflict cannot be split')
+        return any(left['kind'] == 'path' and _conflict(left, right)
+                   for left in declared for right in held)
+
+    def record_split_intent(self, ident):
+        """Persist a fenced proposal before a separate Git operation is attempted."""
+        from .split_worktree import plan
+        from .resources import ResourceLedger
+        ResourceLedger(self.db)
+        with self.transaction():
+            item = self.get(ident)
+            if item['kind'] in ('code', 'integration') or not (
+                    item['kind'] in ('review', 'document') or item['role'] in ('reviewer', 'documenter')):
+                raise ValueError('only review or document work can be split')
+            if item['state'] != 'pending' or self.gate(ident):
+                raise ValueError('ticket is not eligible for split')
+            contract = self._split_contract(item)
+            old = self.db.execute('SELECT contract,body FROM operation_worktree_intents WHERE ticket=?',
+                                  (ident,)).fetchone()
+            if old:
+                if old[0] != contract:
+                    raise ValueError('split intent contract changed')
+                return json.loads(old[1])
+            if not self._split_conflict(item):
+                raise ValueError('no conflicting path write')
+            intent = plan(ident, item['resources'], self.path.resolve().parent / 'operation-worktrees',
+                          ref=item.get('git_base'))
+            self.db.execute('INSERT INTO operation_worktree_intents VALUES (?,?,?,?)',
+                            (ident, contract, json.dumps(intent, sort_keys=True), 'planned'))
+            return intent
+
+    def materialize_split_intent(self, ident):
+        """Resume a recorded Git intent without deleting or resetting any result."""
+        from .split_worktree import create
+        with self.transaction():
+            item = self.get(ident)
+            row = self.db.execute('SELECT contract,body,phase FROM operation_worktree_intents WHERE ticket=?',
+                                  (ident,)).fetchone()
+            if not row or row[0] != self._split_contract(item):
+                raise ValueError('split intent missing or contract changed')
+            if item['state'] != 'pending' or self.gate(ident):
+                raise ValueError('ticket is not eligible for split')
+            if row[2] != 'ready' and not self._split_conflict(item):
+                raise ValueError('conflicting path write no longer exists')
+            intent = create(json.loads(row[1]))
+            self.db.execute('UPDATE operation_worktree_intents SET phase=? WHERE ticket=?', ('ready', ident))
+            return intent
+
+    def reserve(self, ident, executor, policy, observation, expected_revision=None, manual_action=None, *, before_reserve=None,
+                override=None, preview=False):
+        from .resources import ResourceUnavailable
+        existing = self.get(ident).get('worktree_split')
+        if existing:
+            if executor.get('new') is not True and (not executor.get('root') or
+                    not within(existing['worktree'], [executor['root']])):
+                raise ValueError('executor working boundary does not cover the split worktree')
+            if preview:
+                from .split_worktree import inspect
+                row = self.db.execute('SELECT contract,body,phase FROM operation_worktree_intents WHERE ticket=?',
+                                      (ident,)).fetchone()
+                if (not row or row[0] != self._split_contract(self.get(ident)) or row[2] != 'ready'
+                        or json.loads(row[1]) != existing):
+                    raise ValueError('persisted split intent is not ready for this ticket')
+                inspect(existing)
+            elif self.materialize_split_intent(ident) != existing:
+                raise ValueError('persisted split differs from ticket')
+            return self._reserve(ident, executor, policy, observation, expected_revision, manual_action,
+                                 before_reserve=before_reserve, override=override, split=existing,
+                                 preview=preview, reuse=True)
+        try:
+            return self._reserve(ident, executor, policy, observation, expected_revision, manual_action,
+                                 before_reserve=before_reserve, override=override)
+        except ResourceUnavailable as error:
+            if error.code != 'resource_conflict':
+                raise
+            item = self.get(ident)
+            if item['kind'] in ('code', 'integration') or not (
+                    item['kind'] in ('review', 'document') or item['role'] in ('reviewer', 'documenter')):
+                raise
+            if preview:
+                from .split_worktree import inspect, plan
+                if not self._split_conflict(item):
+                    raise
+                table = self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='operation_worktree_intents'").fetchone()
+                row = self.db.execute('SELECT contract,body FROM operation_worktree_intents WHERE ticket=?',
+                                      (ident,)).fetchone() if table else None
+                if row:
+                    if row[0] != self._split_contract(item):
+                        raise ValueError('split intent contract changed')
+                    intent = inspect(json.loads(row[1]))
+                else:
+                    intent = plan(ident, item['resources'], self.path.resolve().parent / 'operation-worktrees',
+                                  ref=item.get('git_base'))
+            else:
+                intent = self.record_split_intent(ident)
+            if executor.get('new') is not True and (not executor.get('root') or
+                    not within(intent['worktree'], [executor['root']])):
+                raise ValueError('executor working boundary does not cover the split worktree')
+            if not preview:
+                intent = self.materialize_split_intent(ident)
+            return self._reserve(ident, executor, policy, observation, expected_revision, manual_action,
+                                 before_reserve=before_reserve, override=override, split=intent, preview=preview)
+
+    def _reserve(self, ident, executor, policy, observation, expected_revision=None, manual_action=None, *, before_reserve=None,
+                 override=None, split=None, preview=False, reuse=False):
         from .resources import ResourceLedger
         ledger = ResourceLedger(self.db)
         with self.transaction():
@@ -367,8 +555,9 @@ class TicketStore:
             profile = executor['provider'] + '/' + executor['account']
             planned = (executor.get('new') is True and executor.get('pid') is None
                        and executor.get('terminal') is None)
-            if (profile not in item['profiles'] or not executor.get('owner')
-                    or not planned and type(executor.get('pid')) is not int):
+            # The ticket's account list only orders candidates; the executor must still be a
+            # concrete observed identity.
+            if not executor.get('owner') or not planned and type(executor.get('pid')) is not int:
                 raise ValueError('executor identity/profile mismatch')
             from .queue_actions import reserve_selection
             reserve_selection(self.db, ident, executor, manual_action)
@@ -380,19 +569,56 @@ class TicketStore:
             attempt = dict(id=uuid.uuid4().hex, ticket=ident, ordinal=item['attempt_count'] + 1,
                            executor=executor, phase='reserved', created_at=self.clock(),
                            delivery_id=uuid.uuid4().hex, estimated_tokens=estimate)
+            if not planned:
+                executor = json.loads(json.dumps(executor))
+                executor.setdefault('runtime', {})['resource_attempt'] = attempt['id']
+                attempt['executor'] = executor
+            if executor.get('workspace_live'):
+                executor['task'] = 'OP-' + attempt['id']
+                executor['runtime'].update(name=executor['task'], labels_bound=False)
+                attempt['executor'] = executor
+            if override:
+                attempt['override'] = override
             constraints,resources=_resource_contract(item)
-            attempt['resource_constraints']=constraints
             self._continue_own_writes(item, attempt, executor, observation)
+            if split is not None:
+                from .resources import normalize_resources
+                from .split_worktree import create
+                if reuse and item.get('worktree_split') != split:
+                    raise ValueError('persisted split differs from ticket')
+                if not reuse and not self._split_conflict(item):
+                    raise ValueError('conflicting path write no longer exists')
+                if not preview:
+                    row = self.db.execute('SELECT contract,body,phase FROM operation_worktree_intents WHERE ticket=?',
+                                          (ident,)).fetchone()
+                    if not row or row[0] != self._split_contract(item) or row[2] != 'ready' or json.loads(row[1]) != split:
+                        raise ValueError('split intent is not ready for this ticket')
+                    create(split)
+                source, target = Path(split['source_root']), Path(split['worktree'])
+                mapped_constraints = []
+                for constraint in constraints:
+                    old = Path(constraint['name'][len('worktree:'):]).resolve()
+                    if not old.is_relative_to(source):
+                        raise ValueError('workflow worktree constraint is outside split source')
+                    mapped_constraints.append({**constraint, 'name':'worktree:' + str(target / old.relative_to(source))})
+                constraints = mapped_constraints
+                resources = normalize_resources([*split['resources'], *constraints])
+                attempt['worktree_split'] = split
+            attempt['resource_constraints']=constraints
             from .admission import reserve_in_transaction
             reserve_in_transaction(self.db, attempt['id'], ident, profile,
                                    resources, policy, observation,
-                                   session=None if planned else {k: executor[k] for k in ('terminal', 'pid', 'owner')})
+                                   session=None if planned else {k: executor[k] for k in ('terminal', 'pid', 'owner')},
+                                   override_capacity=bool(override),
+                                   waived=override.setdefault('bypassed', []) if override else None)
             budget['attempts'] += 1
             budget['tokens_reserved'] += estimate
             self._save_budget(item['origin_id'], budget)
             self._save_attempt(attempt)
             item.update(state='dispatching', attempt=attempt['id'], executor=executor,
                         attempt_count=attempt['ordinal'], reason='', next_action='deliver persisted attempt')
+            if split is not None:
+                item['worktree_split'] = split
             self._save(item, 'execution_reserved', {'attempt': attempt['id']})
         return attempt
 
@@ -434,7 +660,46 @@ class TicketStore:
                         reason='' if accepted else reason,
                         next_action='wait actor receipt' if accepted else 'reconcile original attempt; never resend')
             self._save(item, 'delivery_accepted' if accepted else 'delivery_uncertain', {'attempt': ident})
+            executor = attempt['executor']
+            if (accepted and attempt.get('mailbox') and isinstance(detail, dict)
+                    and detail.get('accepted') is True and detail.get('terminal') == executor['terminal']
+                    and detail.get('native_pid') == executor['pid']
+                    and type(detail.get('turn_baseline')) is int and type(detail.get('turn')) is int
+                    and detail['turn'] >= detail['turn_baseline'] >= 0):
+                attempt.update(phase='received', baseline_turn=detail['turn_baseline'],
+                    actor_receipt=dict(terminal=executor['terminal'], pid=executor['pid'], owner=executor['owner'],
+                                       turn=detail['turn_baseline'], at=self.clock(), source='host-accepted'))
+                if executor.get('workspace_live'):
+                    executor['runtime']['labels_bound'] = True
+                self._save_attempt(attempt)
+                item.update(state='running', executor=executor, reason='', next_action='wait for mailbox result and completed turn')
+                self._save(item, 'host_received', {'attempt':ident})
         self.notify()
+
+    def attach_mailbox(self, attempt_id, path):
+        with self.transaction():
+            attempt = self.attempt(attempt_id)
+            item = self.get(attempt['ticket'])
+            if item.get('attempt') != attempt_id or attempt['phase'] != 'reserved':
+                raise ValueError('mailbox requires the current unsent attempt')
+            attempt['mailbox'] = str(path)
+            self._save_attempt(attempt)
+
+    def release_ended_execution(self, ident, attempt_id, native):
+        from .resources import ResourceLedger
+        with self.transaction():
+            item = self.get(ident)
+            attempt = self.attempt(attempt_id)
+            actor = attempt['executor']
+            receipt = attempt.get('actor_receipt') or {}
+            if (item.get('attempt') != attempt_id
+                    or any(native.get(k) != actor.get(k) for k in ('terminal','pid','owner'))
+                    or native.get('status') not in ('idle','done')
+                    or type(native.get('turn')) is not int or type(receipt.get('turn')) is not int
+                    or native['turn'] <= receipt['turn']):
+                raise ValueError('execution release requires the exact completed turn')
+            ResourceLedger(self.db).release_in_transaction(self.db, attempt_id, True)
+            self._save(item, 'execution_ended', {'attempt':attempt_id, 'native':native})
 
     def receipt(self, ident, attempt_id, owner, terminal, native):
         with self.transaction():
@@ -468,6 +733,11 @@ class TicketStore:
                 raise ValueError('stale result or wrong execution owner')
             if not isinstance(result, dict):
                 raise ValueError('result submission must be a JSON object')
+            if attempt.get('worktree_split'):
+                from .split_worktree import mapped_scope
+                allowed_paths = mapped_scope(item, attempt['worktree_split'])['paths']
+            else:
+                allowed_paths = item['scope']['paths']
             if (not isinstance(result.get('artifact'), str) or not result['artifact'].strip()
                     or not Path(result['artifact']).is_absolute()):
                 raise ValueError('result artifact must be a nonempty absolute path string')
@@ -488,23 +758,30 @@ class TicketStore:
                         or not isinstance(source.get('fingerprint'), str)
                         or not re.fullmatch(r'[a-fA-F0-9]{64}', source['fingerprint'])):
                     raise ValueError('source requires an absolute root string, pinned head SHA and SHA-256 fingerprint')
-                if not within(source['root'], item['scope']['paths']):
+                if not within(source['root'], allowed_paths):
                     raise ValueError('source root is outside approved ticket scope')
             try:
                 proof = json.loads(json.dumps(result, allow_nan=False))
             except (TypeError, ValueError) as error:
                 raise ValueError('result submission must contain JSON values') from error
-            if not within(proof.get('artifact', ''),
-                          [*item['scope']['paths'], str(self.path.resolve().parent / 'operation-results' / ident)]):
+            artifact_paths = list(allowed_paths)
+            if not attempt.get('worktree_split') or attempt.get('mailbox'):
+                artifact_paths.append(str(self.path.resolve().parent / 'operation-results' / ident))
+            if not within(proof.get('artifact', ''), artifact_paths):
                 raise ValueError('result artifact is outside approved data/output scope')
             proof['artifact_digest'] = file_digest(proof['artifact'])
             if 'submission' in attempt:
                 if attempt['submission'] != proof:
                     raise ValueError('conflicting repeated submission')
+                if item.get('intervention') and proof.get('status') not in ('blocked','incomplete'):
+                    item.pop('intervention', None)
+                    item.update(reason='', next_action='validate task-specific evidence')
+                    self._save(item, 'actor_result_reconciled', {'attempt': attempt_id})
                 return item
+            item.pop('intervention', None)
             attempt['submission'] = proof
             self._save_attempt(attempt)
-            item.update(state='awaiting_verification', next_action='validate task-specific evidence')
+            item.update(state='awaiting_verification', reason='', next_action='validate task-specific evidence')
             self._save(item, 'result_submitted', {'attempt': attempt_id})
         self.notify()
         return item
@@ -581,7 +858,8 @@ class TicketStore:
         with self.transaction():
             for item in self.list():
                 if item['state'] == 'waiting_children' and not self.incomplete_children(item['id']):
-                    item.update(state='pending', attempt=None, next_action='resume with child results')
+                    item.pop('intervention', None)
+                    item.update(state='pending', attempt=None, reason='', next_action='resume with child results')
                     self._save(item, 'children_completed')
                     changed = True
         if changed:
@@ -655,6 +933,74 @@ class TicketStore:
             self._save(item, 'completed', {'attempt': attempt_id})
         self.notify()
         self.resume_parents()
+        return item
+
+    def request_intervention(self, ident, attempt_id, kind, reason):
+        """Preserve the actor and leases until an explicit, fenced recovery."""
+        with self.transaction():
+            item = self.get(ident)
+            if item.get('attempt') != attempt_id:
+                raise ValueError('stale intervention attempt')
+            intervention = dict(attempt=attempt_id, kind=kind, reason=reason,
+                question='담당자가 작업을 마쳤지만 완료 결과가 없습니다. 쓰기 중단을 확인하고 다른 담당자에게 이어 맡길까요?',
+                next_action='운영본부가 기존 실행·쓰기 중단을 확인한 뒤 queue recover로 원 업무를 재배정합니다')
+            if kind == 'observation_failed':
+                intervention.update(question='담당자의 현재 실행 상태를 확인하지 못했습니다. 실행자 연결과 기존 작업 상태를 확인해 주세요.',
+                    next_action='운영본부가 원 시도·실행자 신원·현재 프로세스를 대조하고, 쓰기 중단이 확인되면 같은 업무를 복구합니다')
+            if kind == 'child_blocked':
+                intervention.update(question='하위 작업이 멈춰 원 업무가 대기 중입니다. 하위 작업의 종료 확인과 재배정이 필요합니다.',
+                    next_action='운영본부가 표시된 하위 작업의 기존 실행·쓰기 중단을 확인하고 해당 하위 작업을 복구합니다')
+            if item.get('intervention') != intervention:
+                item.update(intervention=intervention, reason=reason, next_action=intervention['next_action'])
+                self._save(item, 'intervention_required', intervention)
+        return item
+
+    def process_replaced(self, ident, attempt_id):
+        """Host proved the old PID ended; preserve the outcome without retaining the session."""
+        from .resources import ResourceLedger
+        with self.transaction():
+            item = self.get(ident)
+            if item.get('attempt') != attempt_id or item['state'] not in ('running','dispatching','received','uncertain'):
+                raise ValueError('stale process replacement')
+            attempt = self.attempt(attempt_id)
+            attempt.update(phase='process_replaced', stopped_at=self.clock())
+            self._save_attempt(attempt)
+            ResourceLedger(self.db).release_in_transaction(self.db, attempt_id, True, True, True)
+            item.update(state='intervention', intervention=dict(kind='process_replaced', attempt=attempt_id),
+                        reason='이전 실행 프로세스가 종료됐습니다. 기존 산출물을 확인해야 합니다.',
+                        next_action='inspect previous attempt outcome; do not resend')
+            self._save(item, 'process_replaced', {'attempt':attempt_id})
+        self.notify()
+        return item
+
+    def recover_intervention(self, ident, attempt_id, native, writer_stopped, reason):
+        from .resources import ResourceLedger
+        with self.transaction():
+            item = self.get(ident)
+            attempt = self.attempt(attempt_id)
+            actor = attempt['executor']
+            receipt = attempt.get('actor_receipt') or {}
+            # The host already proved a replaced process ended, so there is no live turn to fence.
+            replaced = (item['state'] == 'intervention'
+                        and (item.get('intervention') or {}).get('kind') == 'process_replaced'
+                        and attempt.get('phase') == 'process_replaced')
+            fenced = replaced or (
+                item['state'] in ('running', 'awaiting_verification') and isinstance(native, dict)
+                and all(native.get(k) == actor.get(k) for k in ('terminal','pid','owner'))
+                and native.get('status') in ('idle','done')
+                and type(native.get('turn')) is int and type(receipt.get('turn')) is int
+                and native['turn'] > receipt['turn'])
+            if (item.get('attempt') != attempt_id or not item.get('intervention') or not fenced
+                    or self.incomplete_children(ident) or writer_stopped is not True
+                    or not isinstance(reason, str) or not reason.strip()):
+                raise ValueError('recovery requires current intervention, fenced completed turn and explicit stopped-writer confirmation')
+            ResourceLedger(self.db).release_in_transaction(self.db,attempt_id,True,True,True)
+            attempt.update(phase='abandoned', recovery=dict(reason=reason,native=native,writer_stopped=True,at=self.clock()))
+            self._save_attempt(attempt)
+            item.pop('intervention', None)
+            item.update(state='pending', attempt=None, reason='',next_action='assign available executor after recovery')
+            self._save(item,'execution_recovered',dict(attempt=attempt_id,reason=reason))
+        self.notify()
         return item
 
     def block(self, ident, reason):

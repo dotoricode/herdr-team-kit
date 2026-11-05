@@ -85,9 +85,9 @@ class ResourceTests(unittest.TestCase):
         with self.assertRaises(ResourceUnavailable):
             self.reserve('a4', 'T4', resources=[device])
 
-    def test_readers_share_but_writer_waits(self):
+    def test_readers_and_a_writer_of_the_same_path_run_together_but_two_writers_wait(self):
         self.reserve(resources=[self.resource(mode='read')])
-        self.reserve('a2', 'T2', resources=[self.resource(mode='read')])
+        self.reserve('a2', 'T2', resources=[self.resource(mode='write')])
         with self.assertRaises(ResourceUnavailable) as caught:
             self.reserve('a3', 'T3', resources=[self.resource(mode='write')])
         self.assertEqual(caught.exception.code, 'resource_conflict')

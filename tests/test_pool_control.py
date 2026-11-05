@@ -1,3 +1,4 @@
+from legacy_requests import historical_request
 import json
 import copy
 import hashlib
@@ -83,7 +84,7 @@ class PoolControlTests(Fixture):
         self.dispatched()
         message = self.root / 'working-pin.txt'
         message.write_text('Do not interrupt the current work.')
-        request = control.enqueue(self.config, self.state, 'alpha', message, 'claude', 'team')
+        request = historical_request(self.config, self.state, 'alpha', message, 'claude', 'team')
         with patch('teamkit.core_runtime.CoreRuntime._native', return_value={'status': {'state': 'working'}}):
             control.advance(self.config, self.state, request['id'])
         self.assertNotIn('execution_constraint', self.call('show', 'L1'))
@@ -93,7 +94,7 @@ class PoolControlTests(Fixture):
         self.dispatched()
         message = self.root / 'identity-pin.txt'
         message.write_text('Preserve mismatched native identity.')
-        request = control.enqueue(self.config, self.state, 'alpha', message, 'claude', 'team')
+        request = historical_request(self.config, self.state, 'alpha', message, 'claude', 'team')
         with patch('teamkit.core_runtime.CoreRuntime._native', side_effect=RuntimeError('owner changed')):
             control.advance(self.config, self.state, request['id'])
         self.assertEqual(control.requests(self.state)[0]['phase'], 'uncertain')
@@ -102,7 +103,7 @@ class PoolControlTests(Fixture):
         self.dispatched()
         message = self.root / 'busy.txt'
         message.write_text('Wait for current work.')
-        request = control.enqueue(self.config, self.state, 'alpha', message)
+        request = historical_request(self.config, self.state, 'alpha', message)
         with patch.object(context, 'capacity_available', return_value=True), patch('teamkit.core_runtime.CoreRuntime._native', return_value={'status': {'state': 'working'}}), patch.object(control, 'official') as sent:
             control.advance(self.config, self.state, request['id'])
         sent.assert_not_called()
@@ -117,7 +118,7 @@ class PoolControlTests(Fixture):
         context.set_phase(self.state,old,'cancelled','User changed requested account before sending.')
         message = self.root/'retry.txt'
         message.write_text('New explicitly approved request.')
-        request = control.enqueue(self.config,self.state,'alpha',message,'codex','team')
+        request = historical_request(self.config,self.state,'alpha',message,'codex','team')
         with patch.object(context,'observe',return_value=None):
             new = context.request(config,self.state,target,None,policy_rotation=True,pool_request=request['id'])
         self.assertIsNotNone(new)
@@ -131,9 +132,9 @@ class PoolControlTests(Fixture):
         result = self.dispatched()
         message = self.root / 'queue.txt'
         message.write_text('Inspect the approved SDK.')
-        first = control.enqueue(self.config, self.state, 'alpha', message, work_id='SDK-ONE')
-        second = control.enqueue(self.config, self.state, 'alpha', message, work_id='SDK-TWO')
-        self.assertEqual(control.enqueue(self.config, self.state, 'alpha', message, work_id='SDK-ONE')['id'], first['id'])
+        first = historical_request(self.config, self.state, 'alpha', message, work_id='SDK-ONE')
+        second = historical_request(self.config, self.state, 'alpha', message, work_id='SDK-TWO')
+        self.assertEqual(historical_request(self.config, self.state, 'alpha', message, work_id='SDK-ONE')['id'], first['id'])
         with patch.object(context, 'capacity_available', return_value=True), patch.object(context, 'clean_prompt', return_value=True), patch.object(control, 'official', return_value=result) as sent:
             control.advance(self.config, self.state, second['id'])
             sent.assert_not_called()
@@ -145,7 +146,7 @@ class PoolControlTests(Fixture):
 
     def test_queue_records_receiver_before_accept_only_transport(self):
         actor=self.dispatched();message=self.root/'long.txt';message.write_text('Long bounded work.')
-        job=control.enqueue(self.config,self.state,'alpha',message,work_id='LONG')
+        job=historical_request(self.config,self.state,'alpha',message,work_id='LONG')
         def transport(*args):
             saved=context.read(control.folder(self.state)/(job['id']+'.json'))
             self.assertEqual(saved['phase'],'sending')
@@ -167,7 +168,7 @@ class PoolControlTests(Fixture):
 
     def test_uncertain_transport_preserves_intended_receiver_and_delivery_id(self):
         actor=self.dispatched();message=self.root/'unknown.txt';message.write_text('Do once.')
-        job=control.enqueue(self.config,self.state,'alpha',message)
+        job=historical_request(self.config,self.state,'alpha',message)
         with patch.object(context,'capacity_available',return_value=True),patch.object(control,'official',side_effect=TimeoutError) as sent:
             control.advance(self.config,self.state,job['id'])
             saved=control.requests(self.state)[0]
@@ -180,7 +181,7 @@ class PoolControlTests(Fixture):
 
     def test_late_transport_result_cannot_replace_recorded_receiver(self):
         actor=self.dispatched();message=self.root/'late.txt';message.write_text('Preserve receiver.')
-        job=control.enqueue(self.config,self.state,'alpha',message)
+        job=historical_request(self.config,self.state,'alpha',message)
         with patch.object(context,'capacity_available',return_value=True),patch.object(control,'official',return_value={**actor,'owner':'different-owner'}):
             control.advance(self.config,self.state,job['id'])
         saved=control.requests(self.state)[0]
@@ -248,7 +249,7 @@ class PoolControlTests(Fixture):
         extra=None
         if requirements:
             extra=self.root/'requirements.txt';extra.write_text(requirements)
-        job=control.enqueue(self.config,self.state,'alpha',message,work_id='REPORT',completion_file=extra)
+        job=historical_request(self.config,self.state,'alpha',message,work_id='REPORT',completion_file=extra)
         with patch.object(context,'capacity_available',return_value=True),patch.object(control,'official',return_value=actor):
             control.advance(self.config,self.state,job['id'])
         saved=control.requests(self.state)[0]
@@ -297,7 +298,7 @@ class PoolControlTests(Fixture):
         control.reconcile(self.config,self.state,job['id'])
         self.assertEqual(control.requests(self.state)[0]['phase'],'completed')
         message=self.root/'next.txt';message.write_text('Next approved investigation.')
-        second=control.enqueue(self.config,self.state,'alpha',message,work_id='NEXT')
+        second=historical_request(self.config,self.state,'alpha',message,work_id='NEXT')
         with patch.object(context,'capacity_available',return_value=True),patch.object(control,'official',return_value=actor) as sent:
             control.advance(self.config,self.state,second['id'])
         self.assertEqual(sent.call_count,1)
@@ -487,10 +488,10 @@ class PoolControlTests(Fixture):
         self.prepare()
         message = self.root / 'queue.txt'
         message.write_text('First approved scope.')
-        first = control.enqueue(self.config, self.state, 'alpha', message, work_id='SDK-ONE')
+        first = historical_request(self.config, self.state, 'alpha', message, work_id='SDK-ONE')
         message.write_text('Different unapproved replacement.')
         with self.assertRaises(ValueError):
-            control.enqueue(self.config, self.state, 'alpha', message, work_id='SDK-ONE')
+            historical_request(self.config, self.state, 'alpha', message, work_id='SDK-ONE')
         self.assertEqual(context.read(control.folder(self.state)/(first['id']+'.json'))['message'], 'First approved scope.')
 
 
@@ -498,8 +499,8 @@ class PoolControlTests(Fixture):
         result = self.dispatched()
         message = self.root/'resolve.txt'
         message.write_text('Inspect SDK and report verified results.')
-        first = control.enqueue(self.config,self.state,'alpha',message,work_id='SDK-ONE')
-        second = control.enqueue(self.config,self.state,'alpha',message,work_id='SDK-TWO')
+        first = historical_request(self.config,self.state,'alpha',message,work_id='SDK-ONE')
+        second = historical_request(self.config,self.state,'alpha',message,work_id='SDK-TWO')
         evidence = self.root/'complete.json'
         evidence.write_text(json.dumps({'work_id':'SDK-ONE','owner':result['owner'],'attempt':result['attempt_count'],
             'writer_stopped':True,'verification':['Checked final report artifact.']}))
@@ -518,8 +519,8 @@ class PoolControlTests(Fixture):
         result=self.dispatched()
         message=self.root/'uncertain-queue.txt'
         message.write_text('Approved work.')
-        first=control.enqueue(self.config,self.state,'alpha',message,work_id='FIRST')
-        second=control.enqueue(self.config,self.state,'alpha',message,work_id='SECOND')
+        first=historical_request(self.config,self.state,'alpha',message,work_id='FIRST')
+        second=historical_request(self.config,self.state,'alpha',message,work_id='SECOND')
         with patch.object(context,'capacity_available',return_value=True),patch.object(context,'clean_prompt',return_value=True),patch.object(control,'official',side_effect=TimeoutError) as sent:
             control.advance(self.config,self.state,first['id'])
             control.advance(self.config,self.state,first['id'])
@@ -542,7 +543,7 @@ class PoolControlTests(Fixture):
         context.write(path,legacy)
         before=path.read_bytes()
         message=self.root/'new.txt';message.write_text('New work.')
-        new=control.enqueue(self.config,self.state,'alpha',message,work_id='NEW')
+        new=historical_request(self.config,self.state,'alpha',message,work_id='NEW')
         with patch.object(control,'plan') as plan:
             control.advance(self.config,self.state,new['id'])
         plan.assert_not_called()
@@ -553,14 +554,14 @@ class PoolControlTests(Fixture):
         from concurrent.futures import ThreadPoolExecutor
         result=self.dispatched()
         message=self.root/'concurrent.txt';message.write_text('Approved work.')
-        first=control.enqueue(self.config,self.state,'alpha',message,work_id='FIRST')
-        second=control.enqueue(self.config,self.state,'alpha',message,work_id='SECOND')
+        first=historical_request(self.config,self.state,'alpha',message,work_id='FIRST')
+        second=historical_request(self.config,self.state,'alpha',message,work_id='SECOND')
         with patch.object(context,'capacity_available',return_value=True),patch.object(context,'clean_prompt',return_value=True),patch.object(control,'official',return_value=result) as sent:
             with ThreadPoolExecutor(max_workers=4) as workers:
                 list(workers.map(lambda ident:control.advance(self.config,self.state,ident),[first['id'],second['id'],first['id'],second['id']]))
             self.assertEqual(sent.call_count,1)
 
-    def test_request_constraint_waits_instead_of_using_another_eligible_account(self):
+    def test_request_constraint_is_a_priority_and_falls_back_to_the_other_eligible_account(self):
         from teamkit.__main__ import select_execution
         self.prepare()
         task = self.call('show', 'L1')
@@ -570,22 +571,21 @@ class PoolControlTests(Fixture):
             selected = select_execution(load(self.config), store, task, time.time())
         finally:
             store.close()
-        self.assertEqual(selected['action'], 'wait')
+        # codex/personal has no fresh quota: the designation does not block the eligible codex/team.
+        self.assertEqual((selected['action'], selected['provider'], selected['account']), ('dispatch', 'codex', 'team'))
 
-    def test_cli_pinned_assignment_waits_without_fallback_and_records_constraint(self):
-        self.prepare()
-        message = self.root / 'pin-request.txt'
-        message.write_text('Inspect the approved SDK scope only.')
-        with patch.object(context, 'ensure'), patch.object(context, 'refresh_candidates'):
-            request = self.call('pool', 'assign', '--team', 'alpha', '--message-file', str(message),
-                                '--provider', 'claude', '--account', 'team')
-            control.advance(self.config, self.state, request['id'])
-        self.assertEqual(request['execution_constraint'], {'provider': 'claude', 'account': 'team'})
-        self.assertEqual(self.call('show', 'L1')['execution_constraint'], request['execution_constraint'])
-        self.assertEqual(self.call('pool', 'plan', '--team', 'alpha')['action'], 'wait')
-        self.assertEqual(self.call('plan', 'L1')['action'], 'wait')
-        self.assertEqual(control.requests(self.state)[0]['phase'], 'pending')
-        self.assertEqual(self.call('show', 'L1')['state'], 'queued')
+    def test_cli_assignment_records_constraint_in_single_ticket_queue(self):
+        message=self.root/'pin-request.txt';message.write_text('Inspect fixture scope only.')
+        with patch.object(context,'ensure'),patch.object(control,'official') as official:
+            request=self.call('pool','assign','--team','alpha','--message-file',str(message),
+                              '--provider','claude','--account','team')
+        official.assert_not_called()
+        from teamkit.tickets import TicketStore
+        queue=TicketStore(self.state)
+        try:self.assertEqual(request,queue.get(request['id']))
+        finally:queue.close()
+        self.assertEqual(request['execution_constraint'],{'provider':'claude','account':'team'})
+        self.assertEqual([],control.requests(self.state))
 
     def test_requested_provider_account_survives_official_handoff_and_dispatch(self):
         previous = self.dispatched('claude')
@@ -593,8 +593,7 @@ class PoolControlTests(Fixture):
         message = self.root / 'fixed-request.txt'
         message.write_text('Inspect this SDK using only the requested profile.')
         with patch.object(context, 'ensure'):
-            request = self.call('pool', 'assign', '--team', 'alpha', '--message-file', str(message),
-                                '--provider', 'codex', '--account', 'team')
+            request = historical_request(self.config,self.state,'alpha',message,'codex','team')
         with patch.object(context, 'observe', return_value=None):
             control.advance(self.config, self.state, request['id'])
         self.assertEqual(control.plan(self.config, self.state, 'alpha')['selection']['provider'], 'codex')
@@ -640,10 +639,10 @@ class PoolControlTests(Fixture):
 
     def test_assign_delivers_once_and_rejects_different_pending_request(self):
         result=self.dispatched();message=self.root/'request.txt';message.write_text('Only inspect the approved scope; report and park.')
-        first=control.enqueue(self.config,self.state,'alpha',message)
-        self.assertEqual(control.enqueue(self.config,self.state,'alpha',message)['id'],first['id'])
+        first=historical_request(self.config,self.state,'alpha',message)
+        self.assertEqual(historical_request(self.config,self.state,'alpha',message)['id'],first['id'])
         other=self.root/'other.txt';other.write_text('different pending work')
-        self.assertNotEqual(control.enqueue(self.config,self.state,'alpha',other)['id'],first['id'])
+        self.assertNotEqual(historical_request(self.config,self.state,'alpha',other)['id'],first['id'])
         with patch.object(context,'capacity_available',return_value=True),patch.object(context,'clean_prompt',return_value=True),patch.object(control,'official',return_value=result) as official:
             control.advance(self.config,self.state,first['id']);control.advance(self.config,self.state,first['id'])
             self.assertEqual(official.call_count,1)
@@ -652,7 +651,7 @@ class PoolControlTests(Fixture):
 
     def test_uncertain_send_never_replays_or_changes_owner(self):
         result=self.dispatched();p=self.root/'request.txt';p.write_text('Approved remaining work only')
-        job=control.enqueue(self.config,self.state,'alpha',p)
+        job=historical_request(self.config,self.state,'alpha',p)
         with patch.object(context,'capacity_available',return_value=True),patch.object(context,'clean_prompt',return_value=True),patch.object(control,'official',side_effect=TimeoutError) as call:
             control.advance(self.config,self.state,job['id']);control.advance(self.config,self.state,job['id'])
             self.assertEqual(call.call_count,1)
@@ -668,7 +667,7 @@ class PoolControlTests(Fixture):
         route=control.plan(self.config,self.state,'alpha')
         self.assertEqual(route['action'],'handoff');self.assertEqual(route['selection']['account'],'personal')
         p=self.root/'request.txt';p.write_text('Preserve approved scope')
-        request=control.enqueue(self.config,self.state,'alpha',p)
+        request=historical_request(self.config,self.state,'alpha',p)
         with patch.object(context,'observe',return_value=None),patch.object(control,'official') as sent:
             control.advance(self.config,self.state,request['id']);sent.assert_not_called()
         saved=control.requests(self.state)[0]
@@ -679,7 +678,7 @@ class PoolControlTests(Fixture):
 
     def test_quota_expiry_during_native_check_prevents_delivery(self):
         result=self.dispatched();p=self.root/'request.txt';p.write_text('Approved scope only')
-        request=control.enqueue(self.config,self.state,'alpha',p)
+        request=historical_request(self.config,self.state,'alpha',p)
         def expired(*args):
             store=Store(self.state);value=store.quota('codex/team');value['observed_at']-=1000;store.quota('codex/team',value);store.close();return True
         with patch.object(context,'capacity_available',return_value=True),patch.object(context,'clean_prompt',side_effect=expired),patch.object(control,'official',return_value=result) as sent:
@@ -740,3 +739,45 @@ class PoolControlTests(Fixture):
             self.call('pool','bootstrap','--team','alpha')
         self.assertEqual(attach.call_args.args[2],{'kind':'task','id':'L1','terminal':'told'})
         self.assertEqual(attach.call_args.args[3],'tnew')
+
+    def test_usage_mode_explicit_later_request_is_not_blocked_by_pending_head(self):
+        self.dispatched()
+        verified_route=control.plan(self.config,self.state,'alpha')
+        self.value['operations']={'allocation_policy':'usage'}
+        self.config.write_text(json.dumps(self.value))
+        message=self.root/'pull-later.txt';message.write_text('Read approved fixture only.')
+        with patch.object(control,'notify'):
+            first=historical_request(self.config,self.state,'alpha',message)
+            message.write_text('Read another approved fixture only.')
+            later=historical_request(self.config,self.state,'alpha',message)
+        def official(config,state,*args):
+            self.assertEqual('tell',args[0])
+            store=Store(state)
+            try:return store.get(args[1])
+            finally:store.close()
+        with patch.object(context,'capacity_available',return_value=True),patch.object(control,'refresh_choice'),patch.object(control,'plan',return_value=verified_route),patch.object(control,'official',side_effect=official) as sent:
+            control.advance(self.config,self.state,later['id'])
+        by_id={job['id']:job for job in control.requests(self.state)}
+        self.assertEqual('pending',by_id[first['id']]['phase'])
+        self.assertEqual('received',by_id[later['id']]['phase'])
+        self.assertEqual(1,sent.call_count)
+
+    def test_usage_without_verified_workspace_never_falls_back_to_role_routing(self):
+        self.dispatched()
+        self.value['operations']={'allocation_policy':'usage'}
+        self.config.write_text(json.dumps(self.value))
+        from teamkit.__main__ import select_execution
+        with patch('teamkit.__main__.select_execution',wraps=select_execution) as old_route:
+            result=control.plan(self.config,self.state,'alpha')
+        self.assertEqual('wait',result['action'])
+        self.assertIn('workspace',result['reason'])
+        old_route.assert_not_called()
+        message=self.root/'workspace-registration-required.txt';message.write_text('Read fixture only.')
+        with patch.object(control,'notify'):
+            job=historical_request(self.config,self.state,'alpha',message)
+        with patch.object(control,'refresh_choice'),patch.object(control,'official') as official:
+            control.advance(self.config,self.state,job['id'])
+        official.assert_not_called()
+        current=next(j for j in control.requests(self.state) if j['id']==job['id'])
+        self.assertEqual('pending',current['phase'])
+        self.assertIn('workspace',current['reason'])

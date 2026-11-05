@@ -9,7 +9,7 @@ import sqlite3
 import time
 
 from .config import load
-from .operations import NativeRuntime, enabled, policy, tick
+from .operations import NativeRuntime, enabled, gate_issues, policy, tick
 from .tickets import TicketStore, digest
 
 
@@ -31,14 +31,14 @@ def executor_identity(executor):
 def selection_hold(db, ticket):
     if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='queue_action_holds'").fetchone():
         row = db.execute('SELECT action,candidate FROM queue_action_holds WHERE ticket=?', (ticket,)).fetchone()
-        if row:
+        if row and not _read(db, row[0]).get('selection_rejected'):
             return dict(action=row[0], candidate=row[1])
     # Earlier durable send records also express a manual selection. Upgrading
     # must not turn an existing blocked/queued action back into automatic work.
     if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='queue_actions'").fetchone():
         for row in db.execute('SELECT body FROM queue_actions ORDER BY rowid DESC'):
             action = json.loads(row[0])
-            if action['kind'] == 'send' and action['request']['ticket'] == ticket:
+            if action['kind'] == 'send' and action['request']['ticket'] == ticket and not action.get('selection_rejected'):
                 return dict(action=action['id'], candidate=action['request']['candidate_id'])
     return None
 
@@ -72,6 +72,112 @@ def _send_reason(queue, ticket, config):
     return queue.gate(ticket['id'])
 
 
+def _manual_send_reason(config):
+    from .allocation import usage_only
+    return ('사용량 기준 팀 pull 모드에서는 담당자를 지정해 전송할 수 없습니다. '
+            'queue pull <업무 ID> --team <팀>을 사용하세요') if usage_only(config) else None
+
+
+# Known gate messages -> short Korean phrases. Unknown text keeps its original wording.
+REASON_KO = (
+    ('executor responsibility or role mismatch', '담당 제품·역할이 이 업무와 맞지 않습니다'),
+    # Account designation is a priority, no longer a gate; kept so older stored action records still read.
+    ('outside the ticket account list', '업무에 적힌 계정 목록에 없는 계정입니다(이전 기록)'),
+    ('executor draft, dialog or incomplete screen', '화면에 입력 중인 내용이나 확인 창이 있습니다'),
+    ('global execution capacity is exhausted', '전체 동시 실행 용량이 가득 찼습니다'),
+    ('profile execution capacity is exhausted or unknown', '계정 동시 실행 용량이 가득 찼거나 확인되지 않았습니다'),
+    ('Core terminal owner/process changed', '터미널의 소유자나 프로세스가 바뀌었거나 종료되었습니다'),
+    ('registered executor PID changed', '등록된 직원 프로세스가 바뀌었습니다'),
+    ('Core agent is not idle and ready', '직원이 작업 중이거나 준비되지 않았습니다'),
+    ('profile quota unavailable', '계정 사용량을 확인할 수 없거나 한도에 도달했습니다'),
+    ('profile quota changed before delivery', '전송 직전 계정 사용량이 바뀌었습니다'),
+    ('executor model/effort differs', '직원의 모델·추론 강도가 역할 정책과 다릅니다'),
+    ('executor provider is outside', '직원의 계정이 역할 정책 범위 밖입니다'),
+    ('executor profile binding changed', '직원의 계정 연결이 바뀌었습니다'),
+    ('executor working boundary', '직원의 작업 폴더가 업무 범위를 덮지 않습니다'),
+    ('review executor must be independent', '리뷰는 구현 담당과 다른 직원이어야 합니다'),
+    ('no explicit responsibility/role policy', '이 업무의 역할 정책이 정해져 있지 않습니다'),
+    ('role policy requires a user decision', '역할 정책상 사용자 결정이 필요합니다'),
+    ('planned role/profile/quota no longer eligible', '새로 만들 직원 계획이 더 이상 유효하지 않습니다'),
+    ('executor identity/profile mismatch', '직원 식별 정보나 계정이 업무 조건과 맞지 않습니다'),
+    ('previous selected action is queued, running or uncertain', '이전에 선택한 전송이 진행 중이거나 결과가 불명확해 먼저 확인이 필요합니다'),
+    ('native terminal already belongs to another live attempt', '이 직원은 다른 작업을 진행 중입니다'),
+    ('another attempt holds a conflicting resource lease', '다른 작업이 같은 자원을 쓰고 있어 충돌합니다'),
+    ('origin execution budget exhausted', '이 업무의 실행 횟수·토큰 한도를 모두 썼습니다'),
+    ('personal document staff', '개인 문서 담당 규칙에 맞지 않습니다'),
+    ('staff department does not support this role', '이 부서는 해당 역할을 지원하지 않습니다'),
+    ('UI work requires', 'UI 업무는 UI 검증실을 통해서만 처리할 수 있습니다'),
+    ('pinned product design approval', '제품 설계 승인이 없거나 바뀌었습니다'),
+    ('code/integration ticket requires', '코드 업무는 고정된 승인 기록이 필요합니다'),
+    ('approval missing or changed', '승인 기록이 없거나 바뀌었습니다'),
+    ('ticket already assigned', '이미 배정·완료되었거나 대기 상태가 아니라 다시 보낼 수 없습니다'),
+    ('new work is disabled', '현재 운영 정책에서 새 업무 전송이 꺼져 있습니다'),
+    ('previous start result unknown', '이전 시작 결과 불명 — 직원 터미널이 시작할 때 만든 프로세스와 같은지 확인되지 않았습니다'),
+    ('unregistered terminal in team space', '팀 스페이스에 있지만 직원으로 등록되지 않은 터미널이라 업무를 보낼 수 없습니다 (등록 필요)'),
+    ('no eligible registered executor', '배정 가능한 등록 직원이 없습니다'),
+)
+_OVERRIDE_REASON_MAX = 300
+
+
+def reason_ko(reason):
+    """Short Korean label for a gate message; unknown messages keep the original text."""
+    if not reason:
+        return ''
+    for needle, korean in REASON_KO:
+        if needle in reason:
+            return korean
+    return '배정 불가 사유(원문): ' + reason
+
+
+def _clean_override_reason(value):
+    if not isinstance(value, str) or not value.strip() or len(value.strip()) > _OVERRIDE_REASON_MAX:
+        raise ValueError('override reason required: 1..%d characters' % _OVERRIDE_REASON_MAX)
+    return value.strip()
+
+
+def _reserve_issues(queue, config, runtime, ticket, executor, observation):
+    """Official reservation gates against a private SQLite copy, as [{code, bypassable, reason}].
+
+    The preview cannot hold resources, spend budget or alter a ticket. A planned (new) worker is
+    judged strictly; an existing terminal is previewed as a manual priority send so the waivable
+    reservation gate (capacity) is listed instead of stopping at the first.
+    """
+    manual = executor.get('new') is not True
+    override = dict(action='preview', reason='preview', original_reasons=[], bypassed=[]) if manual else None
+    issues = []
+    split_preview = None
+    preview = object.__new__(TicketStore)
+    preview.db = sqlite3.connect(':memory:', isolation_level=None)
+    preview.path, preview.clock = queue.path, time.time
+    try:
+        queue.db.backup(preview.db)
+        # Candidate previews may offer a fresh explicit reselection;
+        # only the real reserve transaction enforces a current hold.
+        preview.db.execute('DROP TABLE IF EXISTS queue_action_holds')
+        preview.db.execute('DROP TABLE IF EXISTS queue_actions')
+        from .admission import configure
+        configure(preview.db, policy(config))
+        attempt = preview.reserve(ticket['id'], executor, policy(config), observation(), expected_revision=digest(ticket),
+                                  override=override, preview=True)
+        split_preview = attempt.get('worktree_split')
+    except Exception as error:
+        issues.append(dict(code='reservation', bypassable=False, reason=str(error)))
+    finally:
+        preview.close()
+    waived = [dict(code='capacity', bypassable=True, reason=text)
+              for text in (override or {}).get('bypassed', [])]
+    return waived + issues, split_preview
+
+
+def _with_korean(issues):
+    seen, result = set(), []
+    for issue in issues:
+        if issue['reason'] not in seen:
+            seen.add(issue['reason'])
+            result.append(dict(issue, reason_ko=reason_ko(issue['reason'])))
+    return result
+
+
 def candidates(config_path, state, ident, runtime=None):
     config = load(config_path)
     runtime = runtime or NativeRuntime(config, state)
@@ -86,38 +192,78 @@ def candidates(config_path, state, ident, runtime=None):
             executors = runtime.executors(ticket)
         except Exception as error:
             return dict(ticket=ident, expected_ticket=digest(ticket), candidates=[], send_allowed=False, reason=str(error))
+        from .workers import prefer_designated, preferred
+        from .allocation import usage_only, profile_candidates
+        if usage_only(config):
+            pairs = [(x['provider'], x['account']) for x in profile_candidates(config)]
+            executors = sorted((x for x in executors if x['product'] == ticket['product']),
+                key=lambda x: pairs.index((x['provider'], x['account']))
+                    if (x['provider'], x['account']) in pairs else len(pairs))
+        else:
+            executors = prefer_designated(ticket, executors, lambda item: (item['provider'], item['account']))
+        roster = getattr(runtime, 'roster', None)
+        view = roster(ticket, executors) if roster else dict(info={}, unregistered=[])
+        info, excluded = view.get('info', {}), []
+        observed = []
+
+        def cached_observation():
+            if not observed:
+                observed.append(runtime.observation())
+            return observed[0]
         for executor in executors:
-            problem = None
+            split_preview = None
+            seen = info.get(executor.get('terminal'), {})
+            if executor.get('new') is not True and seen.get('state') not in (None, 'live'):
+                # A finished or removed terminal is not staff; keep why it was left out.
+                excluded.append(dict(terminal=executor['terminal'], label=seen.get('label'), state=seen['state'],
+                                     reason_ko='터미널이 종료되었거나 사라져 후보에서 제외했습니다'))
+                continue
+            # Evaluate every gate, not just the first failure, so the user sees what a manual
+            # priority send would ignore and which gates can never be ignored.
             try:
-                runtime.admit(ticket, executor)
-                # Run the official reservation gates against a private SQLite copy.
-                # This preview cannot hold resources, spend budget or alter a ticket.
-                preview = object.__new__(TicketStore)
-                preview.db = sqlite3.connect(':memory:', isolation_level=None)
-                preview.path, preview.clock = queue.path, time.time
-                try:
-                    queue.db.backup(preview.db)
-                    # Candidate previews may offer a fresh explicit reselection;
-                    # only the real reserve transaction enforces a current hold.
-                    preview.db.execute('DROP TABLE IF EXISTS queue_action_holds')
-                    preview.db.execute('DROP TABLE IF EXISTS queue_actions')
-                    from .admission import configure
-                    configure(preview.db, policy(config))
-                    preview.reserve(ident, executor, policy(config), runtime.observation(), expected_revision=digest(ticket))
-                finally:
-                    preview.close()
+                issues = gate_issues(runtime, ticket, executor)
+                reservation_issues, split_preview = _reserve_issues(queue, config, runtime, ticket, executor, cached_observation)
+                issues += reservation_issues
             except Exception as error:
-                problem = str(error)
+                issues = [dict(code='unclassified', bypassable=False, reason=str(error))]
+            issues = _with_korean(issues)
             from .staff import display_name
-            rows.append(dict(id=executor_identity(executor),
-                alias=display_name(executor['provider'], executor['account'], product=ticket['product'],
+            generated = display_name(executor['provider'], executor['account'], product=ticket['product'],
                     role=ticket['role'], owner=None if executor.get('new') else executor.get('owner'),
-                    aliases=config.get('operations', {}).get('staff_aliases')),
+                    aliases=config.get('operations', {}).get('staff_aliases'))
+            rows.append(dict(id=executor_identity(executor),
+                # Same source as the sidebar: the terminal's own display label, then the generated alias.
+                alias=seen.get('label') or generated, name_source='label' if seen.get('label') else 'generated',
+                terminal=executor.get('terminal'),
+                other_team=executor.get('new') is not True and executor.get('product') not in (ticket['product'], '*'),
+                # Background temporary workers are not part of the visible team roster.
+                hidden_by_default=(executor.get('new') is not True and executor.get('product') not in (ticket['product'], '*'))
+                    or seen.get('background') is True,
                 account=executor['account'], provider=executor['provider'], role=ticket['role'],
-                eligible=problem is None, reason=problem or '', planned=executor.get('new') is True))
-        return dict(ticket=ident, expected_ticket=digest(ticket), candidates=rows,
-                    send_allowed=any(row['eligible'] for row in rows),
-                    reason='' if any(row['eligible'] for row in rows) else 'no eligible registered executor or approved worker plan')
+                # The ticket's designated account is only listed first; it never changes eligibility.
+                preferred=not usage_only(config) and preferred(ticket, executor['provider'], executor['account']),
+                split_preview=split_preview,
+                eligible=not issues, reason='; '.join(x['reason'] for x in issues),
+                reason_ko=' / '.join(x['reason_ko'] for x in issues), reasons=issues,
+                # Manual priority never creates a worker beyond capacity; only an existing terminal can be forced,
+                # and never past a gate that is not bypassable.
+                override_allowed=not usage_only(config) and bool(issues) and executor.get('new') is not True
+                    and all(x['bypassable'] for x in issues),
+                planned=executor.get('new') is True))
+        for item in view.get('unregistered', []):
+            reason=item.get('reason') or '실시간 신원·입력·사용량 검증을 통과하지 못했습니다. 다음 관측에서 다시 확인합니다.'
+            rows.append(dict(id=digest(dict(unregistered=item['terminal'], ticket=ident)),
+                alias=item.get('label') or '이름 미확인', name_source='label' if item.get('label') else 'generated',
+                terminal=item['terminal'], other_team=False, hidden_by_default=False, account=None, provider=None, role=ticket['role'], preferred=False,
+                eligible=False, reason=reason,
+                reason_ko=reason, override_allowed=False,
+                reasons=[dict(code=item.get('reason_code','workspace_unverified'), bypassable=False, reason=reason,
+                              reason_ko=reason)],
+                planned=False, unregistered=True))
+        return dict(ticket=ident, expected_ticket=digest(ticket), candidates=rows, excluded=excluded,
+                    send_allowed=not usage_only(config) and any(row['eligible'] for row in rows),
+                    pull_allowed=usage_only(config) and any(row['eligible'] for row in rows),
+                    reason=_manual_send_reason(config) or ('' if any(row['eligible'] for row in rows) else 'no eligible live executor or approved worker plan'))
     finally:
         queue.close()
 
@@ -143,7 +289,32 @@ def _save(db, action):
     db.execute('INSERT OR REPLACE INTO queue_actions VALUES (?,?)', (action['id'], json.dumps(action)))
 
 
-def enqueue(config_path, state, kind, client_request_id, *, ticket=None, candidate_id=None, expected_ticket=None):
+def _identity_request(request):
+    """What a client-request-id binds. The preview-time reasons are a record, not part of the request."""
+    override = request.get('override')
+    if not isinstance(override, dict):
+        return request
+    return {**request, 'override': {key: value for key, value in override.items() if key != 'original_reasons'}}
+
+
+def _recorded(state, client_request_id, request):
+    queue = TicketStore(state, read_only=True)
+    try:
+        if not queue.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='queue_actions'").fetchone():
+            return None
+        row = queue.db.execute('SELECT body FROM queue_actions WHERE id=?', (client_request_id,)).fetchone()
+    finally:
+        queue.close()
+    if row is None:
+        return None
+    result = json.loads(row[0])
+    if _identity_request(result['request']) != _identity_request(request):
+        raise ValueError('client-request-id already binds another immutable action')
+    return result
+
+
+def enqueue(config_path, state, kind, client_request_id, *, ticket=None, candidate_id=None, expected_ticket=None,
+            override=False, override_reason=None, runtime=None):
     if not isinstance(client_request_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', client_request_id):
         raise ValueError('bounded stable client-request-id required')
     if kind not in ('send', 'sync'):
@@ -152,6 +323,23 @@ def enqueue(config_path, state, kind, client_request_id, *, ticket=None, candida
                                            for x in (candidate_id, expected_ticket))):
         raise ValueError('ticket, exact candidate-id and expected-ticket required')
     request = dict(kind=kind, ticket=ticket, candidate_id=candidate_id, expected_ticket=expected_ticket)
+    if override is not True and override_reason not in (None, ''):
+        raise ValueError('override reason requires the explicit override option')
+    if override is True:
+        if kind != 'send':
+            raise ValueError('manual priority applies only to a send action')
+        request['override'] = dict(reason=_clean_override_reason(override_reason))
+        # A retry of an already recorded request returns that action before any new preview:
+        # the preview itself changes once the first request holds the ticket.
+        known = _recorded(state, client_request_id, request)
+        if known is not None:
+            return known
+        # Preview the gates now so the durable record keeps why this was not assignable.
+        chosen = None if _manual_send_reason(load(config_path)) else next((row for row in candidates(config_path, state, ticket, runtime=runtime)['candidates']
+                       if row['id'] == candidate_id), None)
+        if chosen is not None and chosen.get('planned'):
+            raise ValueError('planned worker cannot be sent by manual priority')
+        request['override']['original_reasons'] = [x['reason'] for x in chosen.get('reasons', [])] if chosen else []
     queue = TicketStore(state)
     try:
         schema(queue.db)
@@ -159,22 +347,24 @@ def enqueue(config_path, state, kind, client_request_id, *, ticket=None, candida
             row = queue.db.execute('SELECT body FROM queue_actions WHERE id=?', (client_request_id,)).fetchone()
             if row:
                 result = json.loads(row[0])
-                if result['request'] != request:
+                if _identity_request(result['request']) != _identity_request(request):
                     raise ValueError('client-request-id already binds another immutable action')
                 return result
             result = dict(id=client_request_id, kind=kind, request=request, status='queued',
                           reason='durable request recorded; waiting for dispatch consumer', created_at=time.time(), result=None)
             if kind == 'send':
                 current = queue.get(ticket)
+                if _manual_send_reason(load(config_path)):
+                    result['selection_rejected'] = True
                 previous = _previous_selection_reason(queue.db, ticket)
-                problem = (_send_reason(queue, current, load(config_path)) or previous)
+                problem = (_manual_send_reason(load(config_path)) or _send_reason(queue, current, load(config_path)) or previous)
                 if digest(current) != expected_ticket:
                     problem = 'ticket changed before manual selection; refresh candidates'
                 if current.get('attempt'):
                     problem = 'existing execution attempt requires original outcome inspection; never resend'
                 # Even a stale preview expresses a manual selection. Preserve
                 # that intent on pending work, but never replace a live action.
-                if current['state']=='pending' and not current.get('attempt') and not previous:
+                if current['state']=='pending' and not current.get('attempt') and not previous and not _manual_send_reason(load(config_path)):
                     queue.db.execute('INSERT OR REPLACE INTO queue_action_holds VALUES (?,?,?)',
                                      (ticket, client_request_id, candidate_id))
                 if problem:
@@ -188,11 +378,50 @@ def enqueue(config_path, state, kind, client_request_id, *, ticket=None, candida
         queue.close()
 
 
+def reject_unstarted_selections(queue, config, *, team=None, ticket=None):
+    """Audit-reject only legacy preflight failures proven never dispatched.
+
+    A blocked action that entered the consumer, any existing execution attempt,
+    or another unresolved action remains held for original-outcome inspection.
+    """
+    if not _manual_send_reason(config):
+        return []
+    if not queue.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='queue_actions'").fetchone():
+        return []
+    rejected = []
+    with queue.transaction():
+        actions = [json.loads(row[0]) for row in queue.db.execute('SELECT body FROM queue_actions')]
+        for action in actions:
+            if (action['kind'] != 'send' or action['status'] != 'blocked'
+                    or action.get('selection_rejected') or 'started_at' in action or action.get('result') is not None):
+                continue
+            ident = action['request']['ticket']
+            if ticket is not None and ident != ticket:
+                continue
+            current = queue.get(ident)
+            if (current['state'] != 'pending' or current.get('attempt')
+                    or team is not None and current['product'] != team):
+                continue
+            if queue.db.execute('SELECT 1 FROM operation_attempts WHERE ticket=? LIMIT 1', (ident,)).fetchone():
+                continue
+            if any(other['kind'] == 'send' and other['request']['ticket'] == ident
+                   and other['status'] in ('queued', 'running', 'uncertain') for other in actions):
+                continue
+            action['selection_rejected'] = True
+            action['selection_rejection'] = dict(at=time.time(), original_reason=action.get('reason'),
+                reason=_manual_send_reason(config), proof='blocked before consumer; no attempt or unresolved send')
+            _save(queue.db, action)
+            queue._save(current, 'manual_selection_rejected', dict(action=action['id'], **action['selection_rejection']))
+            rejected.append(action['id'])
+    return rejected
+
+
 def consume(config_path, state, runtime=None):
     """CAS-claim queued requests; a second consumer never repeats a claimed action."""
     queue = TicketStore(state)
     try:
         schema(queue.db)
+        reject_unstarted_selections(queue, load(config_path))
         pending = [row[0] for row in queue.db.execute("SELECT id FROM queue_actions ORDER BY rowid")]
         results = []
         for ident in pending:
@@ -204,19 +433,24 @@ def consume(config_path, state, runtime=None):
                 _save(queue.db, action)
             try:
                 before = {x['id']: x for x in queue.list()}
+                forced = None
                 request = action['request']
                 if action['kind'] == 'send':
                     ticket = queue.get(request['ticket'])
-                    problem = _send_reason(queue, ticket, load(config_path))
+                    manual_problem = _manual_send_reason(load(config_path))
+                    if manual_problem and ticket['state'] == 'pending' and not ticket.get('attempt'):
+                        action['selection_rejected'] = True
+                    problem = manual_problem or _send_reason(queue, ticket, load(config_path))
                     if digest(ticket) != request['expected_ticket']:
                         problem = 'ticket changed since candidate preview; refresh candidates'
                     if problem:
                         raise ValueError(problem)
                     dispatch = tick(config_path, state, runtime=runtime, selection={**request, 'action_id':action['id']})
+                    forced = next((x['override'] for x in dispatch.get('started', []) if 'override' in x), None)
                 else:
                     dispatch = tick(config_path, state, runtime=runtime)
                 after = {x['id']: x for x in queue.list()}
-                actual = dict(dispatch=dispatch, tickets={key: dict(before=before.get(key, {}).get('state'), after=value['state'])
+                actual = dict(dispatch=dispatch, **({'override': forced} if forced else {}), tickets={key: dict(before=before.get(key, {}).get('state'), after=value['state'])
                                                          for key, value in after.items()},
                               observed_count=len(after), completed=[key for key, value in after.items()
                                 if value['state']=='completed' and before.get(key, {}).get('state')!='completed'])

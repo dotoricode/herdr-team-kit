@@ -106,6 +106,24 @@ class WorkerTests(unittest.TestCase):
             self.assertIsNone(plans[0]['pid'])
             self.assertIsNone(plans[0]['terminal'])
 
+    def test_native_candidates_does_not_migrate_or_chmod_legacy_db(self):
+        from teamkit.operations import NativeRuntime
+        from teamkit.queue_actions import candidates
+        ticket = self.ticket('reviewer', 'review')
+        self.queue.db.execute('DROP TABLE operation_worktree_intents')
+        self.state.chmod(0o640)
+        before = self.queue.db.execute('PRAGMA schema_version').fetchone()[0]
+        runtime = NativeRuntime(self.config, self.state)
+        with patch('teamkit.session_pool._read', return_value={'slots':{}}), \
+             patch('teamkit.staffbootstrap.executors', return_value=[]), \
+             patch('teamkit.queue_actions.gate_issues', return_value=[]), \
+             patch.object(workers.providers, 'identity'):
+            result = candidates(self.config_path, self.state, ticket['id'], runtime)
+        self.assertTrue(result['candidates'])
+        self.assertEqual(before, self.queue.db.execute('PRAGMA schema_version').fetchone()[0])
+        self.assertIsNone(self.queue.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='operation_worktree_intents'").fetchone())
+        self.assertEqual(0o640, self.state.stat().st_mode & 0o777)
+
     def test_user_fixed_model_survives_flexible_provider_preference(self):
         self.config['execution_preference'] = {'provider_order': ['claude', 'codex'],
                                                 'weekend_account_first': True}
@@ -123,13 +141,14 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(workers.plans(self.config, self.state, ticket), [])
         identity.assert_not_called()
 
-    def test_request_constraint_cannot_replace_user_approved_provider(self):
+    def test_designation_cannot_replace_user_approved_provider_but_does_not_empty_the_plans(self):
         ticket = self.ticket(user_decision={'provider': 'codex', 'model': 'user-fixed-model',
                                            'effort': 'high', 'failure_count': 0},
                              execution_constraint={'provider': 'claude', 'account': 'personal'})
-        with patch.object(workers.providers, 'identity') as identity:
-            self.assertEqual(workers.plans(self.config, self.state, ticket), [])
-        identity.assert_not_called()
+        with patch.object(workers.providers, 'identity'):
+            plans = workers.plans(self.config, self.state, ticket)
+        self.assertTrue(plans)
+        self.assertEqual({(p['provider'], p['model']) for p in plans}, {('codex', 'user-fixed-model')})
 
     def test_new_user_decision_only_resets_failure_evidence_already_reviewed(self):
         ticket = self.ticket(user_decision={'provider': 'codex', 'model': 'user-fixed-model',
@@ -211,6 +230,56 @@ class WorkerTests(unittest.TestCase):
                 workers.launch(self.config_path, self.state, ticket, self.attempt)
         self.assertEqual(create.call_count, 1)
         self.assertEqual(len(self.store.list()), 1)
+
+    def test_split_worker_launches_in_the_separate_directory(self):
+        from teamkit.tickets import execution_resources
+        ticket = self.ticket('reviewer', 'review')
+        self.attempt = self.reserve(ticket)
+        executor = self.attempt['executor']
+        target = self.root/'isolated'
+        target.mkdir()
+        split = dict(source_root=str(self.root), worktree=str(target),
+                     resources=[dict(kind='path', name=str(target), mode='read')])
+        self.attempt['worktree_split'] = split
+        self.queue._save_attempt(self.attempt)
+        lease = ResourceLedger._rows(self.queue.db)[0]
+        lease['resources'] = execution_resources(ticket, self.attempt)
+        ResourceLedger._write(self.queue.db, lease)
+        native = self.native(executor)
+        native['foreground']['cwd'] = str(target)
+        with patch.object(workers.providers, 'identity'), \
+             patch.object(workers, 'require_managed', return_value='t1'), \
+             patch.object(workers.CoreRuntime, 'launch', side_effect=self.fake_launch) as launch, \
+             patch.object(workers.CoreRuntime, '_native', return_value=native), \
+             patch.object(workers, '_call', return_value={'complete': True, 'text': '❯ \n──────'}):
+            ready = workers.launch(self.config_path, self.state, ticket, self.attempt)
+        self.assertEqual(str(target), launch.call_args.args[0]['root'])
+        self.assertEqual(str(target), ready['execution_root'])
+
+    def test_split_worker_wrong_native_cwd_is_not_ready_or_relaunched(self):
+        from teamkit.tickets import execution_resources
+        ticket = self.ticket('reviewer', 'review')
+        self.attempt = self.reserve(ticket)
+        executor = self.attempt['executor']
+        target = self.root/'isolated'
+        target.mkdir()
+        self.attempt['worktree_split'] = dict(source_root=str(self.root), worktree=str(target),
+            resources=[dict(kind='path', name=str(target), mode='read')])
+        self.queue._save_attempt(self.attempt)
+        lease = ResourceLedger._rows(self.queue.db)[0]
+        lease['resources'] = execution_resources(ticket, self.attempt)
+        ResourceLedger._write(self.queue.db, lease)
+        native = self.native(executor)
+        native['foreground']['cwd'] = str(self.root)
+        with patch.object(workers.providers, 'identity'), \
+             patch.object(workers, 'require_managed', return_value='t1'), \
+             patch.object(workers.CoreRuntime, 'launch', side_effect=self.fake_launch) as launch, \
+             patch.object(workers.CoreRuntime, '_native', return_value=native):
+            with self.assertRaisesRegex(ValueError, 'did not start in the split worktree'):
+                workers.launch(self.config_path, self.state, ticket, self.attempt)
+            with self.assertRaisesRegex(ValueError, 'already attempted'):
+                workers.launch(self.config_path, self.state, ticket, self.attempt)
+        self.assertEqual(1, launch.call_count)
 
     def test_changed_approval_blocks_launch_before_native_creation(self):
         ticket = self.ticket()

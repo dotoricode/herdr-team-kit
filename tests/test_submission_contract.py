@@ -146,7 +146,7 @@ class SubmissionContractTest(unittest.TestCase):
         self.assertEqual(detail,self.queue.attempt(attempt['id'])['delivery'])
         self.assertEqual(attempt['id'],item['attempt'])
 
-    def test_stop_keeps_a_read_lease_until_finish_and_allows_independent_reader(self):
+    def test_stop_keeps_a_read_lease_until_finish_that_blocks_neither_writer_nor_reader(self):
         actor,attempt,packet = self.begin()
         self.submit(actor,attempt,packet)
         self.queue.record_stop('BAD',attempt['id'],self.native(actor))
@@ -154,8 +154,8 @@ class SubmissionContractTest(unittest.TestCase):
         writer_spec['resources'] = self.spec('BAD')['resources']
         self.queue.enqueue(writer_spec,'writer',user_approved=True)
         observer = dict(observed_at=time.time(),complete=True,terminals=[])
-        with self.assertRaisesRegex(ValueError,'conflicting resource'):
-            self.queue.reserve('WRITER',self.actor('WRITER'),{},observer)
+        # The retained read lease no longer blocks a writer of the same path: only write-write overlaps conflict.
+        self.assertEqual('WRITER',self.queue.reserve('WRITER',self.actor('WRITER'),{},observer)['ticket'])
         reader_spec = self.spec('REVIEWER','review')
         reader_spec.update(role='reviewer',resources=[dict(writer_spec['resources'][0],mode='read')])
         self.queue.enqueue(reader_spec,'reader',user_approved=True)
@@ -167,7 +167,6 @@ class SubmissionContractTest(unittest.TestCase):
         self.queue.record_stop('REVIEWER',review_attempt['id'],self.native(reader))
         self.queue.finish('REVIEWER',review_attempt['id'],dict(artifact_digest=file_digest(report),checks={'report':True}))
         self.queue.finish('BAD',attempt['id'],dict(artifact_digest=file_digest(packet['artifact']),checks={'report':True}))
-        self.assertEqual('WRITER',self.queue.reserve('WRITER',self.actor('WRITER'),{},observer)['ticket'])
 
     def test_duplicate_stop_is_idempotent_and_does_not_drop_the_read_lease(self):
         actor,attempt,packet = self.begin()

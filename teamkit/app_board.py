@@ -14,7 +14,7 @@ import stat
 import time
 import uuid
 
-BOARD_ACTIONS=('waiting','progress','done','archive','restore')
+BOARD_ACTIONS=('waiting','progress','done','archive','restore','reorder')
 
 from .app_feedback import _key, _open
 
@@ -140,6 +140,8 @@ def _read(path,card):
                     or not isinstance(event.get('client_request_id'),str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{7,127}',event['client_request_id'])
                     or event['client_request_id'] in seen or type(event.get('at')) not in (int,float) or not math.isfinite(event['at'])):
                 raise ValueError('invalid event')
+            if 'rank' in event and (type(event['rank']) not in (int,float) or not math.isfinite(event['rank'])):
+                raise ValueError('invalid rank')
             seen.add(event['client_request_id'])
         return events
     except (ValueError,TypeError,KeyError,AttributeError) as error:
@@ -149,11 +151,22 @@ def _read(path,card):
 def _state(card,events):
     token=semantic_token(card);last=events[-1] if events else None
     stale=bool(last and last['token']!=token)
-    action=last['action'] if last and not stale else None
-    disposition={'done':'done','archive':'archived'}.get(action,'visible')
-    manual_status={'waiting':'waiting','progress':'progress','done':'complete'}.get(action)
+    disposition='visible';manual_status=None;rank=None
+    start=0
+    for index,event in enumerate(events):
+        if event['token']!=token:start=index+1
+    for event in events[start:]:
+        action=event['action']
+        if action=='restore':disposition='visible';manual_status=None;rank=None
+        elif action=='reorder':rank=event.get('rank')
+        elif action in ('waiting','progress','done'):
+            disposition='done' if action=='done' else 'visible'
+            manual_status={'waiting':'waiting','progress':'progress','done':'complete'}[action]
+            rank=event.get('rank')
+        elif action=='archive':disposition='archived'
     return {'disposition':disposition,'revision':_digest({'token':token,'events':events}),
-            'stale':stale,'can_restore':disposition!='visible' or manual_status is not None,'manual_status':manual_status}
+            'stale':stale,'can_restore':disposition!='visible' or manual_status is not None,
+            'manual_status':manual_status,'rank':rank}
 
 
 def board_state(state,card):
@@ -189,9 +202,11 @@ def _sync(path):
     finally:os.close(directory)
 
 
-def board_action(state,card,action,client_request_id,expected_revision):
+def board_action(state,card,action,client_request_id,expected_revision,rank=None):
     """CAS-protected organization only. Repeating a request never replays an action."""
     if action not in BOARD_ACTIONS:raise ValueError('보드 상태 변경 동작을 확인하세요.')
+    if rank is not None and (type(rank) not in (int,float) or not math.isfinite(rank)):
+        raise ValueError('정렬 순위는 유한한 숫자여야 합니다.')
     if not isinstance(client_request_id,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{7,127}',client_request_id):
         raise ValueError('보드 정리 요청 ID를 확인하세요.')
     token=semantic_token(card);base=_base(state,True);path=_path(base,card)
@@ -199,10 +214,12 @@ def board_action(state,card,action,client_request_id,expected_revision):
         events=_read(path,card)
         for event in events:
             if event['client_request_id']==client_request_id:
-                if (event['action'],event['token'])!=(action,token):raise ValueError('같은 요청 ID의 내용이 달라졌습니다.')
+                if (event['action'],event['token'],event.get('rank'))!=(action,token,rank):raise ValueError('같은 요청 ID의 내용이 달라졌습니다.')
                 return _state(card,events)
         current=_state(card,events)
         if expected_revision!=current['revision']:raise ValueError('보드 정리 상태가 바뀌었습니다. 최신 카드를 확인하세요.')
-        events.append({'seq':len(events)+1,'client_request_id':client_request_id,'action':action,'token':token,'at':time.time()})
+        event={'seq':len(events)+1,'client_request_id':client_request_id,'action':action,'token':token,'at':time.time()}
+        if rank is not None:event['rank']=float(rank)
+        events.append(event)
         _write(path,{'schema_version':1,'card':_key(card['kind'],card['id']),'events':events})
         return _state(card,events)

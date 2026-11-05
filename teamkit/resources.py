@@ -90,7 +90,8 @@ def _session(session):
 
 
 def _conflict(left, right):
-    if left['kind'] != right['kind'] or 'write' not in (left['mode'], right['mode']):
+    # Only two writes can conflict. A read neither blocks nor is blocked by any other resource.
+    if left['kind'] != right['kind'] or not (left['mode'] == right['mode'] == 'write'):
         return False
     if left['kind'] == 'named':
         return left['name'] == right['name']
@@ -134,7 +135,7 @@ def observe_native(call=None, clock=time.time):
         status = (native.get('status') or {}).get('state', 'unknown') if name else 'unknown'
         rows.append(dict(terminal=native['address'], pid=foreground.get('pid'), provider=provider,
                          account=None, status=status, owner=labels.get('teamkit.owner'),
-                         attempt=labels.get('teamkit.attempt')))
+                         attempt=labels.get('teamkit.attempt'), space=labels.get('herdr.space')))
     return dict(observed_at=started, finished_at=clock(), complete=True, terminals=rows,
                 outside_controlled=False, coverage=COVERAGE)
 
@@ -206,6 +207,8 @@ class ResourceLedger:
     def _session_available(self, connection, attempt, session):
         if session is None:
             return
+        from .workspace_sessions import registration_fence
+        registration_fence(connection, session['terminal'], session['owner'], session['pid'])
         if any(row['attempt'] != attempt and row['execution_reserved'] and row.get('session')
                and row['session']['terminal'] == session['terminal'] for row in self._rows(connection)):
             raise ResourceUnavailable('session_conflict', 'native terminal already belongs to another live attempt')
@@ -266,7 +269,7 @@ class ResourceLedger:
                                                policy, native_observation, session=session)
 
     def reserve_in_transaction(self, connection, attempt, ticket, profile, resources,
-                               policy, native_observation, session=None):
+                               policy, native_observation, session=None, override_capacity=False, waived=None):
         if not connection.in_transaction:
             raise ValueError('reservation requires caller-owned active transaction')
         if not isinstance(attempt, str) or not IDENTITY.fullmatch(attempt) or not isinstance(ticket, str) or not IDENTITY.fullmatch(ticket):
@@ -282,10 +285,26 @@ class ResourceLedger:
                 raise ResourceUnavailable('attempt_released', 'released attempts cannot be resurrected')
             return old
         snap = self._snapshot(connection, policy, native_observation)
-        if snap['available'] is not None and snap['available'] <= 0:
-            raise ResourceUnavailable('global_capacity', 'global execution capacity is exhausted')
-        if snap['profile_used'][profile] + snap['profile_unknown'][profile.split('/')[0]] >= snap['profile_limits'][profile]:
-            raise ResourceUnavailable('profile_capacity', 'profile execution capacity is exhausted or unknown')
+        # Only an explicit manual priority send skips the two capacity counters.
+        # Session and write-lease conflicts below always remain enforced.
+        # A waived counter is appended to `waived` so the caller can record what was actually ignored.
+        for code, full, message in (
+                ('global_capacity', lambda: snap['available'] is not None and snap['available'] <= 0,
+                 'global execution capacity is exhausted'),
+                ('profile_capacity', lambda: snap['profile_used'][profile] + snap['profile_unknown'][profile.split('/')[0]]
+                 >= snap['profile_limits'][profile], 'profile execution capacity is exhausted or unknown')):
+            if override_capacity is True and waived is None:
+                continue
+            try:
+                hit = full()
+            except KeyError:
+                if override_capacity is not True:
+                    raise
+                continue
+            if hit and override_capacity is not True:
+                raise ResourceUnavailable(code, message)
+            if hit:
+                waived.append(message)
         self._session_available(connection, attempt, session)
         for existing in self._rows(connection):
             if existing['writes_held'] and any(_conflict(a, b) for a in resources for b in existing['resources']):

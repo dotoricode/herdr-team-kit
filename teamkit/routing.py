@@ -84,6 +84,12 @@ def execution_preference(config):
 
 def execution_candidates(config, task, role, now):
     """Return ordered flexible candidates, or None for role-fixed execution."""
+    from .allocation import usage_only, profile_candidates
+    cls = task.get('classification', {'kind':'general', 'risks':[]})
+    if (usage_only(config) and task.get('role') in ('leader','implementer')
+            and not task.get('user_decision') and not task.get('team_dispatch_team')
+            and cls['kind'] in ('general','small') and not cls['risks']):
+        return profile_candidates(config, now)
     constraint = task.get('execution_constraint')
     if constraint is not None:
         if (not isinstance(constraint, dict) or set(constraint) != {'provider', 'account'}
@@ -91,13 +97,26 @@ def execution_candidates(config, task, role, now):
                 or constraint.get('account') not in ('team', 'personal')):
             raise ValueError('execution constraint requires a configured provider and account')
         provider, account = constraint['provider'], constraint['account']
+        if task.get('team_dispatch_team'):
+            # The team observer is a fixed personal-Codex role, not a designation.
+            return [{**role, **constraint, 'model': config['profiles'][provider][account]['model']
+                     if provider != role['provider'] else role['model']}]
+        # A designated account is only a priority: it goes first when the approved model policy
+        # allows its provider, and every other candidate of the same policy follows.
+        rest = execution_candidates(config, {k: v for k, v in task.items() if k != 'execution_constraint'},
+                                    role, now)
+        if rest is None:
+            from .policy import account_order
+            rest = [{**role, 'account': item, 'effort': role.get('effort', 'medium')}
+                    for item in account_order(config, now)]
         cls = task.get('classification', {'kind': 'general', 'risks': []})
         fixed = (task.get('user_decision') or task['role'] not in ('leader', 'implementer')
                  or cls['kind'] not in ('general', 'small') or cls['risks'])
         if fixed and provider != role['provider']:
-            return []  # A request pin cannot replace an approved or specialized model policy.
-        return [{**role, **constraint,
-                 'model': role['model'] if provider == role['provider'] else config['profiles'][provider][account]['model']}]
+            return rest  # A designation cannot replace an approved or specialized model policy.
+        first = {**role, **constraint,
+                 'model': role['model'] if provider == role['provider'] else config['profiles'][provider][account]['model']}
+        return [first] + [c for c in rest if (c['provider'], c['account']) != (provider, account)]
     preference = execution_preference(config)
     preferred = leader_preference(config, task)
     cls = task.get('classification', {'kind': 'general', 'risks': []})

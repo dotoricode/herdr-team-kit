@@ -41,7 +41,7 @@ class TicketResourceContractTest(unittest.TestCase):
     def reserve(self,ident):
         return self.queue.reserve(ident,self.actor(ident),{'global_limit':4},dict(observed_at=time.time(),complete=True,terminals=[]))
 
-    def test_unlimited_policy_admits_four_profiles_without_bypassing_ticket_identity(self):
+    def test_unlimited_policy_admits_four_profiles_with_each_designated_account(self):
         from teamkit.admission import configure
         from teamkit.resources import PROFILES
         configure(self.queue.db, {'global_limit': None})
@@ -55,17 +55,16 @@ class TicketResourceContractTest(unittest.TestCase):
                          terminal='t' + ident, pid=200 + number)
             if number == 3:
                 with self.assertRaisesRegex(ValueError, 'identity/profile mismatch'):
-                    self.queue.reserve(ident, {**actor, 'account': 'team'}, None,
+                    self.queue.reserve(ident, {**actor, 'owner': None}, None,
                                        dict(observed_at=time.time(), complete=True, terminals=[]))
             self.queue.reserve(ident, actor, None,
                                dict(observed_at=time.time(), complete=True, terminals=[]))
         self.assertEqual(4, sum(row['execution_reserved'] for row in ResourceLedger._rows(self.queue.db)))
 
-    def test_same_worktree_different_file_writers_conflict(self):
+    def test_same_worktree_different_file_writers_run_in_parallel(self):
         for ident in ('ONE','TWO'):self.queue.enqueue(self.spec(ident),ident,user_approved=True)
-        self.reserve('ONE')
-        with self.assertRaisesRegex(ValueError,'conflicting resource'):self.reserve('TWO')
-        self.assertEqual('pending',self.queue.get('TWO')['state'])
+        self.reserve('ONE');self.reserve('TWO')
+        self.assertEqual(2,sum(r['execution_reserved'] for r in ResourceLedger._rows(self.queue.db)))
 
     def test_different_worktrees_can_reserve_parallel_writers(self):
         self.queue.enqueue(self.spec(),'one',user_approved=True)
@@ -76,7 +75,7 @@ class TicketResourceContractTest(unittest.TestCase):
     def test_worktree_symlink_alias_does_not_bypass_the_exclusion_lock(self):
         alias=self.root/'work-alias';alias.symlink_to(self.work,target_is_directory=True)
         self.queue.enqueue(self.spec(),'one',user_approved=True)
-        self.queue.enqueue(self.spec('TWO',root=alias),'two',user_approved=True)
+        self.queue.enqueue(self.spec('TWO',root=alias,resources=[dict(kind='path',name=str(alias/'ONE.txt'),mode='write')]),'two',user_approved=True)
         self.reserve('ONE')
         with self.assertRaisesRegex(ValueError,'conflicting resource'):self.reserve('TWO')
 
@@ -91,18 +90,26 @@ class TicketResourceContractTest(unittest.TestCase):
         saved=self.queue.enqueue(child,'review')
         self.assertEqual('pending',saved['state'])
         review=self.reserve('REVIEW')
-        self.assertEqual([dict(kind='named',name='worktree:'+str(self.work),mode='read')],review['resource_constraints'])
+        self.assertEqual([],review['resource_constraints'])
         self.assertEqual(self.queue.get('ONE')['workflow_ref'],saved['workflow_ref'])
         self.queue.enqueue(self.spec('TWO'),'two',user_approved=True)
-        with self.assertRaisesRegex(ValueError,'conflicting resource'):self.reserve('TWO')
+        # The review's read constraint does not block a writer of the same worktree.
+        self.assertEqual('TWO',self.reserve('TWO')['ticket'])
 
-    def test_required_child_wait_checks_the_derived_worktree_constraint(self):
+    def test_required_child_wait_checks_overlapping_declared_write(self):
         self.queue.enqueue(self.spec(),'one',user_approved=True);attempt=self.reserve('ONE');actor=self.actor('ONE')
         self.queue.receipt('ONE',attempt['id'],actor['owner'],actor['terminal'],dict(actor,status='idle'))
-        self.queue.enqueue(self.spec('CHILD',mode='read',parent_id='ONE',relation='required'),'child')
+        self.queue.enqueue(self.spec('CHILD',mode='write',parent_id='ONE',relation='required',
+            resources=[dict(kind='path',name=str(self.work/'ONE.txt'),mode='write')]),'child')
         with self.assertRaisesRegex(ValueError,'CHILD.*--release-writes'):
             self.queue.request_children_wait('ONE',attempt['id'],actor['owner'])
         self.assertEqual('running',self.queue.get('ONE')['state'])
+
+    def test_required_read_child_wait_is_not_blocked_by_the_parent_worktree_write(self):
+        self.queue.enqueue(self.spec(),'one',user_approved=True);attempt=self.reserve('ONE');actor=self.actor('ONE')
+        self.queue.receipt('ONE',attempt['id'],actor['owner'],actor['terminal'],dict(actor,status='idle'))
+        self.queue.enqueue(self.spec('CHILD',mode='read',parent_id='ONE',relation='required'),'child')
+        self.queue.request_children_wait('ONE',attempt['id'],actor['owner'])
 
     def test_prompt_exposes_original_contract_and_separate_host_constraints(self):
         original=self.spec();self.queue.enqueue(original,'one',user_approved=True);attempt=self.reserve('ONE')
@@ -143,7 +150,7 @@ class TicketResourceContractTest(unittest.TestCase):
         self.assertEqual(original['resources'],self.queue.get('ONE')['resources'])
         self.assertEqual(digest(original),self.queue.db.execute('SELECT digest FROM operation_tickets WHERE id=?',('ONE',)).fetchone()[0])
         self.assertEqual(self.queue.get('ONE'),self.queue.enqueue(copy.deepcopy(original),'one',user_approved=True))
-        self.assertEqual('worktree:'+str(self.work),attempt['resource_constraints'][0]['name'])
+        self.assertEqual([],attempt['resource_constraints'])
         outside=self.spec('OUTSIDE',resources=[dict(kind='path',name=str(self.other/'bad.txt'),mode='write'),
                                             dict(kind='named',name='worktree:'+str(self.work),mode='write')])
         with self.assertRaisesRegex(ValueError,'outside approved paths'):
@@ -156,12 +163,12 @@ class TicketResourceContractTest(unittest.TestCase):
         child['resources'].append(dict(kind='named',name='branch:fixture',mode='write'))
         self.assertEqual('waiting_approval',self.queue.enqueue(child,'child')['state'])
 
-    def test_outer_write_approval_adds_only_a_lock_without_upgrading_declared_read_access(self):
+    def test_outer_write_approval_does_not_create_a_write_lease_for_declared_read_access(self):
         original=self.spec(mode='read',scope=dict(paths=[str(self.work)],actions=['read','write'],data=['fixture']))
         original['resources'].append(dict(kind='named',name='worktree:'+str(self.work),mode='read'))
         self.queue.enqueue(original,'one',user_approved=True);attempt=self.reserve('ONE')
         self.assertEqual(original['resources'],self.queue.get('ONE')['resources'])
-        self.assertEqual('write',attempt['resource_constraints'][0]['mode'])
+        self.assertEqual([],attempt['resource_constraints'])
         self.assertEqual('read',self.queue.get('ONE')['resources'][0]['mode'])
 
     def test_approval_template_is_read_only_and_matches_the_exact_immutable_contract(self):

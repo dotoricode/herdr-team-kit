@@ -155,7 +155,7 @@ def parser():
     x.add_argument('--publish',action='store_true');x.add_argument('--interval',type=float,default=3)
     x.add_argument('--color',choices=['auto','always','never'],default='auto')
     x=commands.add_parser('pool')
-    x.add_argument('action',choices=('prepare','recheck','present','status','plan','bootstrap','assign','refresh','resolve','submit','rebind-receiver'))
+    x.add_argument('action',choices=('prepare','recheck','present','status','plan','bootstrap','assign','refresh','resolve','submit','adopt-result','rebind-receiver','workspace-status','workspace-register','workspace-receipt','resume-preparation','workspace-registration-status','workspace-renew'))
     x.add_argument('--team')
     x.add_argument('--message-file')
     x.add_argument('--work')
@@ -164,13 +164,18 @@ def parser():
     x.add_argument('--priority',type=int,default=0)
     x.add_argument('--depends-on',action='append',default=[])
     x.add_argument('--resource',action='append',default=[])
+    x.add_argument('--read-resource',action='append',default=[])
     x.add_argument('--request')
     x.add_argument('--outcome',choices=('completed','deferred'))
     x.add_argument('--evidence-file')
     x.add_argument('--expected-owner')
     x.add_argument('--expected-attempt',type=int)
     x.add_argument('--delivery-id')
-    x.add_argument('--operator-approved',action='store_true',help='explicitly approved legacy receiver lineage reconciliation only')
+    x.add_argument('--terminal')
+    x.add_argument('--expected-pid',type=int)
+    x.add_argument('--registration-digest')
+    x.add_argument('--reason')
+    x.add_argument('--operator-approved',action='store_true',help='explicit workspace registration or legacy reconciliation approval')
     x.add_argument('--provider', choices=('codex', 'claude'))
     x.add_argument('--account', choices=('team', 'personal'))
     x=commands.add_parser('team-dispatch')
@@ -508,6 +513,9 @@ def run(args):
             if task.get('team_dispatch_team') is not None:
                 from .team_dispatch import verify_tell
                 verify_tell(args.config,args.state,task)
+            if task.get('workspace_registered'):
+                from .workspace_sessions import verify_task
+                verify_task(config,args.state,task)
             store.wake(args.task, task['owner'], approval_config=config)
             try:
                 import shlex
@@ -523,7 +531,11 @@ def run(args):
                               'message_sha256':message_digest,'terminal':task['runtime']['terminal'],
                               'native_pid':task['runtime']['native_pid'],'phase':'sending','at':time.time()}
                     store.note(args.task,task['owner'],{'last_delivery':delivery})
-                    accepted=runtime.accept(task['runtime']['name'],text)
+                    if task.get('workspace_registered'):
+                        from .workspace_sessions import verify_task
+                        accepted=runtime.accept(task['runtime']['name'],text,before_send=lambda:verify_task(config,args.state,task))
+                    else:
+                        accepted=runtime.accept(task['runtime']['name'],text)
                     delivery.update(accepted,phase='accepted',accepted_at=time.time())
                     with store.transaction():
                         current=store.get(args.task)
@@ -535,7 +547,11 @@ def run(args):
                         current['runtime']['last_delivery']=delivery
                         store._save(current,'input_accepted',delivery)
                     return {**current,'delivery':delivery}
-                runtime.prompt(task['runtime']['name'],text)
+                if task.get('workspace_registered'):
+                    from .workspace_sessions import verify_task
+                    runtime.prompt(task['runtime']['name'],text,before_send=lambda:verify_task(config,args.state,task))
+                else:
+                    runtime.prompt(task['runtime']['name'],text)
             except BaseException:
                 current = store.get(args.task)
                 if current['state'] == 'running':

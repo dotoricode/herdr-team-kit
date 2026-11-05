@@ -67,6 +67,8 @@ def load(path):
         raise ValueError('dashboard_workspaces must map configured teams to explicit workspace IDs')
     if value.get('herdr_session') is not None and (not isinstance(value['herdr_session'],str) or not value['herdr_session']):
         raise ValueError('herdr_session must be a session name')
+    from .allocation import usage_only
+    usage_only(value)
     from .team_dispatch import settings as dispatch_settings
     dispatch_settings(value)
     return value

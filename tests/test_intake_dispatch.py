@@ -45,7 +45,7 @@ class IntakeDispatchTests(unittest.TestCase):
             'labels': {'teamkit.owner': 'fixture-owner', 'teamkit.task': 'GUI-COORDINATOR',
                        'teamkit.name': 'gui-coordinator-'+scope(self.state)},
             'status': {'state': 'idle', 'app': 'codex'}}
-        self.screen = {'complete': True, 'text': '› Ask Codex to do anything\nContext 80% left'}
+        self.screen = {'complete': True, 'text': '› Ask Codex to do anything\n\nContext 80% left'}
         self.receipt = {'accepted': True, 'terminal': 't1', 'native_pid': 123, 'turn_baseline': 3, 'turn': 4}
         self.quota()
         for target in ('subprocess.Popen', 'subprocess.run', 'subprocess.call', 'subprocess.check_call',

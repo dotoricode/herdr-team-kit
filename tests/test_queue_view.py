@@ -23,11 +23,33 @@ class QueueViewTest(unittest.TestCase):
              patch('teamkit.queue_view.view', return_value=payload):
             return board('config','state')
 
+    def test_replaced_attempt_is_attention_and_a_reused_session_is_not_old_working(self):
+        job=self.project(dict(id='OLD',product='example',state='intervention',
+            intervention={'kind':'process_replaced'}))['jobs'][0]
+        self.assertEqual('attention',job['category'])
+        self.assertEqual('실행 종료 · 결과 확인 필요',job['state_label'])
+        ticket,observation,actors=self.receiver('running','working')
+        ticket['attempt']='old-attempt';observation['terminals'][0]['attempt']='new-attempt'
+        job=self.project(ticket,native_observation=observation,task_actors=actors)['jobs'][0]
+        self.assertFalse(job['verified_working'])
+        ticket['executor']['workspace_live']=True;observation['terminals'][0].pop('attempt')
+        job=self.project(ticket,native_observation=observation,task_actors=actors)['jobs'][0]
+        self.assertFalse(job['verified_working'])
+
     def test_unlimited_capacity_round_trips_without_becoming_unknown_or_numeric(self):
         capacity = dict(global_limit=None, available=None, used=4,
                         profile_limits={'codex/team': 3}, profile_used={'codex/team': 1})
         result = self.project(dict(id='ONE', product='example', state='pending'), capacity=capacity)
         self.assertEqual(result['capacity'], capacity)
+
+    def test_legacy_pool_request_is_marked_so_the_window_never_calls_the_ticket_backend(self):
+        legacy = self.project(dict(id='OLD', product='example', state='pending', source='legacy'))['jobs'][0]['execution_actions']
+        current = self.project(dict(id='NEW', product='example', state='pending'))['jobs'][0]['execution_actions']
+        self.assertTrue(legacy['legacy'])
+        self.assertFalse(legacy['send_allowed'])
+        self.assertIn('구형 요청', legacy['reason'])
+        self.assertFalse(current['legacy'])
+        self.assertTrue(current['send_allowed'])
 
     def test_internal_next_action_is_operational_korean_and_raw_value_is_preserved(self):
         ticket = dict(id='ONE', product='example', state='waiting_approval', next_action='check admission',
@@ -104,3 +126,74 @@ class QueueViewTest(unittest.TestCase):
             payload['task_actors'][0].update(owner='original',runtime=dict(terminal='t1',native_pid=42))
             payload['native_observation']['terminals'][0].update(owner='original',pid=42)
             self.assertTrue(board('config','state')['jobs'][0]['receiver_matches_current'])
+
+
+    def test_preparation_failure_is_not_displayed_as_unknown_delivery(self):
+        ticket=dict(id='OLD', product='example', state='uncertain', source='legacy',
+                    error_code='preparation_failed', error_stage='pending', error_type='RuntimeError')
+        result=self.project(ticket)['jobs'][0]
+        self.assertEqual(result['state_label'],'전달 전 준비 실패')
+        self.assertIn('실제 수신 기록이 없습니다',result['reason'])
+        self.assertIn('같은 요청',result['next_action'])
+        result=self.project(dict(ticket,executor={'terminal':'t1'}))['jobs'][0]
+        self.assertNotEqual(result['state_label'],'전달 전 준비 실패')
+
+
+class QueueShortTitleTest(unittest.TestCase):
+    def setUp(self):
+        for target in ('subprocess.run', 'subprocess.Popen', 'subprocess.call', 'subprocess.check_output',
+                       'subprocess.check_call', 'os.kill', 'teamkit.core_runtime._call'):
+            guard = patch(target, side_effect=AssertionError('real HC/UI/process call forbidden: '+target))
+            guard.start()
+            self.addCleanup(guard.stop)
+
+    def job(self, goal, product='alpha'):
+        payload = dict(schema_version=1, observed_at=100, tickets=[dict(id='ONE', product=product, state='pending', goal=goal)],
+                       task_actors=[], native_observation=None, capacity={'available':None}, supervisor={}, profiles={},
+                       candidate_slots=16, account_profiles=4, ready_count=0,
+                       ready_count_boundary='approval/dependency only')
+        config = {'teams':{'alpha':{}}, 'operations':{'product_labels':{'alpha':'10 · Alpha 개발팀'}}}
+        with patch('teamkit.queue_view.load', return_value=config), \
+             patch('teamkit.queue_view.view', return_value=payload):
+            return board('config','state')['jobs'][0]
+
+    def test_short_title_is_added_without_changing_title(self):
+        goal = '# WORK-ALPHA-PR30-REVIEW-20990101\n사용자 요청: https://git.example/alpha/sdk/pulls/30 에 사용자가 리뷰를 달 수 있도록 정리. 중복 제외.'
+        job = self.job(goal)
+        self.assertEqual(job['title'], ' '.join(goal.split()))
+        self.assertEqual(job['request'], goal)
+        self.assertEqual(job['short_title'], 'Alpha PR #30 리뷰 정리')
+
+    def test_recipient_prefixes_and_endings_are_removed_to_first_sentence(self):
+        cases = {
+            'Alpha 개발팀의 회사 Claude 담당에게 사용자 승인된 아래 네 PR의 읽기전용 리뷰를 요청한다. 기존 모듈은 보존한다.\n대상 순서: x':
+                '사용자 승인된 아래 네 PR의 읽기전용 리뷰',
+            'Alpha 개발팀에서 모듈 PR126 읽기전용 리뷰를 수행한다. 기존 리뷰와 같은 경로를 사용한다.':
+                '모듈 PR126 읽기전용 리뷰',
+            'Alpha 팀장 요청: 최신 SDK와 플러그인의 호환성을 점검해 주세요.\n\n근거: 생략':
+                '최신 SDK와 플러그인의 호환성을 점검',
+            '[사용자 최신 추가 요청: 버전별 SDK 호환표]\n현재 각 버전을 확인하세요.':
+                '버전별 SDK 호환표',
+        }
+        for goal, expected in cases.items():
+            with self.subTest(goal=goal[:20]):
+                self.assertEqual(self.job(goal)['short_title'], expected)
+
+    def test_generic_or_meta_first_line_uses_target_line(self):
+        review = ('사용자가 Alpha 팀장에게 직접 요청한 새 읽기 전용 검토입니다.\n\n'
+                  '대상: /work/alpha-sdk 의 origin/fix/task 및 https://git.example/alpha/sdk/pulls/30.\n확인할 것:')
+        self.assertEqual(self.job(review)['short_title'], 'Alpha PR #30 읽기 전용 검토')
+        meta = ('Alpha 개발팀의 회사 Claude Opus 9로 아래 사용자 요청을 수행한다. 모델은 고정한다.\n'
+                '대상: https://git.example/alpha/lib/pulls/136\n읽기 전용 리뷰와 결과 문서 작성만 허용.')
+        self.assertEqual(self.job(meta)['short_title'], 'Alpha PR #136 리뷰')
+
+    def test_short_title_is_one_bounded_line_with_fallback_and_redaction(self):
+        long = '알파 ' * 40
+        title = self.job(long)['short_title']
+        self.assertLessEqual(len(title), 40)
+        self.assertTrue(title.endswith('…'))
+        self.assertNotIn('\n', title)
+        self.assertEqual(self.job('   ')['short_title'], '첨부된 요청')
+        secret = self.job('api_key=abc123secret 로 서버 점검을 요청한다.')['short_title']
+        self.assertNotIn('abc123secret', secret)
+

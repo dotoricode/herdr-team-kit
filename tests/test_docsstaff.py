@@ -67,8 +67,9 @@ class DocumentStaffTests(unittest.TestCase):
             user_decision={'provider': 'claude', 'model': 'fixed-review-model', 'effort': 'high', 'failure_count': 0},
             execution_constraint={'provider': 'claude', 'account': 'team'})
         plans = self.plans(ticket)
-        self.assertEqual({(p['provider'], p['account'], p['model']) for p in plans},
-                         {('claude', 'team', 'fixed-review-model')})
+        # The designated account is first; the approved provider and model never change.
+        self.assertEqual(('claude', 'team'), (plans[0]['provider'], plans[0]['account']))
+        self.assertEqual({('claude', 'fixed-review-model')}, {(p['provider'], p['model']) for p in plans})
 
     def another_ticket(self, original, ident, path):
         spec = {key: original[key] for key in (
@@ -106,7 +107,9 @@ class DocumentStaffTests(unittest.TestCase):
         codex = next(p for p in self.plans(second) if p['provider'] == 'codex')
         claude = next(p for p in self.plans(third) if p['provider'] == 'claude')
         self.reserve_staff(second, codex)
-        with self.assertRaisesRegex(ValueError, 'resource|conflict'):
+        # This fixture is deliberately not a Git checkout, so separation cannot apply.
+        with patch('teamkit.split_worktree.plan', side_effect=ValueError('git 저장소가 아니라 분리 불가')), \
+             self.assertRaisesRegex(ValueError, 'git 저장소'):
             self.reserve_staff(third, claude)
         self.assertEqual(self.queue.get(third['id'])['attempt_count'], 0)
 

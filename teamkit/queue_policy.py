@@ -130,6 +130,7 @@ def _job_roots(config, job):
 
 
 def _overlap(left, right):
+    # Queue roots carry no read mode: each one is a claimed work area, so this is a write-write overlap.
     a, b = Path(left), Path(right)
     if a == b or a.is_relative_to(b) or b.is_relative_to(a):
         return True

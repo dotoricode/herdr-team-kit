@@ -8,14 +8,18 @@ def empty_input(text, registered_hint=None):
     match=prompts[-1]
     value=match.group(2).strip()
     if value not in ('','Ask Codex to do anything',registered_hint):return False
-    following=next((line for line in text[match.end():].splitlines() if line.strip()),'')
-    if not following:return True
-    if re.fullmatch(r'[─━═-]{3,}',following):return True
-    # Codex has an unframed footer; require its actual percentage/status shape.
-    if match.group(1)!='›':return False
-    footer=r'Context (?:100|[0-9]{1,2})% left(?:\s*·.*)?'
-    short=re.fullmatch(r'\s*'+footer+r'\s*',following)
-    detailed=re.fullmatch(r'\s*GPT-[A-Za-z0-9.-]+[^·\r\n]{0,80}·\s*(?:~|/)[^\r\n]{1,240}·\s*'+footer+r'\s*',following)
-    if not (short or detailed):return False
-    rest=text[match.end():].splitlines();first=next(i for i,line in enumerate(rest) if line.strip())
-    return all(not line.strip() or re.fullmatch(r'\s*(?:[←?/].*for (?:agents|shortcuts).*|⚠[^\r\n]{0,160})',line) for line in rest[first+1:])
+    # Input continuation is adjacent to the prompt. A blank row or frame ends it;
+    # footer wording, model names and paths are not part of that contract.
+    rest=text[match.end():].splitlines()
+    if rest and not rest[0].strip():
+        rest=rest[1:]
+    for index,line in enumerate(rest):
+        if re.fullmatch(r'[─━═-]{3,}',line.strip()):
+            return not any(value.strip() for value in rest[:index])
+    while rest and not rest[-1].strip():rest.pop()
+    if not rest:return True
+    # A native unframed footer is a final one/two-row block separated from
+    # the composer by a blank row. Any preceding content remains a draft.
+    footer=len(rest)-1
+    while footer and rest[footer-1].strip():footer-=1
+    return footer>0 and len(rest)-footer<=2 and not any(value.strip() for value in rest[:footer])

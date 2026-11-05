@@ -84,7 +84,7 @@ def observe(state_or_connection, native_observation=None):
     if not isinstance(observation, dict) or not isinstance(observation.get('terminals'), list):
         raise ResourceUnavailable('observation_invalid', 'HC native observation is unavailable')
     with _connection(state_or_connection) as connection:
-        recorded = {r['attempt'] for r in _reservations(connection) if r['execution_reserved']}
+        recorded = {r['attempt'] for r in _reservations(connection)}
         for task in _tasks(connection):
             runtime = task.get('runtime') or {}
             if task['state'] not in ACTIVE or runtime.get('resource_attempt') in recorded:
@@ -102,7 +102,7 @@ def observe(state_or_connection, native_observation=None):
 
 
 def _legacy_resource_conflicts(connection, ticket, resources):
-    reserved = {r['attempt'] for r in _reservations(connection) if r['writes_held']}
+    reserved = {r['attempt'] for r in _reservations(connection)}
     for task in _tasks(connection):
         if (task['id'] == ticket or task['state'] not in ACTIVE
                 or (task.get('runtime') or {}).get('resource_attempt') in reserved):
@@ -112,7 +112,7 @@ def _legacy_resource_conflicts(connection, ticket, resources):
 
 
 def reserve_in_transaction(connection, attempt, ticket, profile, resources, policy,
-                           native_observation=None, session=None):
+                           native_observation=None, session=None, override_capacity=False, waived=None):
     ledger = ResourceLedger(connection)
     if _has_table(connection, 'operations_admission_policy'):
         enabled, stored_policy = policy_for(None, connection)
@@ -128,7 +128,8 @@ def reserve_in_transaction(connection, attempt, ticket, profile, resources, poli
         raise ResourceUnavailable('previous_execution_unconfirmed', 'a previous execution of this ticket has not stopped')
     _legacy_resource_conflicts(connection, ticket, resources)
     return ledger.reserve_in_transaction(connection, attempt, ticket, profile, resources,
-                                          policy, observe(connection, native_observation), session=session)
+                                          policy, observe(connection, native_observation), session=session,
+                                          override_capacity=override_capacity, waived=waived)
 
 
 def reserve_task(store, task, owner, provider, account, config=None, native_observation=None):
@@ -163,15 +164,36 @@ def native_get(terminal):
     return _call('get', terminal)
 
 
-def _stopped(session, profile):
+def process_dead(pid):
+    if type(pid) is not int or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        pass
+    return False
+
+
+def process_ended(session, native):
+    return bool(session and native.get('address') == session['terminal']
+                and (native.get('state') == 'finished'
+                     or (native.get('foreground') or {}).get('pid') != session['pid'])
+                and process_dead(session.get('pid')))
+
+
+def _stopped(session, profile, native=None):
     if not session:
         return False
     try:
-        native = native_get(session['terminal'])
+        native = native_get(session['terminal']) if native is None else native
+        foreground = native.get('foreground') or {}
+        if process_ended(session, native):
+            return True
         if (native.get('address') != session['terminal']
                 or (native.get('labels') or {}).get('teamkit.owner') != session['owner']):
             return False
-        foreground = native.get('foreground') or {}
         provider = profile.split('/')[0]
         names = ('codex',) if provider == 'codex' else ('claude', 'claude.exe')
         apps = ('codex',) if provider == 'codex' else ('claude', 'claude-code')
@@ -202,14 +224,25 @@ def reconcile_stopped(state_or_connection):
             tasks = {(t.get('runtime') or {}).get('resource_attempt'): t for t in _tasks(connection)}
             for reservation in _reservations(connection):
                 task = tasks.get(reservation['attempt'])
-                if task is None or task['state'] not in STOPPABLE or not _stopped(reservation.get('session'), reservation['profile']):
+                if task is None or not (reservation['execution_reserved'] or reservation['writes_held']):
+                    continue
+                session = reservation.get('session')
+                if not session: continue
+                try: native = native_get(session['terminal'])
+                except Exception: continue
+                ended = process_ended(session, native)
+                if not ended and (task['state'] not in STOPPABLE or not _stopped(session, reservation['profile'], native)):
                     continue
                 runtime = task.get('runtime') or {}
                 has_writes = any(r['mode'] == 'write' for r in reservation['resources'])
-                stopped_writer = runtime.get('resource_writer_stopped') is True or not has_writes
+                stopped_writer = ended or runtime.get('resource_writer_stopped') is True or not has_writes
                 if reservation['execution_reserved'] or reservation['writes_held'] and stopped_writer:
                     ledger.release_in_transaction(connection, reservation['attempt'], True,
                                                    release_writes=stopped_writer, writer_stopped=stopped_writer)
+                    if ended:
+                        row = next(r for r in _reservations(connection) if r['attempt'] == reservation['attempt'])
+                        row['process_end_observation'] = native
+                        ResourceLedger._write(connection, row)
                     released.append(reservation['attempt'])
         return released
 
