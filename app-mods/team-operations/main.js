@@ -55,7 +55,7 @@ export default class TeamOperations extends View {
           .child(title("직원명부"))
           .children(teams.map(team => v_flex().gap(3).p(8).rounded(8).bg(t.surface)
             .child(title(team.label))
-            .child(line(team.employees.length ? team.employees.map(person => `${person.label} · ${roleLabels[person.role] ?? "담당 직원"} · ${person.state}`).join(" / ") : "확인된 직원 신원 없음"))
+            .child(line(team.employees.length ? team.employees.map(person => `${person.label} · ${roleLabels[person.role] ?? "직무 미확인"} · ${person.state} (${person.terminal})`).join(" / ") : "확인된 직원 신원 없음"))
             .child(line(team.identity))))
           .child(title("설정된 프로필"))
           .children((roster?.profiles ?? []).map(profile => line(`${profile.label} · ${profile.provider}/${profile.account}`)))));

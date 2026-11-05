@@ -7,42 +7,61 @@ from pathlib import Path
 import tempfile
 import time
 
-from .app_bridge import bindings, core_read, readonly_snapshot, verified_session
+from .app_bridge import bindings, readonly_snapshot, verified_session, session_read
 from .config import load
 from .knowledge import search
 from .staff import display_name
 
 
+def app_sessions():
+    result=subprocess.run(['herdr-app','ls'],capture_output=True,text=True,timeout=5,check=True)
+    value=json.loads(result.stdout)
+    if not isinstance(value.get('spaces'),list):raise ValueError('App 세션 목록을 확인하지 못했습니다.')
+    return value
+
+
 def snapshot(config_path, state, binding_path):
     config = load(config_path)
     linked = bindings(binding_path, config)
-    observed = core_read()['terminals']
-    terminals = {item['address']:item for item in observed}
-    tasks = readonly_snapshot(state)['tasks']
+    spaces = app_sessions()['spaces']
+    try:tasks = readonly_snapshot(state)['tasks']
+    except (OSError,ValueError):tasks=[]
     aliases = config.get('operations', {}).get('staff_aliases', {})
     teams = []
     for team, policy in config['teams'].items():
         entry = linked['teams'][team]
-        terminal = entry.get('terminal')
-        native = terminals.get(terminal, {})
-        employees=[]
-        for task in tasks:
-            runtime=task.get('runtime') or {}; address=runtime.get('terminal')
-            if task.get('team')!=team or not address or not task.get('owner') or address not in terminals:continue
-            try:verified,status=verified_session(task,address)
-            except (OSError,ValueError,subprocess.SubprocessError):continue
-            if not verified:continue
-            provider,account=task.get('provider'),task.get('account')
-            if account not in config['profiles'].get(provider,{}):continue
-            employees.append({'role':task.get('role'),'provider':provider,'account':account,'terminal':address,
-                'label':display_name(provider,account,product=team,role=task.get('role'),aliases=aliases),
-                'state':status.get('state','unknown')})
-        teams.append({'id':team, 'label':entry.get('label',team), 'space':entry.get('space'),
-                      'terminal':terminal, 'state':native.get('status','미확인'),
-                      'live':native.get('state') == 'live',
-                      'identity':'세션 신원 확인됨' if any(x['terminal']==terminal for x in employees) else '계정·직무 신원 미확인',
-                      'employees':employees,
-                      'roles':[{'role':role,'provider':value.get('provider')} for role,value in policy['roles'].items()]})
+        space=next((item for item in spaces if item['id']==entry.get('space')),None)
+        if space is None:
+            matches=[item for item in spaces if item.get('folder')==policy.get('root')]
+            if len(matches)==1:space=matches[0]
+        employees=[];seen=set()
+        for tab in (space or {}).get('tabs',[]):
+            for item in tab.get('terminals',[]):
+                address=item['terminal']
+                if address in seen or item.get('app') not in ('codex','claude-code'):continue
+                seen.add(address)
+                label=None;verified_task=None
+                try:label=(session_read(address).get('labels') or {}).get('ui.display-name')
+                except (OSError,ValueError,subprocess.SubprocessError):pass
+                for task in tasks:
+                    if task.get('team')!=team or (task.get('runtime') or {}).get('terminal')!=address or not task.get('owner'):continue
+                    try:verified,_status=verified_session(task,address)
+                    except (OSError,ValueError,subprocess.SubprocessError):continue
+                    if verified:verified_task=task;break
+                provider='codex' if item['app']=='codex' else 'claude'
+                account=(verified_task or {}).get('account')
+                if (verified_task or {}).get('provider')!=provider or account not in config['profiles'].get(provider,{}):
+                    account=None;verified_task=None
+                employees.append({'terminal':address,'provider':provider,'account':account,
+                    'role':(verified_task or {}).get('role'),'label':label or f"{tab.get('name','직원')} · {provider}",
+                    'state':item.get('status','unknown'),'identity_verified':verified_task is not None})
+        terminal=entry.get('terminal')
+        if terminal not in seen:terminal=employees[0]['terminal'] if employees else None
+        selected=next((item for item in employees if item['terminal']==terminal),{})
+        teams.append({'id':team,'label':(space or {}).get('name',entry.get('label',team)),
+            'space':(space or {}).get('id'),'terminal':terminal,'state':selected.get('state','미확인'),
+            'live':bool(employees),'identity':'App 화면 기준 · 계정 신원은 별도 확인',
+            'employees':employees,'roles':[{'role':role,'provider':value.get('provider')} for role,value in policy['roles'].items()]})
     profiles = [{'provider':provider,'account':account,'label':display_name(provider,account,aliases=aliases)}
                 for provider,accounts in config['profiles'].items() for account in accounts]
     result = {'observed_at':time.time(),'teams':teams,'profiles':profiles}
