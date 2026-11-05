@@ -147,6 +147,26 @@ class ReReviewFindingTests(unittest.TestCase):
                                        tree=lambda pid: [7, 42], files=lambda pid: [])
             self.assertEqual((got['steps']['done'], got['steps']['total']), (1, 1))
 
+    def test_sidechain_or_failed_todo_in_the_tail_does_not_hide_the_parent_list(self):
+        from unittest.mock import patch
+        for late in ('sidechain', 'failed'):
+            with self.subTest(late=late), tempfile.TemporaryDirectory() as tmp:
+                home = Path(tmp)
+                (home / 'sessions').mkdir()
+                (home / 'sessions' / '42.json').write_text(json.dumps(
+                    {'pid': 42, 'sessionId': 'abc12345-0000-0000-0000-000000000000', 'cwd': '/srv/r'}), encoding='utf-8')
+                filler = {'type': 'user', 'isSidechain': False, 'message': {'content': [{'type': 'text', 'text': 'x' * 1000}]}}
+                parent = claude_use('TodoWrite', {'todos': [{'content': 'Parent', 'status': 'in_progress'}]}, 'p1')
+                child = claude_use('TodoWrite', {'todos': [{'content': 'Child', 'status': 'pending'}]}, 'c1',
+                                   sidechain=(late == 'sidechain'))
+                tail = [child] + ([claude_result('c1', error=True)] if late == 'failed' else [])
+                write_jsonl(home / 'projects' / '-srv-r' / 'abc12345-0000-0000-0000-000000000000.jsonl',
+                            [parent] + [filler] * 20 + tail + [claude_use('Read', {'file_path': '/srv/r/x'}, 'u9')])
+                with patch.object(progress, 'TAIL_BYTES', 3000), patch.object(progress, 'FULL_BYTES', 50000):
+                    got = progress.observe('t9', 7, 'claude-code', 'working', claude_dirs=[home], now=0, cache={},
+                                           tree=lambda pid: [7, 42], files=lambda pid: [])
+                self.assertEqual(got['steps']['current'], 'Parent')
+
 
 if __name__ == '__main__':
     unittest.main()

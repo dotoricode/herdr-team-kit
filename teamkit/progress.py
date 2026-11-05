@@ -162,6 +162,16 @@ def claude_activity(records):
     return activity, list(todos.values())
 
 
+def _resets_todos(records):
+    """Whether the records hold a TodoWrite that claude_activity applies (parent session, not failed)."""
+    failed = {part.get('tool_use_id') for rec in records if not rec.get('isSidechain')
+              for part in ((rec.get('message') or {}).get('content') or [])
+              if isinstance(part, dict) and part.get('type') == 'tool_result' and part.get('is_error')}
+    return any(part.get('type') == 'tool_use' and part.get('name') == 'TodoWrite' and part.get('id') not in failed
+               for rec in records if rec.get('type') == 'assistant' and not rec.get('isSidechain')
+               for part in ((rec.get('message') or {}).get('content') or []) if isinstance(part, dict))
+
+
 def _created_task_id(rec, part):
     result = rec.get('toolUseResult') or rec.get('tool_use_result') or {}
     task = result.get('task') if isinstance(result, dict) else None
@@ -283,8 +293,7 @@ def observe(terminal, pid, app, state, *, claude_dirs=(), steps_dir=None, now, c
             tail = _tail_records(path)
             activity, todos = read(tail)
             # A TodoWrite in the tail replaces the whole list, so the tail alone is current.
-            tail_resets = any(part.get('name') == 'TodoWrite' for rec in tail if rec.get('type') == 'assistant'
-                              for part in ((rec.get('message') or {}).get('content') or []) if isinstance(part, dict))
+            tail_resets = app == 'claude-code' and _resets_todos(tail)
             if activity is None and path.stat().st_size > TAIL_BYTES:
                 activity, todos = read(_tail_records(path, TAIL_BYTES * 8))
             if app == 'claude-code' and not tail_resets and path.stat().st_size > TAIL_BYTES:
