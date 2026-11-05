@@ -39,6 +39,17 @@ def _all_units(config):
     return units
 
 
+def _save_json(target, value):
+    fd, temp = tempfile.mkstemp(prefix=f'.{target.name}-', dir=target.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as out:
+            json.dump(value, out, ensure_ascii=False)
+        os.replace(temp, target)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+
+
 def snapshot(config_path, state, binding_path):
     config = load(config_path)
     linked = bindings(binding_path, config)
@@ -52,6 +63,19 @@ def snapshot(config_path, state, binding_path):
     spaces_cfg = ops.get('spaces', {})
     labels_cfg = ops.get('product_labels', {})
     units = _all_units(config)
+    from . import progress
+    homes = [Path(v['home']) for v in (config.get('profiles', {}).get('claude', {}) or {}).values()
+             if isinstance(v, dict) and v.get('home')]
+    claude_dirs = homes + [Path.home() / '.claude']
+    steps_dir = ops.get('agent_progress_dir')
+    now = time.time()
+    cache_path = Path(state).resolve().parent / 'progress-cache.json'
+    try:
+        progress_cache = json.loads(cache_path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        progress_cache = {}
+    if not isinstance(progress_cache, dict):
+        progress_cache = {}
     teams = []
     for team, policy in units:
         entry = (linked.get('teams', {}) or {}).get(team, {})
@@ -71,6 +95,7 @@ def snapshot(config_path, state, binding_path):
                 seen.add(address)
                 label = None
                 verified_task = None
+                s_info = {}
                 try:
                     s_info = session_read(address)
                     lbls = s_info.get('labels') or {}
@@ -99,7 +124,9 @@ def snapshot(config_path, state, binding_path):
                     'role': (verified_task or {}).get('role'),
                     'label': label or f"{tab.get('name', '직원')} · {provider}",
                     'state': item.get('status', 'unknown'),
-                    'identity_verified': verified_task is not None
+                    'identity_verified': verified_task is not None,
+                    'progress': progress.observe(address, s_info.get('pid'), item['app'], item.get('status'),
+                                                 claude_dirs=claude_dirs, steps_dir=steps_dir, now=now, cache=progress_cache)
                 })
         terminal = entry.get('terminal')
         if terminal not in seen:
@@ -119,6 +146,8 @@ def snapshot(config_path, state, binding_path):
         })
     profiles = [{'provider': provider, 'account': account, 'label': display_name(provider, account, aliases=aliases)}
                 for provider, accounts in config.get('profiles', {}).items() for account in accounts]
+    progress_cache = {k: v for k, v in progress_cache.items() if os.path.exists(k.split('|', 1)[0])}
+    _save_json(cache_path, progress_cache)
     result = {'observed_at': time.time(), 'teams': teams, 'profiles': profiles}
     target = Path(state).resolve().parent / 'knowledge-hub-roster.json'
     fd, temp = tempfile.mkstemp(prefix='.knowledge-hub-roster-', dir=target.parent)

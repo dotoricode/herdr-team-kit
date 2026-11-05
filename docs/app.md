@@ -56,6 +56,8 @@ python3 -m teamkit.hq --state STATE propose --title ... --content ... --metric .
 python3 -m teamkit.hq --state STATE coffee "한 줄 근황" --team TEAM --by 이름
 ```
 
+기본 탭 "진행 현황"은 직원별로 지금 하는 일과 마지막 기록 시각을 보입니다(`teamkit/progress.py`). Claude 세션은 프로필의 `sessions/<pid>.json`에서 대화 기록 파일을 찾고, Codex 세션은 프로세스가 열어 둔 rollout 파일을 찾습니다. 찾지 못한 세션은 추정하지 않고 "진행 기록 연결 안 됨"으로 둡니다. 마지막 도구 호출을 활동으로 보이고, 작업 중인데 10분 넘게 기록이 바뀌지 않으면 멈춤 의심으로 올립니다. 단계 진행은 `operations.agent_progress_dir`의 `agent-progress` 기록, 없으면 대화의 TodoWrite·TaskCreate·TaskUpdate를 재생해 `완료/전체`와 현재 단계로 보입니다. 화면은 차콜 무채색 위에 의미 색 세 가지만 씁니다. 강조색은 실행 중인 앱 테마의 `accent`(선택·행동·작업 중)이고, 나머지는 주의·멈춤과 오류입니다. 배치는 운영 대시보드(Grafana)처럼 같은 폭의 카드 격자로 넓은 화면을 채우고, 좌측 테두리 강조선은 쓰지 않습니다.
+
 대화상자는 앱 overlay로 열어 Esc·바깥 클릭으로 닫히며, 닫는 것만으로 저장하지 않습니다. 15초 조회는 자료나 오류가 바뀔 때만 다시 그립니다. `team-operations.floor|goal|bounty|refresh` 명령으로 탭을 바꾸거나 다시 조회합니다.
 
 ## 승인과 재개

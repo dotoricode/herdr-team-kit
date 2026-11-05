@@ -24,13 +24,25 @@ PROPS_MARK = 'const p = props() ?? {};'
 
 def variants(data):
     teams = [{'id': t['id'], 'label': t['label']} for t in data['roster']['teams']]
-    employee = next((e for t in data['roster']['teams'] for e in t['employees']), {'label': '직원'})
+    employee = dict(next((e for t in data['roster']['teams'] for e in t['employees']), {'label': '직원'}))
+    steps = [{'content': '앱 실행', 'status': 'completed', 'active': ''}, {'content': '화면 비교', 'status': 'in_progress', 'active': '화면 비교 중'},
+             {'content': '보고', 'status': 'pending', 'active': ''}]
+    employee['progress'] = {'linked': True, 'source': 'claude', 'stalled': True, 'last_change': 1.0,
+                            'activity': {'label': '명령 실행', 'detail': 'Run unit tests', 'at': 1.0},
+                            'steps': {'title': 'UI 검증', 'total': 3, 'done': 1, 'current': '화면 비교 중', 'items': steps}}
+    first = data['roster']['teams'][0]['employees'] if data['roster']['teams'] and data['roster']['teams'][0]['employees'] else None
+    if first:
+        first[0] = employee
+        if len(first) > 1:
+            first[1] = dict(first[1], progress={'linked': False, 'source': 'codex', 'stalled': False, 'last_change': None,
+                                                'activity': None, 'steps': employee['progress']['steps']})
     bounty = next((b for b in data['hq']['bounties'] if b['status'] == 'claimed'), {'id': 'x', 'title': '난제'})
-    pages = {f'page-{tab}': {'tab': tab, 'data': data} for tab in ('floor', 'goal', 'bounty')}
+    tabs = ('progress', 'floor', 'goal', 'bounty')
+    pages = {f'page-{tab}': {'tab': tab, 'data': data} for tab in tabs}
     empty = json.loads(json.dumps(data))
     empty['hq'] = {'bounties': [], 'proposals': [], 'coffee': [], 'goal': None, 'tip': None}
     empty['knowledge'] = []
-    pages.update({f'empty-{tab}': {'tab': tab, 'data': empty} for tab in ('floor', 'goal', 'bounty')})
+    pages.update({f'empty-{tab}': {'tab': tab, 'data': empty} for tab in tabs})
     pages['loading'] = {'tab': 'floor', 'data': None}
     dialogs = {f'dialog-{role}': {'props': {'role': role, 'teams': teams, **extra}} for role, extra in (
         ('badge', {'employee': {**employee, 'teamLabel': teams[0]['label'] if teams else ''}}),
