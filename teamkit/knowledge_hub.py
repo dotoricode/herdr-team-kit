@@ -52,6 +52,12 @@ def snapshot(config_path, state, binding_path):
     spaces_cfg = ops.get('spaces', {})
     labels_cfg = ops.get('product_labels', {})
     units = _all_units(config)
+    from . import progress
+    homes = [Path(v['home']) for v in (config.get('profiles', {}).get('claude', {}) or {}).values()
+             if isinstance(v, dict) and v.get('home')]
+    claude_dirs = homes + [Path.home() / '.claude']
+    steps_dir = ops.get('agent_progress_dir')
+    now = time.time()
     teams = []
     for team, policy in units:
         entry = (linked.get('teams', {}) or {}).get(team, {})
@@ -71,6 +77,7 @@ def snapshot(config_path, state, binding_path):
                 seen.add(address)
                 label = None
                 verified_task = None
+                s_info = {}
                 try:
                     s_info = session_read(address)
                     lbls = s_info.get('labels') or {}
@@ -99,7 +106,9 @@ def snapshot(config_path, state, binding_path):
                     'role': (verified_task or {}).get('role'),
                     'label': label or f"{tab.get('name', '직원')} · {provider}",
                     'state': item.get('status', 'unknown'),
-                    'identity_verified': verified_task is not None
+                    'identity_verified': verified_task is not None,
+                    'progress': progress.observe(address, s_info.get('pid'), item['app'], item.get('status'),
+                                                 claude_dirs=claude_dirs, steps_dir=steps_dir, now=now)
                 })
         terminal = entry.get('terminal')
         if terminal not in seen:
