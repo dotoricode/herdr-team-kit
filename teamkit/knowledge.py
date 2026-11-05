@@ -56,7 +56,8 @@ def add_entry(root, team, title, content, request_id=None):
         existing = target.read_text(encoding='utf-8').rstrip() if target.exists() else ''
         digest = hashlib.sha256(f'{team}\0{title}\0{content}'.encode()).hexdigest()[:12]
         mark = f'<!-- request:{request_id}:{digest} -->' if request_id else ''
-        if mark and mark in existing:
+        legacy = f'<!-- request:{request_id} -->' if request_id else ''
+        if mark and (mark in existing or legacy in existing):
             return {'team': team, 'title': title, 'source': str(target), 'updated_at': target.stat().st_mtime, 'repeated': True}
         if mark and f'<!-- request:{request_id}:' in existing:
             raise ValueError('같은 요청이 다른 내용으로 이미 저장됐습니다. 새로고침 후 확인하세요.')

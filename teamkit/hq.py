@@ -102,8 +102,9 @@ def _append_once(root, board, item, request_id, keep=None):
         if request_id is not None:
             done = next((x for x in box['items'] if x.get('request_id') == item['request_id']), None)
             if done is not None:
-                same = lambda x: {k: v for k, v in x.items() if k not in ('id', 'created_at', 'at', 'request_id')}
-                if same(done) != same(item):
+                # Compare only what the request supplied; status, claims and decisions change later.
+                asked = [k for k in item if k not in ('id', 'created_at', 'at', 'request_id', 'status')]
+                if any(done.get(k) != item[k] for k in asked):
                     raise ValueError('같은 요청이 다른 내용으로 이미 저장됐습니다. 새로고침 후 확인하세요.')
                 return done
         box['items'] = box['items'] + [item]

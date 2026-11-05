@@ -215,5 +215,25 @@ class ReReviewFindingTests(unittest.TestCase):
                 add_entry(wiki, 'alpha', '고친 제목', '내용', request_id='k1')
 
 
+class FinalReviewFindingTests(unittest.TestCase):
+    def test_retry_after_claim_or_decision_returns_the_stored_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / 'state.sqlite'
+            first = hq.apply(state, {'op': 'bounty-add', 'request_id': 'r1', 'title': '난제'})
+            hq.claim_bounty(hq.board_root(state), first['id'], '민과장')
+            again = hq.apply(state, {'op': 'bounty-add', 'request_id': 'r1', 'title': '난제'})
+            self.assertEqual((again['id'], again['status']), (first['id'], 'claimed'))
+            prop = hq.apply(state, {'op': 'propose', 'request_id': 'p1', 'title': '제안', 'content': '내용', 'by': 'a'})
+            hq.decide_proposal(hq.board_root(state), prop['id'], '채택')
+            self.assertEqual(hq.apply(state, {'op': 'propose', 'request_id': 'p1', 'title': '제안', 'content': '내용', 'by': 'a'})['status'], '채택')
+
+    def test_legacy_request_mark_without_digest_counts_as_repeat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = Path(tmp) / 'alpha.md'
+            doc.write_text('# ALPHA · 제목\n\n내용\n\n기록일자: 2026-11-05\n<!-- request:k1 -->\n', encoding='utf-8')
+            self.assertTrue(add_entry(tmp, 'alpha', '제목', '내용', request_id='k1').get('repeated'))
+            self.assertEqual(doc.read_text(encoding='utf-8').count('제목'), 1)
+
+
 if __name__ == '__main__':
     unittest.main()
