@@ -850,7 +850,7 @@ def main():
         elif args.action == 'knowledge-add':
             from .knowledge import add_entry
             from .knowledge_hub import knowledge_root
-            result = add_entry(knowledge_root(load(args.config)), args.team or 'common', args.title, args.content or '')
+            result = add_entry(knowledge_root(load(args.config)), args.team or 'common', args.title, args.content or '', args.request_id)
         elif args.action == 'hq-action':
             from .hq import apply as hq_apply
             result = hq_apply(args.state, json.loads(args.send_json or '{}'))

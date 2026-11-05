@@ -1,7 +1,11 @@
 """Read and append the local knowledge hub's Markdown documents."""
 import argparse
+import fcntl
 import json
+import os
 from pathlib import Path
+import re
+import tempfile
 import time
 
 
@@ -14,7 +18,7 @@ def search(root, query=''):
     for path in root.glob('*.md'):
         if path.name == 'README.md':
             continue
-        text = path.read_text(encoding='utf-8')
+        text = REQUEST_MARK.sub('', path.read_text(encoding='utf-8'))
         lines = text.splitlines()
         if not lines or not lines[0].startswith('# '):
             continue
@@ -25,22 +29,44 @@ def search(root, query=''):
     return sorted(entries, key=lambda item: (-item['updated_at'], item['title']))
 
 
-def add_entry(root, team, title, content):
+REQUEST_MARK = re.compile(r'^<!-- request:[0-9A-Za-z-]{1,64} -->\n?', re.M)
+
+
+def add_entry(root, team, title, content, request_id=None):
+    """Append one note under a lock; a repeated request_id returns without writing again."""
     from .hq import team_id, _clean
     team = team_id(team, required=True)
     title = _clean(title, '제목', 120)
-    root = Path(root).expanduser()
-    if not root.is_dir():
-        root.mkdir(parents=True, exist_ok=True)
-    target = root / f'{team}.md'
-    today = time.strftime('%Y-%m-%d')
     content = _clean(content, '내용', 2000, required=False, one_line=False)
-    if target.exists():
-        existing = target.read_text(encoding='utf-8').rstrip()
-        text = f"{existing}\n\n### {title} ({today})\n\n{content}\n"
-    else:
-        text = f"# {team.upper()} · {title}\n\n{content}\n\n기록일자: {today}\n"
-    target.write_text(text, encoding='utf-8')
+    if request_id is not None and not re.fullmatch(r'[0-9A-Za-z-]{1,64}', str(request_id)):
+        raise ValueError('요청 ID 형식이 올바르지 않습니다.')
+    root = Path(root).expanduser()
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / f'{team}.md'
+    with open(root / '.knowledge.lock', 'a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if target.is_symlink() or (target.exists() and target.resolve().parent != root.resolve()):
+            raise ValueError('지식 문서가 링크이거나 지식 폴더 밖에 있어 쓰지 않습니다.')
+        existing = target.read_text(encoding='utf-8').rstrip() if target.exists() else ''
+        mark = f'<!-- request:{request_id} -->' if request_id else ''
+        if mark and mark in existing:
+            return {'team': team, 'title': title, 'source': str(target), 'updated_at': target.stat().st_mtime, 'repeated': True}
+        today = time.strftime('%Y-%m-%d')
+        tail = f'\n{mark}' if mark else ''
+        if existing:
+            text = f"{existing}\n\n### {title} ({today})\n\n{content}{tail}\n"
+        else:
+            text = f"# {team.upper()} · {title}\n\n{content}\n\n기록일자: {today}{tail}\n"
+        fd, temp = tempfile.mkstemp(prefix=f'.{team}-', suffix='.md', dir=root)
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as out:
+                out.write(text)
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(temp, target)
+        finally:
+            if os.path.exists(temp):
+                os.unlink(temp)
     return {'team': team, 'title': title, 'source': str(target), 'updated_at': target.stat().st_mtime}
 
 

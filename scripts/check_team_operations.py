@@ -34,7 +34,8 @@ def variants(data):
     pages['loading'] = {'tab': 'floor', 'data': None}
     dialogs = {f'dialog-{role}': {'props': {'role': role, 'teams': teams, **extra}} for role, extra in (
         ('badge', {'employee': {**employee, 'teamLabel': teams[0]['label'] if teams else ''}}),
-        ('gotcha', {}), ('bounty', {}), ('coffee', {}), ('resolve', {'item': bounty}), ('unknown', {}))}
+        ('gotcha', {}), ('bounty', {}), ('coffee', {}), ('resolve', {'item': bounty}),
+        ('doc', {'doc': {'title': '문서', 'body': '# 제목\n\n본문\n\n### 최근 항목 (2026-11-05)\n\n내용'}}), ('unknown', {}))}
     return {**pages, **dialogs}
 
 
@@ -55,7 +56,8 @@ def unknown_chain_methods(source, types):
     code = re.sub(r'//[^\n]*', '', source)
     code = re.sub(r'"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`', '""', code)
     builtin = {'map', 'filter', 'slice', 'join', 'split', 'trim', 'toLowerCase', 'flatMap', 'sort', 'then', 'catch',
-               'match', 'pop', 'padStart', 'includes', 'find', 'some', 'every', 'reduce', 'concat', 'toString'}
+               'match', 'pop', 'padStart', 'includes', 'find', 'some', 'every', 'reduce', 'concat', 'toString',
+               'indexOf', 'lastIndexOf', 'replace', 'toUpperCase', 'startsWith', 'endsWith'}
     found = {}
     for match in re.finditer(r'\)\s*\.([A-Za-z_]\w*)\s*\(', code):
         name = match.group(1)

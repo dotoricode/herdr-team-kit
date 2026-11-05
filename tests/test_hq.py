@@ -136,7 +136,58 @@ class KnowledgeEntryTests(unittest.TestCase):
                 add_entry(tmp, '../../outside', '제목', '내용')
             entry = add_entry(tmp, 'alpha', '제목\n# 가짜 제목', '내용')
             self.assertEqual(entry['title'], '제목 # 가짜 제목')
-            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ['alpha.md'])
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir() if not p.name.startswith('.')), ['alpha.md'])
+
+
+class ReviewFindingTests(unittest.TestCase):
+    def test_concurrent_knowledge_adds_keep_both_entries(self):
+        import threading
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            add_entry(tmp, 'alpha', '처음', '본문')
+            barrier = threading.Barrier(2, timeout=2)
+            real = Path.read_text
+            def slow_read(self, *a, **k):
+                text = real(self, *a, **k)
+                if self.name == 'alpha.md':
+                    try:
+                        barrier.wait()
+                    except threading.BrokenBarrierError:
+                        pass
+                return text
+            with patch.object(Path, 'read_text', slow_read):
+                threads = [threading.Thread(target=add_entry, args=(tmp, 'alpha', f'동시 {n}', '내용')) for n in (1, 2)]
+                [t.start() for t in threads]
+                [t.join() for t in threads]
+            text = (Path(tmp) / 'alpha.md').read_text(encoding='utf-8')
+            self.assertIn('동시 1', text)
+            self.assertIn('동시 2', text)
+
+    def test_knowledge_add_refuses_symlinked_team_document(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wiki = Path(tmp) / 'wiki'
+            wiki.mkdir()
+            outside = Path(tmp) / 'outside.md'
+            outside.write_text('# 바깥\n', encoding='utf-8')
+            (wiki / 'alpha.md').symlink_to(outside)
+            with self.assertRaises(ValueError):
+                add_entry(wiki, 'alpha', '제목', '내용')
+            self.assertEqual(outside.read_text(encoding='utf-8'), '# 바깥\n')
+
+    def test_same_request_id_never_adds_twice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / 'state.sqlite'
+            for op, fields in (('bounty-add', {'title': '난제'}), ('propose', {'title': '제안', 'content': '내용', 'by': 'a'}),
+                               ('coffee', {'text': '근황', 'by': 'a'})):
+                first = hq.apply(state, {'op': op, 'request_id': 'r1', **fields})
+                again = hq.apply(state, {'op': op, 'request_id': 'r1', **fields})
+                self.assertEqual(first['id'], again['id'])
+            board = hq.view(state)
+            self.assertEqual([len(board[k]) for k in ('bounties', 'proposals', 'coffee')], [1, 1, 1])
+            wiki = Path(tmp) / 'wiki'
+            add_entry(wiki, 'alpha', '제목', '내용', request_id='k1')
+            add_entry(wiki, 'alpha', '제목', '내용', request_id='k1')
+            self.assertEqual((wiki / 'alpha.md').read_text(encoding='utf-8').count('제목'), 1)
 
 
 if __name__ == '__main__':

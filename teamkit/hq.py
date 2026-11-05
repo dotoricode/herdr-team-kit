@@ -92,11 +92,28 @@ def _find(items, item_id):
     return item
 
 
+def _append_once(root, board, item, request_id, keep=None):
+    """Add item unless this request_id was already stored: a retry after an unknown outcome never adds twice."""
+    if request_id is not None:
+        if not re.fullmatch(r'[0-9A-Za-z-]{1,64}', str(request_id)):
+            raise ValueError('요청 ID 형식이 올바르지 않습니다.')
+        item['request_id'] = str(request_id)
+    with _locked(root, board) as box:
+        if request_id is not None:
+            done = next((x for x in box['items'] if x.get('request_id') == item['request_id']), None)
+            if done is not None:
+                return done
+        box['items'] = box['items'] + [item]
+        if keep:
+            box['items'] = box['items'][-keep:]
+    return item
+
+
 def _new_id():
     return uuid.uuid4().hex[:8]
 
 
-def add_bounty(root, title, detail='', team='', points=0, by='사용자', now=None):
+def add_bounty(root, title, detail='', team='', points=0, by='사용자', now=None, request_id=None):
     points = int(points or 0)
     if not 0 <= points <= 100000:
         raise ValueError('현상금은 0~100000 사이여야 합니다.')
@@ -104,9 +121,7 @@ def add_bounty(root, title, detail='', team='', points=0, by='사용자', now=No
             'detail': _clean(detail, '내용', LIMITS['text'], required=False, one_line=False),
             'team': team_id(team), 'points': points, 'status': 'open',
             'created_by': _clean(by, '등록자', LIMITS['name']), 'created_at': now or time.time()}
-    with _locked(root, 'bounties') as box:
-        box['items'].append(item)
-    return item
+    return _append_once(root, 'bounties', item, request_id)
 
 
 def claim_bounty(root, item_id, by, now=None):
@@ -139,16 +154,14 @@ def release_bounty(root, item_id):
     return item
 
 
-def add_proposal(root, title, content, metric='', hypothesis='', team='', by='사용자', now=None):
+def add_proposal(root, title, content, metric='', hypothesis='', team='', by='사용자', now=None, request_id=None):
     item = {'id': _new_id(), 'title': _clean(title, '제목', LIMITS['title']),
             'content': _clean(content, '내용', LIMITS['text'], one_line=False),
             'metric': _clean(metric, '기여 지표', LIMITS['title'], required=False),
             'hypothesis': _clean(hypothesis, '가설', LIMITS['text'], required=False, one_line=False),
             'team': team_id(team), 'status': '대기',
             'proposed_by': _clean(by, '제안자', LIMITS['name']), 'created_at': now or time.time()}
-    with _locked(root, 'proposals') as box:
-        box['items'].append(item)
-    return item
+    return _append_once(root, 'proposals', item, request_id)
 
 
 def decide_proposal(root, item_id, status, note='', now=None):
@@ -161,12 +174,10 @@ def decide_proposal(root, item_id, status, note='', now=None):
     return item
 
 
-def post_coffee(root, text, team='', by='사용자', now=None):
+def post_coffee(root, text, team='', by='사용자', now=None, request_id=None):
     item = {'id': _new_id(), 'text': _clean(text, '근황', 200), 'team': team_id(team),
             'by': _clean(by, '작성자', LIMITS['name']), 'at': now or time.time()}
-    with _locked(root, 'coffee') as box:
-        box['items'] = (box['items'] + [item])[-COFFEE_KEEP:]
-    return item
+    return _append_once(root, 'coffee', item, request_id, keep=COFFEE_KEEP)
 
 
 def _cells(line):

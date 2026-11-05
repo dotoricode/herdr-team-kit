@@ -28,6 +28,24 @@ const ago = seconds => {
 };
 const bump = () => setShared(REV, Date.now());
 
+// What a knowledge card shows: the passage around a search match, otherwise the newest
+// "###" note (notes are appended at the end, so the head of the file is the oldest part).
+function excerpt(body, query) {
+  const text = String(body ?? "");
+  const parts = text.split(/^###\s+/m);
+  const flat = s => s.replace(/\s+/g, " ").trim();
+  if (query) {
+    const at = text.toLowerCase().indexOf(query);
+    if (at >= 0) return { heading: "", text: flat(text.slice(Math.max(0, at - 60), at + 200)) };
+  }
+  if (parts.length > 1) {
+    const last = parts[parts.length - 1];
+    const cut = last.indexOf("\n");
+    return { heading: `최근: ${flat(cut < 0 ? last : last.slice(0, cut))}`, text: flat(cut < 0 ? "" : last.slice(cut)).slice(0, 220) };
+  }
+  return { heading: "", text: flat(text.split("\n").slice(1).join(" ")).slice(0, 220) };
+}
+
 async function loadConfig() {
   return JSON.parse(await readTextFile(appHome() + "/mods/team-operations/local.json"));
 }
@@ -86,6 +104,8 @@ class Dialog {
     this.busy = false;
     this.team = p.team ?? "";
     this.points = 300;
+    // One id per dialog: a retry after an unknown outcome reuses it, and the store keeps one copy.
+    this.requestId = Array.from({ length: 16 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
     this.title = InputState.new({ placeholder: p.titleHint ?? "제목" });
     this.body = TextareaState.new({ placeholder: p.bodyHint ?? "내용", rows: 4 });
   }
@@ -143,21 +163,29 @@ class Dialog {
       v_flex().gap(10).child(this.teamPicker(t, true)).child(this.field(t, "제목", Input.new(this.title)))
         .child(this.field(t, "내용", Textarea.new(this.body))),
       "위키에 저장", cx => this.submit(cx, config => bridge(config, ["knowledge-add", "--team", this.team || "common",
-        "--title", this.title.value(), "--content", this.body.value()])));
+        "--title", this.title.value(), "--content", this.body.value(), "--request-id", this.requestId])));
     if (p.role === "bounty") return this.frame(t, "현상금 걸기", "유휴 직원이 `python3 -m teamkit.hq bounty-claim`으로 맡습니다.",
       v_flex().gap(10).child(this.teamPicker(t, false)).child(this.field(t, "난제", Input.new(this.title)))
         .child(this.field(t, "재현 조건·완료 기준", Textarea.new(this.body)))
         .child(h_flex().gap(4).items_center().child(div().text_size(13).font_semibold().mr(4).child("현상금"))
           .children([100, 300, 500, 1000].map(n => chip(t, `pts-${n}`, `${n}pt`, this.points === n, cx => { this.points = n; cx.notify(); })))),
       "현상금 걸기", cx => this.submit(cx, config => hqAction(config, { op: "bounty-add", title: this.title.value(),
-        detail: this.body.value(), team: this.team, points: this.points, by: "사용자" })));
+        detail: this.body.value(), team: this.team, points: this.points, by: "사용자", request_id: this.requestId })));
     if (p.role === "coffee") return this.frame(t, "커피타임 근황", "24시간 동안 커피타임에 보입니다.",
       v_flex().gap(10).child(this.teamPicker(t, false)).child(this.field(t, "한 줄 근황", Input.new(this.title))),
-      "남기기", cx => this.submit(cx, config => hqAction(config, { op: "coffee", text: this.title.value(), team: this.team, by: "사용자" })));
+      "남기기", cx => this.submit(cx, config => hqAction(config, { op: "coffee", text: this.title.value(), team: this.team, by: "사용자", request_id: this.requestId })));
     if (p.role === "resolve") return this.frame(t, "현상금 해결 기록", p.item?.title ?? "",
       v_flex().gap(10).child(this.field(t, "해결 내용과 근거", Textarea.new(this.body))),
       "해결로 기록", cx => this.submit(cx, config => hqAction(config, { op: "bounty-resolve", item_id: p.item.id,
         by: p.item.claimed_by || "사용자", note: this.body.value() })));
+    if (p.role === "doc") return v_flex().size_full().min_h(0).p(16).gap(10).bg(t.surface).text_color(t.foreground)
+      .child(h_flex().flex_none().items_center().justify_between()
+        .child(div().font_bold().text_size(17).truncate().child(p.doc?.title ?? "문서"))
+        .child(button(t, "doc-close", "닫기", () => this.close())))
+      .child(v_flex().flex_1().min_h(0).gap(6).overflow_y_scrollbar()
+        .children(String(p.doc?.body ?? "").split("\n").map((line, i) => div().id(`doc-line-${i}`).text_size(14)
+          .when(line.startsWith("#"), el => el.font_bold().pt(6))
+          .child(line.replace(/^#+\s*/, "") || " "))));
     return empty(t, `알 수 없는 대화상자: ${p.role}`);
   }
 
@@ -484,10 +512,16 @@ export default class TeamOperations extends View {
         .child(Input.new(this.search).w_full().text_size(14)))
       .child(v_flex().flex_1().min_h(0).gap(6).overflow_y_scrollbar()
         .when(!items.length, el => el.child(empty(t, q ? "검색 결과가 없습니다." : "지식 문서가 없습니다.")))
-        .children(items.map(x => v_flex().id(`kn-${x.team}`).w_full().p(8).gap(2).rounded(6).bg(t.raised)
-          .child(h_flex().gap(6).items_center()
-            .child(div().size(6).rounded_full().bg(color(x.team)))
-            .child(div().font_bold().text_size(13).truncate().child(x.title)))
-          .child(div().text_size(13).text_color(t.muted).child(x.body.split("\n").slice(1).join(" ").trim().slice(0, 220))))));
+        .children(items.map(x => {
+          const shown = excerpt(x.body, q);
+          return v_flex().id(`kn-${x.team}`).w_full().p(8).gap(2).rounded(6).bg(t.raised).cursor_pointer()
+            .hover(s => s.opacity(0.85))
+            .on_click(() => this.open("doc", { doc: { title: x.title, body: x.body } }, { width: 0.6, height: 0.75 }))
+            .child(h_flex().gap(6).items_center()
+              .child(div().size(6).rounded_full().flex_none().bg(color(x.team)))
+              .child(div().font_bold().text_size(13).truncate().child(x.title)))
+            .when(Boolean(shown.heading), el => el.child(div().text_size(12).font_semibold().truncate().child(shown.heading)))
+            .child(div().text_size(13).text_color(t.muted).child(shown.text));
+        })));
   }
 }
