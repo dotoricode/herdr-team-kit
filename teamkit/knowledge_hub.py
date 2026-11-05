@@ -134,8 +134,20 @@ def snapshot(config_path, state, binding_path):
     return result
 
 
+def knowledge_root(config):
+    ops = config.get('operations', {}) if isinstance(config.get('operations'), dict) else {}
+    root = ops.get('knowledge_root')
+    if not root:
+        raise ValueError('config의 operations.knowledge_root(지식 문서 폴더)를 설정하세요.')
+    return Path(root).expanduser()
+
+
 def view(config_path, state, binding_path):
+    from . import hq
+    root = knowledge_root(load(config_path))
+    knowledge = search(root)
     return {
         'roster': snapshot(config_path, state, binding_path),
-        'knowledge': search(Path.home() / '00_work/05_docs/wiki')
+        'knowledge': knowledge,
+        'hq': hq.view(state, root, knowledge)
     }

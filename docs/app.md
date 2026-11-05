@@ -40,6 +40,26 @@ herdr-app shot /tmp/team-operations.png
 
 초기 검사만으로 비동기 상태나 실제 화면을 검증했다고 쓰지 않습니다. 기본 layout/mod를 변경할 때는 복제본을 사용합니다. `lab-rich` 등 사용자 테마는 mod의 `theme()` 색으로 따릅니다.
 
+`herdr-app check`는 비동기 자료가 오기 전 첫 화면만 그립니다. `scripts/check_team_operations.py FIXTURE.json`은 `knowledge-hub` 출력 견본을 넣은 화면(부서·목표·현상금, 빈 자료, 로딩)과 대화상자를 각각 check하고, gpui-kit에 선언되지 않은 요소 메서드를 찾습니다. 견본은 실제 출력을 저장해 만들고 저장소에 넣지 않습니다.
+
+## 종합상황실
+
+`team-operations`는 부서 현황, 공통 목표와 제안함, 현상금 보드, 커피타임, 지식 허브를 한 화면에 보입니다. 설정의 `operations.knowledge_root`에 지식 문서 폴더를 지정합니다. 이 폴더의 `GOAL-BRIEF.md`는 goal-setting 스킬의 목표 브리프 형식으로 읽고, 없으면 작성 안내를 표시합니다.
+
+현상금·제안·커피타임 기록은 작업 기록(`--state`) 옆 `hq/` 폴더의 JSON에 잠금과 원자적 교체로 저장합니다. 에이전트는 다음 명령을 사용합니다. 제안의 채택·보류는 앱에서 사용자만 결정하며 CLI에는 없습니다.
+
+```sh
+python3 -m teamkit.hq --state STATE list
+python3 -m teamkit.hq --state STATE bounty-claim ID --by 이름
+python3 -m teamkit.hq --state STATE bounty-resolve ID --by 이름 --note "원인과 근거"
+python3 -m teamkit.hq --state STATE propose --title ... --content ... --metric ... --by 이름
+python3 -m teamkit.hq --state STATE coffee "한 줄 근황" --team TEAM --by 이름
+```
+
+대화상자는 앱 overlay로 열어 Esc·바깥 클릭으로 닫히며, 닫는 것만으로 저장하지 않습니다. 15초 조회는 자료나 오류가 바뀔 때만 다시 그립니다. `team-operations.floor|goal|bounty|refresh` 명령으로 탭을 바꾸거나 다시 조회합니다.
+
+아래 운영 바·작업 보드·카드 절은 `c0b6d89` 이전 운영 보드의 설명입니다. 그 화면 코드는 이 저장소에서 삭제되었고, 설치된 `team-overview` 사본에만 남아 있습니다.
+
 ## 승인과 재개
 
 설계 읽기는 plan과 contract의 범위·필수 조건·완료 단계를 함께 표시합니다. 승인은 선택한 revision/digest와 현재 파일을 트랜잭션 안에서 대조하고 명시적인 확인을 요구합니다. 승인 버튼이 구현을 자동 배정하지는 않습니다.

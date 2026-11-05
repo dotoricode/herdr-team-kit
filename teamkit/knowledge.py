@@ -26,12 +26,15 @@ def search(root, query=''):
 
 
 def add_entry(root, team, title, content):
+    from .hq import team_id, _clean
+    team = team_id(team, required=True)
+    title = _clean(title, '제목', 120)
     root = Path(root).expanduser()
     if not root.is_dir():
         root.mkdir(parents=True, exist_ok=True)
     target = root / f'{team}.md'
     today = time.strftime('%Y-%m-%d')
-    content = content.strip()
+    content = _clean(content, '내용', 2000, required=False, one_line=False)
     if target.exists():
         existing = target.read_text(encoding='utf-8').rstrip()
         text = f"{existing}\n\n### {title} ({today})\n\n{content}\n"
@@ -43,7 +46,7 @@ def add_entry(root, team, title, content):
 
 def main():
     parser = argparse.ArgumentParser(description='로컬 지식 문서 조회 및 추가')
-    parser.add_argument('--wiki', default=str(Path.home() / '00_work/05_docs/wiki'))
+    parser.add_argument('--wiki', required=True, help='지식 문서 폴더')
     parser.add_argument('--add', action='store_true', help='새 주의사항 추가')
     parser.add_argument('--team', default='', help='대상 부서/팀 식별자')
     parser.add_argument('--title', default='', help='주의사항 제목')
