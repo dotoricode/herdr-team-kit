@@ -129,5 +129,24 @@ class ReviewFindingTests(unittest.TestCase):
             self.assertTrue(cache)
 
 
+class ReReviewFindingTests(unittest.TestCase):
+    def test_latest_todo_list_wins_in_a_transcript_longer_than_the_replay_limit(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / 'sessions').mkdir()
+            (home / 'sessions' / '42.json').write_text(json.dumps(
+                {'pid': 42, 'sessionId': 'abc12345-0000-0000-0000-000000000000', 'cwd': '/srv/r'}), encoding='utf-8')
+            filler = {'type': 'user', 'isSidechain': False, 'message': {'content': [{'type': 'text', 'text': 'x' * 1000}]}}
+            todo = lambda status, use: claude_use('TodoWrite', {'todos': [{'content': 'A', 'status': status}]}, use)
+            write_jsonl(home / 'projects' / '-srv-r' / 'abc12345-0000-0000-0000-000000000000.jsonl',
+                        [todo('pending', 'w1')] + [filler] * 60 + [todo('completed', 'w2')] + [filler] * 20
+                        + [claude_use('Read', {'file_path': '/srv/r/x'}, 'u9')])
+            with patch.object(progress, 'TAIL_BYTES', 10000), patch.object(progress, 'FULL_BYTES', 50000):
+                got = progress.observe('t9', 7, 'claude-code', 'working', claude_dirs=[home], now=0, cache={},
+                                       tree=lambda pid: [7, 42], files=lambda pid: [])
+            self.assertEqual((got['steps']['done'], got['steps']['total']), (1, 1))
+
+
 if __name__ == '__main__':
     unittest.main()

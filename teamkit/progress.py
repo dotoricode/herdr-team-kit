@@ -73,7 +73,8 @@ def codex_transcript(pids, files=open_files):
     return None
 
 
-def _tail_records(path, limit=TAIL_BYTES):
+def _tail_records(path, limit=None):
+    limit = limit or TAIL_BYTES
     with open(path, 'rb') as handle:
         handle.seek(0, os.SEEK_END)
         size = handle.tell()
@@ -245,18 +246,20 @@ TODO_MARKS = tuple(f'"name":"{name}"'.encode() for name in TODO_TOOLS) + tuple(f
 
 
 def full_todos(path, cache=None):
-    """Replay the whole transcript for its todo list: lists can be older than the tail.
-    Cached by path, size and mtime so an unchanged file is not read again."""
+    """Replay the newest FULL_BYTES of the transcript for its todo list: lists can be older
+    than the tail. Cached by path, size and mtime so an unchanged file is not read again."""
     stat = path.stat()
     key = f'{path}|{stat.st_size}|{stat.st_mtime_ns}'
     if cache is not None and key in cache:
         return cache[key]
     with open(path, 'rb') as handle:
-        data = handle.read(FULL_BYTES)
+        handle.seek(max(0, stat.st_size - FULL_BYTES))
+        data = handle.read()
     todos = []
     if any(mark in data for mark in TODO_MARKS):
         records = []
-        for line in data.decode('utf-8', errors='replace').splitlines():
+        lines = data.decode('utf-8', errors='replace').splitlines()
+        for line in (lines[1:] if stat.st_size > FULL_BYTES else lines):
             try:
                 records.append(json.loads(line))
             except ValueError:
@@ -277,10 +280,14 @@ def observe(terminal, pid, app, state, *, claude_dirs=(), steps_dir=None, now, c
     if path:
         try:
             read = claude_activity if app == 'claude-code' else codex_activity
-            activity, todos = read(_tail_records(path))
+            tail = _tail_records(path)
+            activity, todos = read(tail)
+            # A TodoWrite in the tail replaces the whole list, so the tail alone is current.
+            tail_resets = any(part.get('name') == 'TodoWrite' for rec in tail if rec.get('type') == 'assistant'
+                              for part in ((rec.get('message') or {}).get('content') or []) if isinstance(part, dict))
             if activity is None and path.stat().st_size > TAIL_BYTES:
                 activity, todos = read(_tail_records(path, TAIL_BYTES * 8))
-            if app == 'claude-code' and path.stat().st_size > TAIL_BYTES:
+            if app == 'claude-code' and not tail_resets and path.stat().st_size > TAIL_BYTES:
                 todos = full_todos(path, cache)
             changed = path.stat().st_mtime
         except OSError:
